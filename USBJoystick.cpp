@@ -99,9 +99,9 @@ uint8_t * USBJoystick::reportDesc()
              LOGICAL_MINIMUM(1), 0x81,   // each value ranges -127...
              LOGICAL_MAXIMUM(1), 0x7f,   // ...to 127
              REPORT_SIZE(1), 0x08,       // 8 bits per report
-             REPORT_COUNT(1), 0x03,      // 3 reports
+             REPORT_COUNT(1), 0x03,      // 2 reports
              INPUT(1), 0x02,             // Data, Variable, Absolute
-        
+
              REPORT_COUNT(1), 0x08,      // input report count (LEDWiz messages)
              0x09, 0x01,                 // usage
              0x91, 0x01,                 // Output (array)

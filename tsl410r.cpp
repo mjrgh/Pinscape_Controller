@@ -1,7 +1,7 @@
 #include "mbed.h"
-#include "tls1410r.h"
+#include "tsl1410r.h"
 
-TLS1410R::TLS1410R(PinName siPort, PinName clockPort, PinName aoPort)
+TSL1410R::TSL1410R(PinName siPort, PinName clockPort, PinName aoPort)
     : si(siPort), clock(clockPort), ao(aoPort)
 {
     // clear out power-on noise by clocking through all pixels twice
@@ -9,7 +9,7 @@ TLS1410R::TLS1410R(PinName siPort, PinName clockPort, PinName aoPort)
     clear();
 }
 
-void TLS1410R::clear()
+void TSL1410R::clear()
 {
     // clock in an SI pulse
     si = 1;
@@ -24,7 +24,7 @@ void TLS1410R::clear()
     }
 }
 
-void TLS1410R::read(uint16_t *pix, int n, int integrate_us)
+void TSL1410R::read(uint16_t *pix, int n, int integrate_us)
 {
     // Start an integration cycle - pulse SI, then clock all pixels.  The
     // CCD will integrate light starting 18 clocks after the SI pulse, and
@@ -55,14 +55,14 @@ void TLS1410R::read(uint16_t *pix, int n, int integrate_us)
     for (int src = 0, dst = 0 ; src < nPix ; ++src)
     {
         // read this pixel
-        pix[dst++] = ao;
+        pix[dst++] = ao.read_u16();
         
         // clock in the next pixel
         clock = 1;
         clock = 0;
         
         // clock skipped pixels
-        for (int i = 0 ; i < skip ; ++i) {
+        for (int i = 0 ; i < skip ; ++i, ++src) {
             clock = 1;
             clock = 0;
         }

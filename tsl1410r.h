@@ -1,20 +1,20 @@
 /*
- *  TLS1410R interface class.
+ *  TSL1410R interface class.
  *
- *  This provides a high-level interface for the Taos TLS1410R linear CCD array sensor.
+ *  This provides a high-level interface for the Taos TSL1410R linear CCD array sensor.
  */
  
  #include "mbed.h"
  
- #ifndef TLS1410R_H
- #define TLS1410R_H
+ #ifndef TSL1410R_H
+ #define TSL1410R_H
  
-class TLS1410R
+class TSL1410R
 {
 public:
     // set up with the two DigitalOut ports (SI and clock), and the
     // analog in port for reading the currently selected pixel value
-    TLS1410R(PinName siPort, PinName clockPort, PinName aoPort);
+    TSL1410R(PinName siPort, PinName clockPort, PinName aoPort);
 
     // Integrate light and read the pixels.  Fills in pix[] with the pixel values,
     // scaled 0-0xffff.  n is the number of pixels to read; if this is less than
@@ -38,4 +38,4 @@ private:
     AnalogIn ao;
 };
  
-#endif /* TLS1410R_H */
+#endif /* TSL1410R_H */
