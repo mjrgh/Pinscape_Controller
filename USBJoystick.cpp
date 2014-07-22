@@ -42,7 +42,7 @@ bool USBJoystick::update() {
    report.data[4] = _z & 0xff;
    report.length = 5; 
  
-   return send(&report);
+   return sendNB(&report);
 }
  
 bool USBJoystick::move(int16_t x, int16_t y) {

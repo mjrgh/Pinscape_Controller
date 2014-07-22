@@ -79,10 +79,9 @@ MMA8451Q::MMA8451Q(PinName sda, PinName scl, int addr) : m_i2c(sda, scl), m_addr
     uint8_t d4[2] = {REG_CTRL_REG_2, (d3[0] & ~MODS_MASK) | MODS1_MASK};
     writeRegs(d4, 2);
     
-    // set 50 Hz mode
+    // set 100 Hz mode
     uint8_t d5[1];
     readRegs(REG_CTRL_REG_1, d5, 1);
-    
     uint8_t d6[2] = {REG_CTRL_REG_1, (d5[0] & ~DR_MASK) | DR_100_HZ};
     writeRegs(d6, 2);
     

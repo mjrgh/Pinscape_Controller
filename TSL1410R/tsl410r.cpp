@@ -18,36 +18,20 @@ void TSL1410R::clear()
     si = 0;
     
     // clock out all pixels
-    for (int i = 0 ; i < nPix+1 ; ++i) {
+    for (int i = 0 ; i < nPix + 1 ; ++i) {
         clock = 1;
         clock = 0;
     }
 }
 
-void TSL1410R::read(uint16_t *pix, int n, int integrate_us)
+void TSL1410R::read(uint16_t *pix, int n)
 {
-    // Start an integration cycle - pulse SI, then clock all pixels.  The
-    // CCD will integrate light starting 18 clocks after the SI pulse, and
-    // continues integrating until the next SI pulse, which cannot occur
-    // until all pixels have been clocked.
+    // Start the next integration cycle by pulsing SI and one clock.
     si = 1;
     clock = 1;
     clock = 0;
     si = 0;
-    for (int i = 0 ; i < nPix+1 ; ++i) {
-        clock = 1;
-        clock = 0;
-    }
         
-    // delay by the specified additional integration time
-    wait_us(integrate_us);
-    
-    // end the current integration cycle and hold the integrated values
-    si = 1;
-    clock = 1;
-    clock = 0;
-    si = 0;
-    
     // figure how many pixels to skip on each read
     int skip = nPix/n - 1;
 
@@ -68,7 +52,7 @@ void TSL1410R::read(uint16_t *pix, int n, int integrate_us)
         }
     }
     
-    // clock out one extra pixel to make sure the device is ready for another go
+    // clock out one extra pixel to leave A1 in the high-Z state
     clock = 1;
     clock = 0;
 }

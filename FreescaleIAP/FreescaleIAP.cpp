@@ -13,16 +13,38 @@ enum FCMD {
     ProgramOnce = 0x43,
     EraseAll = 0x44,
     VerifyBackdoor = 0x45
-    };
- 
-inline void run_command(void);
+};
+
+static inline void run_command(FTFA_Type *);
 bool check_boundary(int address, unsigned int length);
 bool check_align(int address);
-IAPCode verify_erased(int address, unsigned int length);
 IAPCode check_error(void);
-IAPCode program_word(int address, char *data);IAPCode program_word(int address, char *data);
     
-IAPCode erase_sector(int address) {
+FreescaleIAP::FreescaleIAP()
+{
+}
+ 
+FreescaleIAP::~FreescaleIAP()
+{
+} 
+
+// execute an FTFA command
+static inline void run_command(FTFA_Type *ftfa) 
+{    
+    // disable interupts
+    __disable_irq();
+    
+    // Clear possible old errors, start command, wait until done
+    ftfa->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
+    ftfa->FSTAT = FTFA_FSTAT_CCIF_MASK;
+    while (!(ftfa->FSTAT & FTFA_FSTAT_CCIF_MASK));
+    
+    // re-enable interrupts
+    __enable_irq();
+}    
+
+ 
+IAPCode FreescaleIAP::erase_sector(int address) {
     #ifdef IAPDEBUG
     printf("IAP: Erasing at %x\r\n", address);
     #endif
@@ -35,12 +57,15 @@ IAPCode erase_sector(int address) {
     FTFA->FCCOB2 = (address >> 8) & 0xFF;
     FTFA->FCCOB3 = address & 0xFF;
     
-    run_command();
+    run_command(FTFA);
     
     return check_error();
 }
  
-IAPCode program_flash(int address, char *data, unsigned int length) {
+IAPCode FreescaleIAP::program_flash(int address, const void *vp, unsigned int length) {
+    
+    const char *data = (const char *)vp;
+    
     #ifdef IAPDEBUG
     printf("IAP: Programming flash at %x with length %d\r\n", address, length);
     #endif
@@ -61,14 +86,14 @@ IAPCode program_flash(int address, char *data, unsigned int length) {
     return Success;
 }
  
-uint32_t flash_size(void) {
+uint32_t FreescaleIAP::flash_size(void) {
     uint32_t retval = (SIM->FCFG2 & 0x7F000000u) >> (24-13);
     if (SIM->FCFG2 & (1<<23))           //Possible second flash bank
         retval += (SIM->FCFG2 & 0x007F0000u) >> (16-13);
     return retval;
 }
  
-IAPCode program_word(int address, char *data) {
+IAPCode FreescaleIAP::program_word(int address, const char *data) {
     #ifdef IAPDEBUG
     printf("IAP: Programming word at %x, %d - %d - %d - %d\r\n", address, data[0], data[1], data[2], data[3]);
     #endif
@@ -85,20 +110,10 @@ IAPCode program_word(int address, char *data) {
     FTFA->FCCOB6 = data[1];
     FTFA->FCCOB7 = data[0];
     
-    run_command();
+    run_command(FTFA);
     
     return check_error();
 }
- 
-/* Clear possible flags which are set, run command, wait until done */
-inline void run_command(void) {
-    //Clear possible old errors, start command, wait until done
-    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
-    FTFA->FSTAT = FTFA_FSTAT_CCIF_MASK;
-    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK));
-}    
-    
-    
  
 /* Check if no flash boundary is violated
    Returns true on violation */
@@ -126,7 +141,7 @@ bool check_align(int address) {
  
 /* Check if an area of flash memory is erased
    Returns error code or Success (in case of fully erased) */
-IAPCode verify_erased(int address, unsigned int length) {
+IAPCode FreescaleIAP::verify_erased(int address, unsigned int length) {
     #ifdef IAPDEBUG
     printf("IAP: Verify erased at %x with length %d\r\n", address, length);
     #endif
@@ -143,7 +158,7 @@ IAPCode verify_erased(int address, unsigned int length) {
     FTFA->FCCOB5 = (length >> 2) & 0xFF;
     FTFA->FCCOB6 = 0;
     
-    run_command();
+    run_command(FTFA);
     
     IAPCode retval = check_error();
     if (retval == RuntimeError) {

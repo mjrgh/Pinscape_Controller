@@ -41,7 +41,7 @@ int main() {
 #else
 #define SECTOR_SIZE     1024
 #endif
- 
+
 enum IAPCode {
     BoundaryError = -99,    //Commands may not span several sectors
     AlignError,             //Data must be aligned on longword (two LSBs zero)
@@ -52,36 +52,51 @@ enum IAPCode {
     RuntimeError,           
     EraseError,             //The flash was not erased before writing to it
     Success = 0
-    };
+};
  
-/** Erase a flash sector
- *
- * The size erased depends on the used device
- *
- * @param address address in the sector which needs to be erased
- * @param return Success if no errors were encountered, otherwise one of the error states
- */
-IAPCode erase_sector(int address);
+
+class FreescaleIAP
+{
+public:
+    FreescaleIAP();
+    ~FreescaleIAP();
  
-/** Program flash
- *
- * Before programming the used area needs to be erased. The erase state is checked
- * before programming, and will return an error if not erased.
- *
- * @param address starting address where the data needs to be programmed (must be longword alligned: two LSBs must be zero)
- * @param data pointer to array with the data to program
- * @param length number of bytes to program (must be a multiple of 4)
- * @param return Success if no errors were encountered, otherwise one of the error states
- */
-IAPCode program_flash(int address, char *data, unsigned int length);
- 
-/**
- * Returns size of flash memory
- * 
- * This is the first address which is not flash
- *
- * @param return length of flash memory in bytes
- */
-uint32_t flash_size(void);
+    /** Erase a flash sector
+     *
+     * The size erased depends on the used device
+     *
+     * @param address address in the sector which needs to be erased
+     * @param return Success if no errors were encountered, otherwise one of the error states
+     */
+    IAPCode erase_sector(int address);
+     
+    /** Program flash
+     *
+     * Before programming the used area needs to be erased. The erase state is checked
+     * before programming, and will return an error if not erased.
+     *
+     * @param address starting address where the data needs to be programmed (must be longword alligned: two LSBs must be zero)
+     * @param data pointer to array with the data to program
+     * @param length number of bytes to program (must be a multiple of 4)
+     * @param return Success if no errors were encountered, otherwise one of the error states
+     */
+    IAPCode program_flash(int address, const void *data, unsigned int length);
+     
+    /**
+     * Returns size of flash memory
+     * 
+     * This is the first address which is not flash
+     *
+     * @param return length of flash memory in bytes
+     */
+    uint32_t flash_size(void);
+    
+private:
+    // program a word of flash
+    IAPCode program_word(int address, const char *data);
+    
+    // verify that a flash area has been erased
+    IAPCode verify_erased(int address, unsigned int length);
+};
  
 #endif
