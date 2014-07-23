@@ -57,11 +57,28 @@
 #define DR_6_HZ           0x30
 #define DR_1_HZ           0x38
 
+#define CTRL_REG3_IPOL_MASK  0x02
+#define CTRL_REG3_PPOD_MASK  0x01
+
+#define INT_EN_DRDY       0x01
+#define INT_CFG_DRDY      0x01
+
 
 MMA8451Q::MMA8451Q(PinName sda, PinName scl, int addr) : m_i2c(sda, scl), m_addr(addr) 
 {
     // go to standby mode
     standby();
+    
+#if 0
+    // reset all registers to power-on reset values
+    uint8_t d0[2] = { REG_CTRL_REG_2, 0x40 };
+    writeRegs(d0,2 );
+    
+    // wait for the reset bit to clear
+    do {
+        readRegs(REG_CTRL_REG_2, d0, 1);
+    } while ((d0[0] & 0x40) != 0);
+#endif
     
     // read the curent config register
     uint8_t d1[1];
@@ -79,10 +96,10 @@ MMA8451Q::MMA8451Q(PinName sda, PinName scl, int addr) : m_i2c(sda, scl), m_addr
     uint8_t d4[2] = {REG_CTRL_REG_2, (d3[0] & ~MODS_MASK) | MODS1_MASK};
     writeRegs(d4, 2);
     
-    // set 100 Hz mode
+    // set 800 Hz mode
     uint8_t d5[1];
     readRegs(REG_CTRL_REG_1, d5, 1);
-    uint8_t d6[2] = {REG_CTRL_REG_1, (d5[0] & ~DR_MASK) | DR_100_HZ};
+    uint8_t d6[2] = {REG_CTRL_REG_1, (d5[0] & ~DR_MASK) | DR_800_HZ};
     writeRegs(d6, 2);
     
     // enter active mode
@@ -90,6 +107,37 @@ MMA8451Q::MMA8451Q(PinName sda, PinName scl, int addr) : m_i2c(sda, scl), m_addr
 }
 
 MMA8451Q::~MMA8451Q() { }
+
+void MMA8451Q::setInterruptMode(int pin)
+{
+    // go to standby mode
+    standby();
+
+    // set IRQ push/pull and active high
+    uint8_t d1[1];
+    readRegs(REG_CTRL_REG_3, d1, 1);
+    uint8_t d2[2] = {
+        REG_CTRL_REG_3, 
+        (d1[0] & ~CTRL_REG3_PPOD_MASK) | CTRL_REG3_IPOL_MASK
+    };
+    writeRegs(d2, 2);
+    
+    // set pin 2 or pin 1
+    readRegs(REG_CTRL_REG_5, d1, 1);
+    uint8_t d3[2] = { 
+        REG_CTRL_REG_5, 
+        (d1[0] & ~INT_CFG_DRDY) | (pin == 1 ? INT_CFG_DRDY : 0)
+    };
+    writeRegs(d3, 2);
+    
+    // enable data ready interrupt
+    readRegs(REG_CTRL_REG_4, d1, 1);
+    uint8_t d4[2] = { REG_CTRL_REG_4, d1[0] | INT_EN_DRDY };
+    writeRegs(d4, 2);
+    
+    // enter active mode
+    active();
+}
 
 void MMA8451Q::standby()
 {
@@ -136,6 +184,25 @@ void MMA8451Q::getAccXY(float &x, float &y)
     // translate the y value
     acc = (res[2] << 9) | (res[3]);
     y = int16_t(acc)/(4*4096.0);
+}
+
+void MMA8451Q::getAccXYZ(float &x, float &y, float &z)
+{
+    // read the X, Y, and Z output registers
+    uint8_t res[6];
+    readRegs(REG_OUT_X_MSB, res, 6);
+    
+    // translate the x value
+    uint16_t acc = (res[0] << 8) | (res[1]);
+    x = int16_t(acc)/(4*4096.0);
+    
+    // translate the y value
+    acc = (res[2] << 8) | (res[3]);
+    y = int16_t(acc)/(4*4096.0);
+    
+    // translate the z value
+    acc = (res[4] << 8) | (res[5]);
+    z = int16_t(acc)/(4*4096.0);
 }
 
 float MMA8451Q::getAccY() {

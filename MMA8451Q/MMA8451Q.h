@@ -98,6 +98,13 @@ public:
    *  Read an X,Y pair
    */
   void getAccXY(float &x, float &y);
+  
+  /**
+   *  Read X,Y,Z.  This is the most efficient way to fetch
+   *  all of the axes at once, since it fetches all three
+   *  in a single I2C transaction.
+   */
+  void getAccXYZ(float &x, float &y, float &z);
 
   /**
    * Get Z axis acceleration
@@ -112,6 +119,13 @@ public:
    * @param res array where acceleration data will be stored
    */
   void getAccAllAxis(float * res);
+  
+  /**
+   * Set interrupt mode.  'pin' is 1 for INT1_ACCEL (PTA14) and 2 for INT2_ACCEL (PTA15).
+   * The caller is responsible for setting up an interrupt handler on the corresponding
+   * PTAxx pin.
+   */
+  void setInterruptMode(int pin);
 
 private:
   I2C m_i2c;

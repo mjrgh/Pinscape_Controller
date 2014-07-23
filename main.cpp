@@ -12,20 +12,16 @@ public:
     MyUSBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release) 
         : USBJoystick(vendor_id, product_id, product_release)
     {
-        connected_ = false;
         suspended_ = false;
     }
     
-    int isConnected() const { return connected_; }
+    int isConnected() { return configured(); }
     int isSuspended() const { return suspended_; }
     
 protected:
-    virtual void connectStateChanged(unsigned int connected) 
-        { connected_ = connected; }
     virtual void suspendStateChanged(unsigned int suspended)
         { suspended_ = suspended; }
 
-    int connected_;
     int suspended_; 
 };
 
@@ -117,6 +113,104 @@ struct NVM
     } d;
 };
 
+// Accelerometer handler
+const int MMA8451_I2C_ADDRESS = (0x1d<<1);
+class Accel
+{
+public:
+    Accel(PinName sda, PinName scl, int i2cAddr, PinName irqPin)
+        : mma_(sda, scl, i2cAddr), intIn_(irqPin)
+    {
+        // set the initial ball velocity to zero
+        vx_ = vy_ = 0;
+        
+        // set the initial raw acceleration reading to zero
+        xRaw_ = yRaw_ = 0;
+
+        // enable the interrupt
+        mma_.setInterruptMode(irqPin == PTA14 ? 1 : 2);
+        
+        // set up the interrupt handler
+        intIn_.rise(this, &Accel::isr);
+        
+        // read the current registers to clear the data ready flag
+        float z;
+        mma_.getAccXYZ(xRaw_, yRaw_, z);
+
+        // start our timers
+        tGet_.start();
+        tInt_.start();
+    }
+    
+    void get(float &x, float &y, float &rx, float &ry) 
+    {
+         // disable interrupts while manipulating the shared data
+         __disable_irq();
+         
+         // read the shared data and store locally for calculations
+         float vx = vx_, vy = vy_, xRaw = xRaw_, yRaw = yRaw_;
+
+         // reset the velocity
+         vx_ = vy_ = 0;
+         
+         // get the time since the last get() sample
+         float dt = tGet_.read_us()/1.0e6;
+         tGet_.reset();
+         
+         // done manipulating the shared data
+         __enable_irq();
+         
+         // calculate the acceleration since the last get(): a = dv/dt
+         x = vx/dt;
+         y = vy/dt;         
+         
+         // return the raw accelerometer data in rx,ry
+         rx = xRaw;
+         ry = yRaw;
+     }    
+    
+private:
+    // interrupt handler
+    void isr()
+    {
+        // Read the axes.  Note that we have to read all three axes
+        // (even though we only really use x and y) in order to clear
+        // the "data ready" status bit in the accelerometer.  The
+        // interrupt only occurs when the "ready" bit transitions from
+        // off to on, so we have to make sure it's off.
+        float z;
+        mma_.getAccXYZ(xRaw_, yRaw_, z);
+        
+        // calculate the time since the last interrupt
+        float dt = tInt_.read_us()/1.0e6;
+        tInt_.reset();
+        
+        // Accelerate the model ball: v = a*dt.  Assume that the raw
+        // data from the accelerometer reflects the average physical
+        // acceleration over the interval since the last sample.
+        vx_ += xRaw_ * dt;
+        vy_ += yRaw_ * dt;
+    }
+    
+    // current modeled ball velocity
+    float vx_, vy_;
+    
+    // last raw axis readings
+    float xRaw_, yRaw_;
+    
+    // underlying accelerometer object
+    MMA8451Q mma_;
+    
+    // interrupt router
+    InterruptIn intIn_;
+    
+    // timer for measuring time between get() samples
+    Timer tGet_;
+    
+    // timer for measuring time between interrupts
+    Timer tInt_;
+};
+
 int main(void)
 {
     // turn off our on-board indicator LED
@@ -188,13 +282,12 @@ int main(void)
     // Create the joystick USB client.  Light the on-board indicator LED
     // red while connecting, and change to green after we connect.
     led1 = 0;
-    MyUSBJoystick js(0xFAFA, 0x00F7, 0x0001);
+    MyUSBJoystick js(0xFAFA, 0x00F7, 0x0003);
     led1 = 1;
     led2 = 0;
 
     // create the accelerometer object
-    const int MMA8451_I2C_ADDRESS = (0x1d<<1);
-    MMA8451Q accel(PTE25, PTE24, MMA8451_I2C_ADDRESS);
+    Accel accel(PTE25, PTE24, MMA8451_I2C_ADDRESS, PTA15);
     
     // create the CCD array object
     TSL1410R ccd(PTE20, PTE21, PTB0);
@@ -362,13 +455,16 @@ int main(void)
             newCalBtnLit = false;
             break;
         }
+        
+        // light or flash the external calibration button LED, and 
+        // do the same with the on-board blue LED
         if (calBtnLit != newCalBtnLit)
         {
             calBtnLit = newCalBtnLit;
             if (calBtnLit) {
                 calBtnLed = 1;
-                led1 = 0;
-                led2 = 0;
+                led1 = 1;
+                led2 = 1;
                 led3 = 1;
             }
             else {
@@ -447,8 +543,8 @@ int main(void)
         }
         
         // read the accelerometer
-        float xa, ya;
-        accel.getAccXY(xa, ya);
+        float xa, ya, rxa, rya;
+        accel.get(xa, ya, rxa, rya);
         
         // check for auto-centering every so often
         if (acTimer.read_ms() - t0ac > 1000) 
@@ -521,17 +617,13 @@ int main(void)
             }
         }
 
-        // Send the status report.  Note one of the axes needs to be
-        // reversed, because the native accelerometer reports seem to
-        // assume that the card is component side down; we have to
-        // reverse one or the other axis to account for the reversed
-        // coordinate system.  It doesn't really matter which one,
-        // but reversing Y seems to give intuitive results when viewed
-        // in the Windows joystick control panel.  Note that the 
-        // coordinate system we report is ultimately arbitrary, since
-        // Visual Pinball has preference settings that let us set up
-        // axis reversals and a global rotation for the joystick.
-        js.update(x, -y, z, 0);
+        // Send the status report.  It doesn't really matter what
+        // coordinate system we use, since Visual Pinball has config
+        // options for rotations and axis reversals, but reversing y
+        // at the device level seems to produce the most intuitive 
+        // results for the Windows joystick control panel view, which
+        // is an easy way to check that the device is working.
+        js.update(x, -y, z, int(rxa*127), int(rya*127), 0);
         
         // show a heartbeat flash in blue every so often if not in 
         // calibration mode
@@ -566,7 +658,7 @@ int main(void)
                 hb = !hb;
                 led1 = (hb ? 0 : 1);
                 led2 = 0;
-                led3 = 0;
+                led3 = 1;
             }
             
             // reset the heartbeat timer

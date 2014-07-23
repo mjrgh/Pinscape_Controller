@@ -20,11 +20,13 @@
 #include "stdint.h"
 #include "USBJoystick.h"
  
-bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint16_t buttons) 
+bool USBJoystick::update(int16_t x, int16_t y, int16_t z, int16_t rx, int16_t ry, uint16_t buttons) 
 {
    _x = x;
    _y = y;
    _z = z;
+   _rx = rx;
+   _ry = ry;
    _buttons = buttons;     
  
    // send the report
@@ -40,7 +42,9 @@ bool USBJoystick::update() {
    report.data[2] = _x & 0xff;            
    report.data[3] = _y & 0xff;            
    report.data[4] = _z & 0xff;
-   report.length = 5; 
+   report.data[5] = _rx & 0xff;
+   report.data[6] = _ry & 0xff;
+   report.length = 7; 
  
    return sendNB(&report);
 }
@@ -96,10 +100,12 @@ uint8_t * USBJoystick::reportDesc()
              USAGE(1), 0x30,             // X
              USAGE(1), 0x31,             // Y
              USAGE(1), 0x32,             // Z
+             USAGE(1), 0x33,             // Rx
+             USAGE(1), 0x34,             // Ry
              LOGICAL_MINIMUM(1), 0x81,   // each value ranges -127...
              LOGICAL_MAXIMUM(1), 0x7f,   // ...to 127
              REPORT_SIZE(1), 0x08,       // 8 bits per report
-             REPORT_COUNT(1), 0x03,      // 2 reports
+             REPORT_COUNT(1), 0x05,      // 5 reports (X, Y, Z, Rx, Ry)
              INPUT(1), 0x02,             // Data, Variable, Absolute
 
              REPORT_COUNT(1), 0x08,      // input report count (LEDWiz messages)
@@ -134,10 +140,11 @@ uint8_t * USBJoystick::stringIserialDesc() {
 
 uint8_t * USBJoystick::stringIproductDesc() {
     static uint8_t stringIproductDescriptor[] = {
-        0x1E,                                                       /*bLength*/
+        0x2E,                                                       /*bLength*/
         STRING_DESCRIPTOR,                                          /*bDescriptorType 0x03*/
-        'P',0,'i',0,'n',0,'M',0,'a',0,'s',0,'t',0,'e',0,'r',0,
-        ' ',0,'2',0,'0',0,'0',0,'0',0                               /*String iProduct - PinMaster 2000*/
+        'P',0,'i',0,'n',0,'s',0,'c',0,'a',0,'p',0,'e',0,
+        ' ',0,'C',0,'o',0,'n',0,'t',0,'r',0,'o',0,'l',0,
+        'l',0,'e',0,'r',0                                           /*String iProduct */
     };
     return stringIproductDescriptor;
 }
