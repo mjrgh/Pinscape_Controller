@@ -90,11 +90,11 @@ class USBJoystick: public USBHID {
          * @param product_id Your product_id (default: 0x0002)
          * @param product_release Your product_release (default: 0x0001)
          */
-         USBJoystick(uint16_t vendor_id = 0x1234, uint16_t product_id = 0x0100, uint16_t product_release = 0x0001): 
+         USBJoystick(uint16_t vendor_id = 0x1234, uint16_t product_id = 0x0100, uint16_t product_release = 0x0001, int waitForConnect = true): 
              USBHID(8, 8, vendor_id, product_id, product_release, false)
              { 
                  _init();
-                 connect();
+                 connect(waitForConnect);
              };
          
          /**

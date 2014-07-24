@@ -10,7 +10,7 @@ class MyUSBJoystick: public USBJoystick
 {
 public:
     MyUSBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release) 
-        : USBJoystick(vendor_id, product_id, product_release)
+        : USBJoystick(vendor_id, product_id, product_release, false)
     {
         suspended_ = false;
     }
@@ -25,8 +25,8 @@ protected:
     int suspended_; 
 };
 
-// on-board RGB LED elements - we use these for diagnostics
-PwmOut led1(LED1), led2(LED2), led3(LED3);
+// On-board RGB LED elements - we use these for diagnostic displays.
+DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 
 // calibration button - switch input and LED output
 DigitalIn calBtn(PTE29);
@@ -65,9 +65,9 @@ static float wizState(int idx)
 
 static void updateWizOuts()
 {
-    led1 = wizState(0);
-    led2 = wizState(1);
-    led3 = wizState(2);
+    ledR = wizState(0);
+    ledG = wizState(1);
+    ledB = wizState(2);
 }
 
 struct AccPrv
@@ -214,9 +214,9 @@ private:
 int main(void)
 {
     // turn off our on-board indicator LED
-    led1 = 1;
-    led2 = 1;
-    led3 = 1;
+    ledR = 1;
+    ledG = 1;
+    ledB = 1;
     
     // set up a flash memory controller
     FreescaleIAP iap;
@@ -279,12 +279,8 @@ int main(void)
     acTimer.start();
     int t0ac = acTimer.read_ms();
     
-    // Create the joystick USB client.  Light the on-board indicator LED
-    // red while connecting, and change to green after we connect.
-    led1 = 0;
+    // Create the joystick USB client
     MyUSBJoystick js(0xFAFA, 0x00F7, 0x0003);
-    led1 = 1;
-    led2 = 0;
 
     // create the accelerometer object
     Accel accel(PTE25, PTE24, MMA8451_I2C_ADDRESS, PTA15);
@@ -463,15 +459,15 @@ int main(void)
             calBtnLit = newCalBtnLit;
             if (calBtnLit) {
                 calBtnLed = 1;
-                led1 = 1;
-                led2 = 1;
-                led3 = 1;
+                ledR = 1;
+                ledG = 1;
+                ledB = 1;
             }
             else {
                 calBtnLed = 0;
-                led1 = 1;
-                led2 = 1;
-                led3 = 0;
+                ledR = 1;
+                ledG = 1;
+                ledB = 0;
             }
         }
         
@@ -601,19 +597,32 @@ int main(void)
         if (js.isSuspended() || !js.isConnected())
         {
             // go dark (turn off the indicator LEDs)
-            led2 = 1;
-            led3 = 1;
-            led1 = 1;
+            ledG = 1;
+            ledB = 1;
+            ledR = 1;
             
             // wait until we're connected and come out of suspend mode
-            while (js.isSuspended() || !js.isConnected())
+            for (uint32_t n = 0 ; js.isSuspended() || !js.isConnected() ; ++n)
             {
                 // spin for a bit
                 wait(1);
                 
-                // if we're not suspended, flash red; otherwise stay dark
-                if (!js.isSuspended())
-                    led1 = !led1;
+                // if we're suspended, do a brief red flash; otherwise do a long red flash
+                if (js.isSuspended())
+                {
+                    // suspended - flash briefly ever few seconds
+                    if (n % 3 == 0)
+                    {
+                        ledR = 0;
+                        wait(0.05);
+                        ledR = 1;
+                    }
+                }
+                else
+                {
+                    // running, not connected - flash red
+                    ledR = !ledR;
+                }
             }
         }
 
@@ -632,33 +641,33 @@ int main(void)
             if (js.isSuspended())
             {
                 // suspended - turn off the LEDs entirely
-                led1 = 1;
-                led2 = 1;
-                led3 = 1;
+                ledR = 1;
+                ledG = 1;
+                ledB = 1;
             }
             else if (!js.isConnected())
             {
                 // not connected - flash red
                 hb = !hb;
-                led1 = (hb ? 0 : 1);
-                led2 = 1;
-                led3 = 1;
+                ledR = (hb ? 0 : 1);
+                ledG = 1;
+                ledB = 1;
             }
             else if (flash_valid)
             {
                 // connected, NVM valid - flash blue/green
                 hb = !hb;
-                led1 = 1;
-                led2 = (hb ? 0 : 1);
-                led3 = (hb ? 1 : 0);
+                ledR = 1;
+                ledG = (hb ? 0 : 1);
+                ledB = (hb ? 1 : 0);
             }
             else
             {
                 // connected, factory reset - flash yellow/green
                 hb = !hb;
-                led1 = (hb ? 0 : 1);
-                led2 = 0;
-                led3 = 1;
+                ledR = (hb ? 0 : 1);
+                ledG = 0;
+                ledB = 1;
             }
             
             // reset the heartbeat timer
