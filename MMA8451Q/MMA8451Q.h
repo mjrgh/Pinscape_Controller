@@ -62,6 +62,11 @@ public:
   * MMA8451Q destructor
   */
   ~MMA8451Q();
+  
+  /**
+  *  Reset the accelerometer hardware and set our initial parameters
+  */
+  void init();
 
   /**
    * Enter standby mode

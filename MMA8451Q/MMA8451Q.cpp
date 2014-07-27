@@ -66,10 +66,13 @@
 
 MMA8451Q::MMA8451Q(PinName sda, PinName scl, int addr) : m_i2c(sda, scl), m_addr(addr) 
 {
-    // go to standby mode
-    standby();
-    
-#if 0
+    // initialize parameters
+    init();
+}
+
+// reset the accelerometer and set our parameters
+void MMA8451Q::init()
+{    
     // reset all registers to power-on reset values
     uint8_t d0[2] = { REG_CTRL_REG_2, 0x40 };
     writeRegs(d0,2 );
@@ -78,7 +81,9 @@ MMA8451Q::MMA8451Q(PinName sda, PinName scl, int addr) : m_i2c(sda, scl), m_addr
     do {
         readRegs(REG_CTRL_REG_2, d0, 1);
     } while ((d0[0] & 0x40) != 0);
-#endif
+    
+    // go to standby mode
+    standby();
     
     // read the curent config register
     uint8_t d1[1];
@@ -145,9 +150,14 @@ void MMA8451Q::standby()
     uint8_t d1[1];
     readRegs(REG_CTRL_REG_1, d1, 1);
     
-    // write it back witht he Active bit cleared
-    uint8_t d2[2] = { REG_CTRL_REG_1, d1[0] & ~CTL_ACTIVE };
-    writeRegs(d2, 2);
+    // wait for standby mode
+    do {
+        // write it back with the Active bit cleared
+        uint8_t d2[2] = { REG_CTRL_REG_1, d1[0] & ~CTL_ACTIVE };
+        writeRegs(d2, 2);
+    
+        readRegs(REG_CTRL_REG_1, d1, 1);
+    } while (d1[0] & CTL_ACTIVE);
 }
 
 void MMA8451Q::active()

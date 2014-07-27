@@ -46,6 +46,7 @@ bool USBJoystick::update() {
    report.data[6] = _ry & 0xff;
    report.length = 7; 
  
+   // send the report
    return sendNB(&report);
 }
  
