@@ -31,6 +31,16 @@
 // hardware in enough detail for anyone else to duplicate the entire project, and
 // the full software is open source.
 //
+// The device appears to the host computer as a USB joystick.  This works with the
+// standard Windows joystick device drivers, so there's no need to install any
+// software on the PC - Windows should recognize it as a joystick when you plug
+// it in and shouldn't ask you to install anything.  If you bring up the control
+// panel for USB Game Controllers, this device will appear as "Pinscape Controller".
+// *Don't* do any calibration with the Windows control panel or third-part 
+// calibration tools.  The device calibrates itself automatically for the
+// accelerometer data, and has its own special calibration procedure for the
+// plunger (see below).
+//
 // The controller provides the following functions.  It should be possible to use
 // any subet of the features without using all of them.  External hardware for any
 // particular function can simply be omitted if that feature isn't needed.
@@ -60,9 +70,34 @@
 //    with the existing VP handling for analog plunger input.  A few VP settings are
 //    needed to tell VP to allow the plunger.
 //
-//    Unfortunately, analog plungers are not well supported by individual tables,
-//    so some work is required for each table to give it proper support.  I've tried
-//    to reduce this to a recipe and document it in the project documentation.
+//    For best results, the plunger sensor should be calibrated.  The calibration
+//    is stored in non-volatile memory on board the KL25Z, so it's only necessary
+//    to do the calibration once, when you first install everything.  (You might
+//    also want to re-calibrate if you physically remove and reinstall the CCD 
+//    sensor or the mechanical plunger, since their alignment might change slightly 
+//    when you put everything back together.)  To calibrate, you have to attach a
+//    momentary switch (e.g., a push-button switch) between one of the KL25Z ground
+//    pins (e.g., jumper J9 pin 12) and PTE29 (J10 pin 9).  Press and hold the
+//    button for about two seconds - the LED on the KL25Z wlil flash blue while
+//    you hold the button, and will turn solid blue when you've held it down long
+//    enough to enter calibration mode.  This mode will last about 15 seconds.
+//    Simply pull the plunger all the way back, hold it for a few moments, and
+//    gradually return it to the starting position.  *Don't* release it - we want
+//    to measure the maximum retracted position and the rest position, but NOT
+//    the maximum forward position when the outer barrel spring is compressed.
+//    After about 15 seconds, the device will save the new calibration settings
+//    to its flash memory, and the LED will return to the regular "heartbeat" 
+//    flashes.  If this is the first time you calibrated, you should observe the
+//    color of the flashes change from yellow/green to blue/green to indicate
+//    that the plunger has been calibrated.
+//
+//    Note that while Visual Pinball itself has good native support for analog 
+//    plungers, most of the VP tables in circulation don't implement the necessary
+//    scripting features to make this work properly.  Therefore, you'll have to do
+//    a little scripting work for each table you download to add the required code
+//    to that individual table.  The work has to be customized for each table, so
+//    I haven't been able to automate this process, but I have tried to reduce it
+//    to a relatively simple recipe that I've documented separately.
 //
 //  - In addition to the CCD sensor, a button should be attached (also described in 
 //    the project documentation) to activate calibration mode for the plunger.  When 
@@ -102,9 +137,44 @@
 //    any use for the LedWiz features.  I built them mostly as a learning exercise,
 //    but with a slight practical need for a handful of extra ports (I'm using the
 //    cutting-edge 10-contactor setup, so my real LedWiz is full!).
+//
+// The on-board LED on the KL25Z flashes to indicate the current device status:
+//
+//    two short red flashes = the device is powered but hasn't successfully
+//        connected to the host via USB (either it's not physically connected
+//        to the USB port, or there was a problem with the software handshake
+//        with the USB device driver on the computer)
+//
+//    short red flash = the host computer is in sleep/suspend mode
+//
+//    long red/green = the LedWiz unti number has been changed, so a reset
+//        is needed.  You can simply unplug the device and plug it back in,
+//        or presss and hold the reset button on the device for a few seconds.
+//
+//    long yellow/green = everything's working, but the plunger hasn't
+//        been calibrated; follow the calibration procedure described above.
+//        This flash mode won't appear if the CCD has been disabled.  Note
+//        that the device can't tell whether a CCD is physically attached,
+//        so you should use the config command to disable the CCD software 
+//        features if you won't be attaching a CCD.
+//
+//    alternating blue/green = everything's working
+//
+// Software configuration: you can change option settings by sending special
+// USB commands from the PC.  I've provided a Windows program for this purpose;
+// refer to the documentation for details.  For reference, here's the format
+// of the USB command for option changes:
+//
+//    length of report = 8 bytes
+//    byte 0 = 65 (0x41)
+//    byte 1 = 1 (0x01)
+//    byte 2 = new LedWiz unit number, 0x01 to 0x0f
+//    byte 3 = feature enable bit mask:
+//             0x01 = enable CCD (default = on)
 
-
+ 
 #include "mbed.h"
+#include "math.h"
 #include "USBJoystick.h"
 #include "MMA8451Q.h"
 #include "tsl1410r.h"
@@ -137,9 +207,18 @@
 // Marking this unit as #7 should work for almost everybody out of the box;
 // the most common case seems to be to have a single LedWiz installed, and
 // it's probably extremely rare to more than two.
+//
+// Note that the USB_PRODUCT_ID value set here omits the unit number.  We
+// take the unit number from the saved configuration.  We provide a
+// configuration command that can be sent via the USB connection to change
+// the unit number, so that users can select the unit number without having
+// to install a different version of the software.  We'll combine the base
+// product ID here with the unit number to get the actual product ID that
+// we send to the USB controller.
 const uint16_t USB_VENDOR_ID = 0xFAFA;
-const uint16_t USB_PRODUCT_ID = 0x00F7;
-const uint16_t USB_VERSION_NO = 0x0004;
+const uint16_t USB_PRODUCT_ID = 0x00F0;
+const uint16_t USB_VERSION_NO = 0x0006;
+const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 0x07;
 
 // On-board RGB LED elements - we use these for diagnostic displays.
 DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
@@ -147,6 +226,105 @@ DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 // calibration button - switch input and LED output
 DigitalIn calBtn(PTE29);
 DigitalOut calBtnLed(PTE23);
+
+// LED-Wiz emulation output pin assignments.  The LED-Wiz protocol
+// can support up to 32 outputs.  The KL25Z can physically provide
+// about 48 (in addition to the ports we're already using for the
+// CCD sensor and the calibration button), but to stay compatible
+// with the LED-Wiz protocol we'll stop at 32.  
+//
+// The LED-Wiz protocol allows setting individual intensity levels
+// on all outputs, with 48 levels of intensity.  This can be used
+// to control lamp brightness and motor speeds, among other things.
+// Unfortunately, the KL25Z only has 10 PWM channels, so while we 
+// can support the full complement of 32 outputs, we can only provide 
+// PWM dimming/speed control on 10 of them.  The remaining outputs 
+// can only be switched fully on and fully off - we can't support
+// dimming on these, so they'll ignore any intensity level setting 
+// requested by the host.  Use these for devices that don't have any
+// use for intensity settings anyway, such as contactors and knockers.
+//
+// The mapping between physical output pins on the KL25Z and the
+// assigned LED-Wiz port numbers is essentially arbitrary - you can
+// customize this by changing the entries in the array below if you
+// wish to rearrange the pins for any reason.  Be aware that some
+// of the physical outputs are already used for other purposes
+// (e.g., some of the GPIO pins on header J10 are used for the
+// CCD sensor - but you can of course reassign those as well by
+// changing the corresponding declarations elsewhere in this module).
+// The assignments we make here have two main objectives: first,
+// to group the outputs on headers J1 and J2 (to facilitate neater
+// wiring by keeping the output pins together physically), and
+// second, to make the physical pin layout match the LED-Wiz port
+// numbering order to the extent possible.  There's one big wrench
+// in the works, though, which is the limited number and discontiguous
+// placement of the KL25Z PWM-capable output pins.  This prevents
+// us from doing the most obvious sequential ordering of the pins,
+// so we end up with the outputs arranged into several blocks.
+// Hopefully this isn't too confusing; for more detailed rationale,
+// read on...
+// 
+// With the LED-Wiz, the host software configuration usually 
+// assumes that each RGB LED is hooked up to three consecutive ports
+// (for the red, green, and blue components, which need to be 
+// physically wired to separate outputs to allow each color to be 
+// controlled independently).  To facilitate this, we arrange the 
+// PWM-enabled outputs so that they're grouped together in the 
+// port numbering scheme.  Unfortunately, these outputs aren't
+// together in a single group in the physical pin layout, so to
+// group them logically in the LED-Wiz port numbering scheme, we
+// have to break up the overall numbering scheme into several blocks.
+// So our port numbering goes sequentially down each column of
+// header pins, but there are several break points where we have
+// to interrupt the obvious sequence to keep the PWM pins grouped
+// logically.
+//
+// In the list below, "pin J1-2" refers to pin 2 on header J1 on
+// the KL25Z, using the standard pin numbering in the KL25Z 
+// documentation - this is the physical pin that the port controls.
+// "LW port 1" means LED-Wiz port 1 - this is the LED-Wiz port
+// number that you use on the PC side (in the DirectOutput config
+// file, for example) to address the port.  PWM-capable ports are
+// marked as such - we group the PWM-capable ports into the first
+// 10 LED-Wiz port numbers.
+// 
+struct {
+    PinName pin;
+    bool isPWM;
+} ledWizPortMap[32] = {
+    { PTA1, true },      // pin J1-2,  LW port 1  (PWM capable - TPM 2.0 = channel 9)
+    { PTA2, true },      // pin J1-4,  LW port 2  (PWM capable - TPM 2.1 = channel 10)
+    { PTD4, true },      // pin J1-6,  LW port 3  (PWM capable - TPM 0.4 = channel 5)
+    { PTA12, true },     // pin J1-8,  LW port 4  (PWM capable - TPM 1.0 = channel 7)
+    { PTA4, true },      // pin J1-10, LW port 5  (PWM capable - TPM 0.1 = channel 2)
+    { PTA5, true },      // pin J1-12, LW port 6  (PWM capable - TPM 0.2 = channel 3)
+    { PTA13, true },     // pin J2-2,  LW port 7  (PWM capable - TPM 1.1 = channel 13)
+    { PTD5, true },      // pin J2-4,  LW port 8  (PWM capable - TPM 0.5 = channel 6)
+    { PTD0, true },      // pin J2-6,  LW port 9  (PWM capable - TPM 0.0 = channel 1)
+    { PTD3, true },      // pin J2-10, LW port 10 (PWM capable - TPM 0.3 = channel 4)
+    { PTC8, false },     // pin J1-14, LW port 11
+    { PTC9, false },     // pin J1-16, LW port 12
+    { PTC7, false },     // pin J1-1,  LW port 13
+    { PTC0, false },     // pin J1-3,  LW port 14
+    { PTC3, false },     // pin J1-5,  LW port 15
+    { PTC4, false },     // pin J1-7,  LW port 16
+    { PTC5, false },     // pin J1-9,  LW port 17
+    { PTC6, false },     // pin J1-11, LW port 18
+    { PTC10, false },    // pin J1-13, LW port 19
+    { PTC11, false },    // pin J1-15, LW port 20
+    { PTC12, false },    // pin J2-1,  LW port 21
+    { PTC13, false },    // pin J2-3,  LW port 22
+    { PTC16, false },    // pin J2-5,  LW port 23
+    { PTC17, false },    // pin J2-7,  LW port 24
+    { PTA16, false },    // pin J2-9,  LW port 25
+    { PTA17, false },    // pin J2-11, LW port 26
+    { PTE31, false },    // pin J2-13, LW port 27
+    { PTD6, false },     // pin J2-17, LW port 29
+    { PTD7, false },     // pin J2-19, LW port 30
+    { PTE0, false },     // pin J2-18, LW port 31
+    { PTE1, false }      // pin J2-20, LW port 32
+};
+
 
 // I2C address of the accelerometer (this is a constant of the KL25Z)
 const int MMA8451_I2C_ADDRESS = (0x1d<<1);
@@ -160,6 +338,9 @@ const int MMA8451_I2C_ADDRESS = (0x1d<<1);
 // wired on this board to the MMA8451 interrupt controller.
 #define MMA8451_INT_PIN   PTA15
 
+// Joystick axis report range - we report from -JOYMAX to +JOYMAX
+#define JOYMAX 4096
+
 
 // ---------------------------------------------------------------------------
 //
@@ -167,6 +348,47 @@ const int MMA8451_I2C_ADDRESS = (0x1d<<1);
 //
 
 static int pbaIdx = 0;
+
+// LedWiz output pin interface.  We create a cover class to virtualize
+// digital vs PWM outputs and give them a common interface.  The KL25Z
+// unfortunately doesn't have enough hardware PWM channels to support 
+// PWM on all 32 LedWiz outputs, so we provide as many PWM channels as
+// we can (10), and fill out the rest of the outputs with plain digital
+// outs.
+class LwOut
+{
+public:
+    virtual void set(float val) = 0;
+};
+class LwPwmOut: public LwOut
+{
+public:
+    LwPwmOut(PinName pin) : p(pin) { }
+    virtual void set(float val) { p = val; }
+    PwmOut p;
+};
+class LwDigOut: public LwOut
+{
+public:
+    LwDigOut(PinName pin) : p(pin) { }
+    virtual void set(float val) { p = val; }
+    DigitalOut p;
+};
+
+// output pin array
+static LwOut *lwPin[32];
+
+// initialize the output pin array
+void initLwOut()
+{
+    for (int i = 0 ; i < sizeof(lwPin) / sizeof(lwPin[0]) ; ++i)
+    {
+        PinName p = ledWizPortMap[i].pin;
+        lwPin[i] = (ledWizPortMap[i].isPWM
+                    ? (LwOut *)new LwPwmOut(p) 
+                    : (LwOut *)new LwDigOut(p));
+    }
+}
 
 // on/off state for each LedWiz output
 static uint8_t wizOn[32];
@@ -199,9 +421,8 @@ static float wizState(int idx)
 
 static void updateWizOuts()
 {
-    ledR = wizState(0);
-    ledG = wizState(1);
-    ledB = wizState(2);
+    for (int i = 0 ; i < 32 ; ++i)
+        lwPin[i]->set(wizState(i));
 }
 
 // ---------------------------------------------------------------------------
@@ -215,27 +436,64 @@ static void updateWizOuts()
 struct NVM
 {
     // checksum - we use this to determine if the flash record
-    // has been initialized
+    // has been properly initialized
     uint32_t checksum;
 
     // signature value
     static const uint32_t SIGNATURE = 0x4D4A522A;
-    static const uint16_t VERSION = 0x0002;
+    static const uint16_t VERSION = 0x0003;
+    
+    // Is the data structure valid?  We test the signature and 
+    // checksum to determine if we've been properly stored.
+    int valid() const
+    {
+        return (d.sig == SIGNATURE 
+                && d.vsn == VERSION
+                && d.sz == sizeof(NVM)
+                && checksum == CRC32(&d, sizeof(d)));
+    }
+    
+    // save to non-volatile memory
+    void save(FreescaleIAP &iap, int addr)
+    {
+        // update the checksum and structure size
+        checksum = CRC32(&d, sizeof(d));
+        d.sz = sizeof(NVM);
+        
+        // erase the sector
+        iap.erase_sector(addr);
+
+        // save the data
+        iap.program_flash(addr, this, sizeof(*this));
+    }
     
     // stored data (excluding the checksum)
     struct
     {
-        // signature and version - further verification that we have valid 
-        // initialized data
+        // Signature, structure version, and structure size - further verification 
+        // that we have valid initialized data.  The size is a simple proxy for a
+        // structure version, as the most common type of change to the structure as
+        // the software evolves will be the addition of new elements.  We also
+        // provide an explicit version number that we can update manually if we
+        // make any changes that don't affect the structure size but would affect
+        // compatibility with a saved record (e.g., swapping two existing elements).
         uint32_t sig;
         uint16_t vsn;
+        int sz;
         
-        // direction - 0 means unknown, 1 means bright end is pixel 0, 2 means reversed
-        uint8_t dir;
-
+        // has the plunger been manually calibrated?
+        int plungerCal;
+        
         // plunger calibration min and max
         int plungerMin;
+        int plungerZero;
         int plungerMax;
+        
+        // is the CCD enabled?
+        int ccdEnabled;
+        
+        // LedWiz unit number
+        uint8_t ledWizUnitNo;
     } d;
 };
 
@@ -269,6 +527,14 @@ protected:
 };
 
 // ---------------------------------------------------------------------------
+//
+// Some simple math service routines
+//
+
+inline float square(float x) { return x*x; }
+inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
+
+// ---------------------------------------------------------------------------
 // 
 // Accelerometer (MMA8451Q)
 //
@@ -276,128 +542,62 @@ protected:
 // The MMA8451Q is the KL25Z's on-board 3-axis accelerometer.
 //
 // This is a custom wrapper for the library code to interface to the
-// MMA8451Q.  This class encapsulates an interrupt handler and some
-// special data processing to produce more realistic results in
-// Visual Pinball.
+// MMA8451Q.  This class encapsulates an interrupt handler and 
+// automatic calibration.
 //
 // We install an interrupt handler on the accelerometer "data ready" 
-// interrupt in order to ensure that we fetch each sample immediately
-// when it becomes available.  Since our main program loop is busy
-// reading the CCD virtually all of the time, it wouldn't be practical
-// to keep up with the accelerometer data stream by polling.
+// interrupt to ensure that we fetch each sample immediately when it
+// becomes available.  The accelerometer data rate is fiarly high
+// (800 Hz), so it's not practical to keep up with it by polling.
+// Using an interrupt handler lets us respond quickly and read
+// every sample.
 //
-// Visual Pinball is nominally designed to accept raw accelerometer
-// data as nudge input, but in practice, this doesn't produce
-// very realistic results.  VP simply applies accelerations from a
-// physical accelerometer directly to its modeled ball(s), but the
-// data stream coming from a real accelerometer isn't as clean as
-// an idealized physics simulation.  The problem seems to be that the
-// accelerometer samples capture instantaneous accelerations, not
-// integrated acceleration over time.  In other words, adding samples 
-// over time doesn't accurately reflect the actual net acceleration
-// experienced.  The longer the sampling period, the greater the
-// divergence between the sum of a series of samples and the actual
-// net acceleration.  The effect in VP is to leave the ball with
-// an unrealistically high residual velocity over the course of a
-// nudge event.
-//
-// This is where our custom data processing comes into play.  Rather
-// than sending raw accelerometer samples, we apply the samples to
-// our own virtual model ball.  What we send VP is the accelerations
-// experienced by the ball in our model, not the actual accelerations
-// we read from the MMA8451Q.  Now, that might seem like an unnecessary
-// middleman, because VP is just going to apply the accelerations to
-// its own model ball.  But it's a useful middleman: what we can do
-// in our model that VP can't do in its model is take into account
-// our special knowledge of the physical cabinet configuration.  VP
-// has to work generically with any sort of nudge input device, but
-// we can make assumptions about what kind of physical environment
-// we're operating in.
-//
-// The key assumption we make about our physical environment is that
-// accelerations from nudges should net out to zero over intervals on
-// the order of a couple of seconds.  Nudging a pinball cabinet makes
-// the cabinet accelerate briefly in the nudge direction, then rebound,
-// then re-rebound, and so on until the swaying motion damps out and
-// the table returns roughly to rest.  The table doesn't actually go
-// anywhere in these transactions, so the net acceleration experienced
-// is zero by the time the motion has damped out.  The damping time
-// depends on the degree of force of the nudge, but is a second or
-// two in most cases.
-//
-// We can't just assume that all motion and/or acceleration must stop 
-// in a second or two, though.  For one thing, the player can nudge
-// the table repeatedly for long periods.  (Doing this too aggressivly
-// will trigger a tilt, so there are limits, but a skillful player
-// can keep nudging a table almost continuously without tilting it.)
-// For another, a player could actually pick up one end of the table
-// for an extended period, applying a continuous acceleration the
-// whole time.
-//
-// The strategy we use to cope with these possibilities is to model a
-// ball, rather like VP does, but with damping that scales with the
-// current speed.  We'll choose a damping function that will bring
-// the ball to rest from any reasonable speed within a second or two
-// if there are no ongoing accelerations.  The damping function must
-// also be weak enough that new accelerations dominate - that is,
-// the damping function must not be so strong that it cancels out
-// ongoing physical acceleration input, such as when the player
-// lifts one end of the table and holds it up for a while.
-//
-// What we report to VP is the acceleration experienced by our model
-// ball between samples.  Our model ball starts at rest, and our damping
-// function ensures that when it's in motion, it will return to rest in
-// a short time in the absence of further physical accelerations.  The
-// sum or our reports to VP from a rest state to a subsequent rest state
-// will thus necessarily equal exactly zero.  This will ensure that we 
-// don't leave VP's model ball with any residual velocity after an 
-// isolated nudge.
-//
-// We do one more bit of data processing: automatic calibration.  When
-// we observe the accelerometer input staying constant (within a noise
-// window) for a few seconds continously, we'll assume that the cabinet
-// is at rest.  It's safe to assume that the accelerometer isn't
-// installed in such a way that it's perfectly level, so at the
-// cabinet's neutral rest position, we can expect to read non-zero
-// accelerations on the x and y axes from the component along that
-// axis of the Earth's gravity.  By watching for constant acceleration
-// values over time, we can infer the reseting position of the device
-// and take that as our zero point.  By doing this continuously, we
-// don't have to assume that the machine is perfectly motionless when
-// initially powered on - we'll organically find the zero point as soon
-// as the machine is undisturbed for a few moments.  We'll also deal
-// gracefully with situations where the machine is jolted so much in
-// the course of play that its position is changed slightly.  The result
-// should be to make the zeroing process reliable and completely 
-// transparent to the user.
+// We automatically calibrate the accelerometer so that it's not
+// necessary to get it exactly level when installing it, and so
+// that it's also not necessary to calibrate it manually.  There's
+// lots of experience that tells us that manual calibration is a
+// terrible solution, mostly because cabinets tend to shift slightly
+// during use, requiring frequent recalibration.  Instead, we
+// calibrate automatically.  We continuously monitor the acceleration
+// data, watching for periods of constant (or nearly constant) values.
+// Any time it appears that the machine has been at rest for a while
+// (about 5 seconds), we'll average the readings during that rest
+// period and use the result as the level rest position.  This is
+// is ongoing, so we'll quickly find the center point again if the 
+// machine is moved during play (by an especially aggressive bout
+// of nudging, say).
 //
 
-// point structure
-struct FPoint
+// accelerometer input history item, for gathering calibration data
+struct AccHist
 {
+    AccHist() { x = y = d = 0.0; xtot = ytot = 0.0; cnt = 0; }
+    void set(float x, float y, AccHist *prv)
+    {
+        // save the raw position
+        this->x = x;
+        this->y = y;
+        this->d = distance(prv);
+    }
+    
+    // reading for this entry
     float x, y;
     
-    FPoint() { }
-    FPoint(float x, float y) { this->x = x; this->y = y; }
+    // distance from previous entry
+    float d;
     
-    void set(float x, float y) { this->x = x; this->y = y; }
-    void zero() { this->x = this->y = 0; }
-    
-    FPoint &operator=(FPoint &pt) { this->x = pt.x; this->y = pt.y; return *this; }
-    FPoint &operator-=(FPoint &pt) { this->x -= pt.x; this->y -= pt.y; return *this; }
-    FPoint &operator+=(FPoint &pt) { this->x += pt.x; this->y += pt.y; return *this; }
-    FPoint &operator*=(float f) { this->x *= f; this->y *= f; return *this; }
-    FPoint &operator/=(float f) { this->x /= f; this->y /= f; return *this; }
-    float magnitude() const { return sqrt(x*x + y*y); }
-    
-    float distance(FPoint &b)
-    {
-        float dx = x - b.x;
-        float dy = y - b.y;
-        return sqrt(dx*dx + dy*dy);
-    }
-};
+    // total and count of samples averaged over this period
+    float xtot, ytot;
+    int cnt;
 
+    void clearAvg() { xtot = ytot = 0.0; cnt = 0; }    
+    void addAvg(float x, float y) { xtot += x; ytot += y; ++cnt; }
+    float xAvg() const { return xtot/cnt; }
+    float yAvg() const { return ytot/cnt; }
+    
+    float distance(AccHist *p)
+        { return sqrt(square(p->x - x) + square(p->y - y)); }
+};
 
 // accelerometer wrapper class
 class Accel
@@ -415,47 +615,42 @@ public:
     
     void reset()
     {
-        // assume initially that the device is perfectly level
-        center_.zero();
+        // clear the center point
+        cx_ = cy_ = 0.0;
+        
+        // start the calibration timer
         tCenter_.start();
         iAccPrv_ = nAccPrv_ = 0;
-
+        
         // reset and initialize the MMA8451Q
         mma_.init();
+                
+        // set the initial integrated velocity reading to zero
+        vx_ = vy_ = 0;
         
-        // set the initial ball velocity to zero
-        v_.zero();
-        
-        // set the initial raw acceleration reading to zero
-        araw_.zero();
-        vsum_.zero();
-
-        // enable the interrupt
+        // set up our accelerometer interrupt handling
+        intIn_.rise(this, &Accel::isr);
         mma_.setInterruptMode(irqPin_ == PTA14 ? 1 : 2);
         
-        // set up the interrupt handler
-        intIn_.rise(this, &Accel::isr);
-        
         // read the current registers to clear the data ready flag
-        float z;
-        mma_.getAccXYZ(araw_.x, araw_.y, z);
+        mma_.getAccXYZ(ax_, ay_, az_);
 
         // start our timers
         tGet_.start();
         tInt_.start();
-        tRest_.start();
     }
     
-    void get(float &x, float &y, float &rx, float &ry) 
+    void get(int &x, int &y, int &rx, int &ry) 
     {
          // disable interrupts while manipulating the shared data
          __disable_irq();
          
          // read the shared data and store locally for calculations
-         FPoint vsum = vsum_, araw = araw_;
+         float ax = ax_, ay = ay_;
+         float vx = vx_, vy = vy_;
          
-         // reset the velocity sum
-         vsum_.zero();
+         // reset the velocity sum for the next run
+         vx_ = vy_ = 0;
 
          // get the time since the last get() sample
          float dt = tGet_.read_us()/1.0e6;
@@ -464,29 +659,39 @@ public:
          // done manipulating the shared data
          __enable_irq();
          
+         // adjust the readings for the integration time
+         vx /= dt;
+         vy /= dt;
+         
+         // add this sample to the current calibration interval's running total
+         AccHist *p = accPrv_ + iAccPrv_;
+         p->addAvg(ax, ay);
+
          // check for auto-centering every so often
          if (tCenter_.read_ms() > 1000)
          {
              // add the latest raw sample to the history list
-             accPrv_[iAccPrv_] = araw_;
-             
-             // commit the history entry
+             AccHist *prv = p;
              iAccPrv_ = (iAccPrv_ + 1) % maxAccPrv;
+             p = accPrv_ + iAccPrv_;
+             p->set(ax, ay, prv);
 
              // if we have a full complement, check for stability
              if (nAccPrv_ >= maxAccPrv)
              {
                  // check if we've been stable for all recent samples
-                 static const float accTol = .005;
-                 if (accPrv_[0].distance(accPrv_[1]) < accTol
-                     && accPrv_[0].distance(accPrv_[2]) < accTol
-                     && accPrv_[0].distance(accPrv_[3]) < accTol
-                     && accPrv_[0].distance(accPrv_[4]) < accTol)
+                 static const float accTol = .01;
+                 AccHist *p0 = accPrv_;
+                 if (p0[0].d < accTol
+                     && p0[1].d < accTol
+                     && p0[2].d < accTol
+                     && p0[3].d < accTol
+                     && p0[4].d < accTol)
                  {
-                     // figure the new center as the average of these samples
-                     center_.set(
-                        (accPrv_[0].x + accPrv_[1].x + accPrv_[2].x + accPrv_[3].x + accPrv_[4].x)/5.0,
-                        (accPrv_[0].y + accPrv_[1].y + accPrv_[2].y + accPrv_[3].y + accPrv_[4].y)/5.0);
+                     // Figure the new calibration point as the average of
+                     // the samples over the rest period
+                     cx_ = (p0[0].xAvg() + p0[1].xAvg() + p0[2].xAvg() + p0[3].xAvg() + p0[4].xAvg())/5.0;
+                     cy_ = (p0[0].yAvg() + p0[1].yAvg() + p0[2].yAvg() + p0[3].yAvg() + p0[4].yAvg())/5.0;
                  }
              }
              else
@@ -494,146 +699,47 @@ public:
                 // not enough samples yet; just up the count
                 ++nAccPrv_;
              }
+             
+             // clear the new item's running totals
+             p->clearAvg();
             
              // reset the timer
              tCenter_.reset();
          }
-
-         // Calculate the velocity vector for the model ball.  Start
-         // with the accumulated velocity from the accelerations since
-         // the last reading.
-         FPoint dv = vsum;
-
-         // remember the previous velocity of the model ball
-         FPoint vprv = v_;
          
-         // If we have residual motion, check for damping.
-         //
-         // The dmaping we model here isn't friction - we leave that sort of
-         // detail to the pinball simulator on the PC.  Instead, our form of
-         // damping is just an attempt to compensate for measurement errors
-         // from the accelerometer.  During a nudge event, we should see a
-         // series of accelerations back and forth, as the table sways in
-         // response to the push, rebounds from the sway, rebounds from the
-         // rebound, etc.  We know that in reality, the table itself doesn't
-         // actually go anywhere - it just sways, and when the swaying stops,
-         // it ends up where it started.  If we use the accelerometer input
-         // to do dead reckoning on the location of the table, we know that
-         // it has to end up where it started.  This means that the series of
-         // position changes over the course of the event should cancel out -
-         // the displacements should add up to zero.  
+         // report our integrated velocity reading in x,y
+         x = rawToReport(vx);
+         y = rawToReport(vy);
          
-          to model friction and other forces
-         // on the ball.  Instead, the damping we apply is to compensate for
-         // measurement errors in the accelerometer.  During a nudge event,
-         // a real pinball cabinet typically ends up at the same place it
-         // started - it sways in response to the nudge, but the swaying
-         // quickly damps out and leaves the table unmoved.  You don't
-         // typically apply enough force to actually pick up the cabinet
-         // and move it, or slide it across the floor - and doing so would
-         // trigger a tilt, in which case the ball goes out of play and we
-         // don't really have to worry about how realistically it behaves
-         // in response to the acceleration.
-         if (vprv.magnitude() != 0)
-         {
-             // The model ball is moving.  If the current motion has been
-             // going on for long enough, apply damping.  We wait a short
-             // time before we apply damping to allow small continuous
-             // accelerations (from tiling the table) to get the ball
-             // rolling.
-             if (tRest_.read_ms() > 100)
-             {
-             }
-         }
-         else
-         {
-             // the model ball is at rest; if the instantaneous acceleration
-             // is also near zero, reset the rest timer
-             if (dv.magnitude() < 0.025)
-                 tRest_.reset();
-         }
-         
-         // If the current velocity change is near zero, damp the ball's
-         // velocity.  The idea is that the total series of accelerations 
-         // from a nudge should net to zero, since a nudge doesn't
-         // actually move the table anywhere.  
-         // 
-         // Ideally, this wouldn't be necessary, because the raw
-         // accelerometer readings should organically add up to zero over
-         // the course of a nudge.  In practice, the accelerometer isn't
-         // perfect; it can only sample so fast, so it can't capture every
-         // instantaneous change; and each reading has some small measurement
-         // error, which becomes significant when many readings are added
-         // together.  The damping is an attempt to reconcile the imperfect
-         // measurements with what how expect the real physical system to
-         // behave - we know what the outcome of an event should be, so we
-         // adjust our measurements to get the expected outcome.
-         //
-         // If the ball's velocity is large at this point, assume that this
-         // wasn't a nudge event at all, but a sustained inclination - as
-         // though the player picked up one end of the table and held it
-         // up for a while, to accelerate the ball down the sloped table.
-         // In this case just reset the velocity to zero without doing
-         // any damping, so that we don't pass through any deceleration
-         // to the pinball simulation.  In this case we want to leave it
-         // to the pinball simulation to do its own modeling of friction
-         // or bouncing to decelerate the ball.  Our correction is only
-         // realistic for brief events that naturally net out to neutral
-         // accelerations.
-         if (dv.magnitude() < .025)
-         {
-            // check the ball's speed
-            if (v_.magnitude() < .25)
-            {
-                // apply the damping
-                FPoint damp(damping(v_.x), damping(v_.y));
-                dv -= damp;
-                ledB = 0;
-            }
-            else
-            {
-                // the ball is going too fast - simply reset it
-                v_ = dv;
-                vprv = dv;
-                ledB = 1;
-            }
-         }
-         else
-             ledB = 1;
-         
-         // apply the velocity change for this interval
-         v_ += dv;
-         
-         // return the acceleration since the last update (change in velocity
-         // over time) in x,y
-         dv /= dt;
-         x = (v_.x - vprv.x) / dt;
-         y = (v_.y - vprv.y) / dt;
+         // apply a small dead zone near the center
+         // if (abs(x) < 6) x = 0;
+         // if (abs(y) < 6) y = 0;
          
          // report the calibrated instantaneous acceleration in rx,ry
-         rx = araw.x - center_.x;
-         ry = araw.y - center_.y;
+         rx = int(round((ax - cx_)*JOYMAX));
+         ry = int(round((ay - cy_)*JOYMAX));
+         
+#ifdef DEBUG_PRINTF
+         if (x != 0 || y != 0)        
+             printf("%f %f %d %d %f\r\n", vx, vy, x, y, dt);
+#endif
      }    
     
 private:
-    // velocity damping function
-    float damping(float v)
+    // adjust a raw acceleration figure to a usb report value
+    int rawToReport(float v)
     {
-        // scale to -2048..2048 range, and get the absolute value
-        float a = fabs(v*2048.0);
+        // scale to the joystick report range and round to integer
+        int i = int(round(v*JOYMAX));
         
-        // damp out small velocities immediately
-        if (a < 20)
-            return v;
-        
-        // calculate the cube root of the scaled value
-        float r = exp(log(a)/3.0);
-        
-        // rescale
-        r /= 2048.0;
-        
-        // apply the sign and return the result
-        return (v < 0 ? -r : r);
+        // if it's near the center, scale it roughly as 20*(i/20)^2,
+        // to suppress noise near the rest position
+        static const int filter[] = { 
+            -18, -16, -14, -13, -11, -10, -8, -7, -6, -5, -4, -3, -2, -2, -1, -1, 0, 0, 0, 0,
+            0,
+            0, 0, 0, 0, 1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 10, 11, 13, 14, 16, 18
+        };
+        return (i > 20 || i < -20 ? i : filter[i+20]);
     }
 
     // interrupt handler
@@ -646,58 +752,60 @@ private:
         // off to on, so we have to make sure it's off.
         float x, y, z;
         mma_.getAccXYZ(x, y, z);
-
-        // store the raw results
-        araw_.set(x, y);
-        zraw_ = z;
         
         // calculate the time since the last interrupt
         float dt = tInt_.read_us()/1.0e6;
         tInt_.reset();
+
+        // integrate the time slice from the previous reading to this reading
+        vx_ += (x + ax_ - 2*cx_)*dt/2;
+        vy_ += (y + ay_ - 2*cy_)*dt/2;
         
-        // Add the velocity to the running total.  First, calibrate the
-        // raw acceleration to our centerpoint, then multiply by the time
-        // since the last sample to get the velocity resulting from
-        // applying this acceleration for the sample time.
-        FPoint rdt((x - center_.x)*dt, (y - center_.y)*dt);
-        vsum_ += rdt;
+        // store the updates
+        ax_ = x;
+        ay_ = y;
+        az_ = z;
     }
     
     // underlying accelerometer object
     MMA8451Q mma_;
     
     // last raw acceleration readings
-    FPoint araw_;
-    float zraw_;
+    float ax_, ay_, az_;
     
-    // total velocity change since the last get() sample
-    FPoint vsum_;
-    
-    // current modeled ball velocity
-    FPoint v_;
-    
+    // integrated velocity reading since last get()
+    float vx_, vy_;
+        
     // timer for measuring time between get() samples
     Timer tGet_;
     
     // timer for measuring time between interrupts
     Timer tInt_;
-    
-    // time since last rest
-    Timer tRest_;
 
-    // calibrated center point - this is the position where we observe
-    // constant input for a few seconds, telling us the orientation of
-    // the accelerometer device when at rest
-    FPoint center_;
+    // Calibration reference point for accelerometer.  This is the
+    // average reading on the accelerometer when in the neutral position
+    // at rest.
+    float cx_, cy_;
 
     // timer for atuo-centering
     Timer tCenter_;
-    
-    // recent accelerometer readings, for auto centering
+
+    // Auto-centering history.  This is a separate history list that
+    // records results spaced out sparesely over time, so that we can
+    // watch for long-lasting periods of rest.  When we observe nearly
+    // no motion for an extended period (on the order of 5 seconds), we
+    // take this to mean that the cabinet is at rest in its neutral 
+    // position, so we take this as the calibration zero point for the
+    // accelerometer.  We update this history continuously, which allows
+    // us to continuously re-calibrate the accelerometer.  This ensures
+    // that we'll automatically adjust to any actual changes in the
+    // cabinet's orientation (e.g., if it gets moved slightly by an
+    // especially strong nudge) as well as any systematic drift in the
+    // accelerometer measurement bias (e.g., from temperature changes).
     int iAccPrv_, nAccPrv_;
     static const int maxAccPrv = 5;
-    FPoint accPrv_[maxAccPrv];
-
+    AccHist accPrv_[maxAccPrv];
+    
     // interurupt pin name
     PinName irqPin_;
     
@@ -746,12 +854,15 @@ int main(void)
     ledG = 1;
     ledB = 1;
     
+    // initialize the LedWiz ports
+    initLwOut();
+    
+    // we don't need a reset yet
+    bool needReset = false;
+    
     // clear the I2C bus for the accelerometer
     clear_i2c();
     
-    // Create the joystick USB client
-    MyUSBJoystick js(USB_VENDOR_ID, USB_PRODUCT_ID, USB_VERSION_NO);
-
     // set up a flash memory controller
     FreescaleIAP iap;
     
@@ -761,9 +872,7 @@ int main(void)
     NVM cfg;
     
     // check for valid flash
-    bool flash_valid = (flash->d.sig == flash->SIGNATURE 
-                        && flash->d.vsn == flash->VERSION
-                        && flash->checksum == CRC32(&flash->d, sizeof(flash->d)));
+    bool flash_valid = flash->valid();
                       
     // Number of pixels we read from the sensor on each frame.  This can be
     // less than the physical pixel count if desired; we'll read every nth
@@ -784,17 +893,28 @@ int main(void)
     // if the flash is valid, load it; otherwise initialize to defaults
     if (flash_valid) {
         memcpy(&cfg, flash, sizeof(cfg));
-        printf("Flash restored: plunger min=%d, max=%d\r\n", 
-            cfg.d.plungerMin, cfg.d.plungerMax);
+        printf("Flash restored: plunger cal=%d, min=%d, zero=%d, max=%d\r\n", 
+            cfg.d.plungerCal, cfg.d.plungerMin, cfg.d.plungerZero, cfg.d.plungerMax);
     }
     else {
         printf("Factory reset\r\n");
         cfg.d.sig = cfg.SIGNATURE;
         cfg.d.vsn = cfg.VERSION;
+        cfg.d.plungerCal = 0;
+        cfg.d.plungerZero = 0;
         cfg.d.plungerMin = 0;
         cfg.d.plungerMax = npix;
+        cfg.d.ledWizUnitNo = DEFAULT_LEDWIZ_UNIT_NUMBER;
+        cfg.d.ccdEnabled = true;
     }
     
+    // Create the joystick USB client.  Note that we use the LedWiz unit
+    // number from the saved configuration.
+    MyUSBJoystick js(
+        USB_VENDOR_ID, 
+        USB_PRODUCT_ID | cfg.d.ledWizUnitNo,
+        USB_VERSION_NO);
+
     // plunger calibration button debounce timer
     Timer calBtnTimer;
     calBtnTimer.start();
@@ -825,7 +945,19 @@ int main(void)
     TSL1410R ccd(PTE20, PTE21, PTB0);
     
     // last accelerometer report, in mouse coordinates
-    int x = 127, y = 127, z = 0;
+    int x = 0, y = 0, z = 0;
+    
+    // previous two plunger readings, for "debouncing" the results (z0 is
+    // the most recent, z1 is the one before that)
+    int z0 = 0, z1 = 0, z2 = 0;
+    
+    // Firing in progress: we set this when we detect the start of rapid 
+    // plunger movement from a retracted position towards the rest position.
+    // The actual plunger spring return speed seems to be too slow for VP, 
+    // so when we detect the start of this motion, we immediately tell VP
+    // to return the plunger to rest, then we monitor the real plunger 
+    // until it atcually stops.
+    bool firing = false;
 
     // start the first CCD integration cycle
     ccd.clear();
@@ -839,50 +971,80 @@ int main(void)
         // handle input in as timely a fashion as possible by deferring
         // output tasks as long as there's input to process.
         HID_REPORT report;
-        while (js.readNB(&report) && report.length == 8)
+        while (js.readNB(&report))
         {
-            uint8_t *data = report.data;
-            if (data[0] == 64) 
+            // all Led-Wiz reports are 8 bytes exactly
+            if (report.length == 8)
             {
-                // LWZ-SBA - first four bytes are bit-packed on/off flags
-                // for the outputs; 5th byte is the pulse speed (0-7)
-                //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
-                //       data[1], data[2], data[3], data[4], data[5]);
-
-                // update all on/off states
-                for (int i = 0, bit = 1, ri = 1 ; i < 32 ; ++i, bit <<= 1)
+                uint8_t *data = report.data;
+                if (data[0] == 64) 
                 {
-                    if (bit == 0x100) {
-                        bit = 1;
-                        ++ri;
-                    }
-                    wizOn[i] = ((data[ri] & bit) != 0);
-                }
+                    // LWZ-SBA - first four bytes are bit-packed on/off flags
+                    // for the outputs; 5th byte is the pulse speed (0-7)
+                    //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
+                    //       data[1], data[2], data[3], data[4], data[5]);
     
-                // update the physical outputs
-                updateWizOuts();
-                
-                // reset the PBA counter
-                pbaIdx = 0;
-            }
-            else 
-            {
-                // LWZ-PBA - full state dump; each byte is one output
-                // in the current bank.  pbaIdx keeps track of the bank;
-                // this is incremented implicitly by each PBA message.
-                //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
-                //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
-
-                // update all output profile settings
-                for (int i = 0 ; i < 8 ; ++i)
-                    wizVal[pbaIdx + i] = data[i];
-
-                // update the physical LED state if this is the last bank                    
-                if (pbaIdx == 24)
+                    // update all on/off states
+                    for (int i = 0, bit = 1, ri = 1 ; i < 32 ; ++i, bit <<= 1)
+                    {
+                        if (bit == 0x100) {
+                            bit = 1;
+                            ++ri;
+                        }
+                        wizOn[i] = ((data[ri] & bit) != 0);
+                    }
+        
+                    // update the physical outputs
                     updateWizOuts();
-
-                // advance to the next bank
-                pbaIdx = (pbaIdx + 8) & 31;
+                    
+                    // reset the PBA counter
+                    pbaIdx = 0;
+                }
+                else if (data[0] == 65)
+                {
+                    // Private control message.  This isn't an LedWiz message - it's
+                    // an extension for this device.  65 is an invalid PBA setting,
+                    // and isn't used for any other LedWiz message, so we appropriate
+                    // it for our own private use.  The first byte specifies the 
+                    // message type.
+                    if (data[1] == 1)
+                    {
+                        // Set Configuration:
+                        //     data[2] = LedWiz unit number (0x00 to 0x0f)
+                        //     data[3] = feature enable bit mask:
+                        //               0x01 = enable CCD
+                        
+                        // we'll need a reset if the LedWiz unit number is changing
+                        uint8_t newUnitNo = data[2] & 0x0f;
+                        needReset |= (newUnitNo != cfg.d.ledWizUnitNo);
+                        
+                        // set the configuration parameters from the message
+                        cfg.d.ledWizUnitNo = newUnitNo;
+                        cfg.d.ccdEnabled = data[3] & 0x01;
+                        
+                        // save the configuration
+                        cfg.save(iap, flash_addr);
+                    }
+                }
+                else 
+                {
+                    // LWZ-PBA - full state dump; each byte is one output
+                    // in the current bank.  pbaIdx keeps track of the bank;
+                    // this is incremented implicitly by each PBA message.
+                    //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+                    //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+    
+                    // update all output profile settings
+                    for (int i = 0 ; i < 8 ; ++i)
+                        wizVal[pbaIdx + i] = data[i];
+    
+                    // update the physical LED state if this is the last bank                    
+                    if (pbaIdx == 24)
+                        updateWizOuts();
+    
+                    // advance to the next bank
+                    pbaIdx = (pbaIdx + 8) & 31;
+                }
             }
         }
        
@@ -914,8 +1076,10 @@ int main(void)
                     // enter calibration mode
                     calBtnState = 3;
                     
-                    // reset the calibration limits
+                    // set extremes for the calibration data, so that the actual
+                    // values we read will set new high/low water marks on the fly
                     cfg.d.plungerMax = 0;
+                    cfg.d.plungerZero = npix;
                     cfg.d.plungerMin = npix;
                 }
                 break;
@@ -943,12 +1107,9 @@ int main(void)
                 // exit calibration mode
                 calBtnState = 0;
                 
-                // Save the current configuration state to flash, so that it
-                // will be preserved through power off.  Update the checksum
-                // first so that we recognize the flash record as valid.
-                cfg.checksum = CRC32(&cfg.d, sizeof(cfg.d));
-                iap.erase_sector(flash_addr);
-                iap.program_flash(flash_addr, &cfg, sizeof(cfg));
+                // save the updated configuration
+                cfg.d.plungerCal = 1;
+                cfg.save(iap, flash_addr);
                 
                 // the flash state is now valid
                 flash_valid = true;
@@ -999,105 +1160,297 @@ int main(void)
             }
         }
         
-        // read the plunger sensor
-        int znew = z;
-        uint16_t pix[npix];
-        ccd.read(pix, npix);
-
-        // get the average brightness at each end of the sensor
-        long avg1 = (long(pix[0]) + long(pix[1]) + long(pix[2]) + long(pix[3]) + long(pix[4]))/5;
-        long avg2 = (long(pix[npix-1]) + long(pix[npix-2]) + long(pix[npix-3]) + long(pix[npix-4]) + long(pix[npix-5]))/5;
-        
-        // figure the midpoint in the brightness; multiply by 3 so that we can
-        // compare sums of three pixels at a time to smooth out noise
-        long midpt = (avg1 + avg2)/2 * 3;
-        
-        // Work from the bright end to the dark end.  VP interprets the
-        // Z axis value as the amount the plunger is pulled: the minimum
-        // is the rest position, the maximum is fully pulled.  So we 
-        // essentially want to report how much of the sensor is lit,
-        // since this increases as the plunger is pulled back.
-        int si = 1, di = 1;
-        if (avg1 < avg2)
-            si = npix - 2, di = -1;
-
-        // scan for the midpoint     
-        uint16_t *pixp = pix + si;           
-        for (int n = 1 ; n < npix - 1 ; ++n, pixp += di)
+        // read the plunger sensor, if it's enabled
+        if (cfg.d.ccdEnabled)
         {
-            // if we've crossed the midpoint, report this position
-            if (long(pixp[-1]) + long(pixp[0]) + long(pixp[1]) < midpt)
+            // start with the previous reading, in case we don't have a
+            // clear result on this frame
+            int znew = z;
+
+            // read the array
+            uint16_t pix[npix];
+            ccd.read(pix, npix);
+    
+            // get the average brightness at each end of the sensor
+            long avg1 = (long(pix[0]) + long(pix[1]) + long(pix[2]) + long(pix[3]) + long(pix[4]))/5;
+            long avg2 = (long(pix[npix-1]) + long(pix[npix-2]) + long(pix[npix-3]) + long(pix[npix-4]) + long(pix[npix-5]))/5;
+            
+            // figure the midpoint in the brightness; multiply by 3 so that we can
+            // compare sums of three pixels at a time to smooth out noise
+            long midpt = (avg1 + avg2)/2 * 3;
+            
+            // Work from the bright end to the dark end.  VP interprets the
+            // Z axis value as the amount the plunger is pulled: zero is the
+            // rest position, and the axis maximum is fully pulled.  So we 
+            // essentially want to report how much of the sensor is lit,
+            // since this increases as the plunger is pulled back.
+            int si = 1, di = 1;
+            if (avg1 < avg2)
+                si = npix - 2, di = -1;
+    
+            // If the bright end and dark end don't differ by enough, skip this
+            // reading entirely - we must have an overexposed or underexposed frame.
+            // Otherwise proceed with the scan.
+            if (labs(avg1 - avg2) > 0x1000)
             {
-                // note the new position
-                int pos = n;
-                
-                // if the bright end and dark end don't differ by enough, skip this
-                // reading entirely - we must have an overexposed or underexposed frame
-                if (labs(avg1 - avg2) < 0x3333)
-                    break; 
-                
-                // Calibrate, or apply calibration, depending on the mode.
-                // In either case, normalize to a 0-127 range.  VP appears to
-                // ignore negative Z axis values.
-                if (calBtnState == 3)
+                uint16_t *pixp = pix + si;           
+                for (int n = 1 ; n < npix - 1 ; ++n, pixp += di)
                 {
-                    // calibrating - note if we're expanding the calibration envelope
-                    if (pos < cfg.d.plungerMin)
-                        cfg.d.plungerMin = pos;   
-                    if (pos > cfg.d.plungerMax)
-                        cfg.d.plungerMax = pos;
+                    // if we've crossed the midpoint, report this position
+                    if (long(pixp[-1]) + long(pixp[0]) + long(pixp[1]) < midpt)
+                    {
+                        // note the new position
+                        int pos = n;
                         
-                    // normalize to the full physical range while calibrating
-                    znew = int(float(pos)/npix * 127);
+                        // Calibrate, or apply calibration, depending on the mode.
+                        // In either case, normalize to our range.  VP appears to
+                        // ignore negative Z axis values.
+                        if (calBtnState == 3)
+                        {
+                            // calibrating - note if we're expanding the calibration envelope
+                            if (pos < cfg.d.plungerMin)
+                                cfg.d.plungerMin = pos;
+                            if (pos < cfg.d.plungerZero)
+                                cfg.d.plungerZero = pos;
+                            if (pos > cfg.d.plungerMax)
+                                cfg.d.plungerMax = pos;
+                                
+                            // normalize to the full physical range while calibrating
+                            znew = int(round(float(pos)/npix * JOYMAX));
+                        }
+                        else
+                        {
+                            // Running normally - normalize to the calibration range.  Note
+                            // that values below the zero point are allowed - the zero point
+                            // represents the park position, where the plunger sits when at
+                            // rest, but a mechanical plunger has a smmall amount of travel
+                            // in the "push" direction.  We represent forward travel with
+                            // negative z values.
+                            if (pos > cfg.d.plungerMax)
+                                pos = cfg.d.plungerMax;
+                            znew = int(round(float(pos - cfg.d.plungerZero)
+                                / (cfg.d.plungerMax - cfg.d.plungerZero + 1) * JOYMAX));
+                        }
+                        
+                        // done
+                        break;
+                    }
                 }
-                else
-                {
-                    // running normally - normalize to the calibration range
-                    if (pos < cfg.d.plungerMin)
-                        pos = cfg.d.plungerMin;
-                    if (pos > cfg.d.plungerMax)
-                        pos = cfg.d.plungerMax;
-                    znew = int(float(pos - cfg.d.plungerMin)
-                        / (cfg.d.plungerMax - cfg.d.plungerMin + 1) * 127);
-                }
-                
-                // done
-                break;
             }
-        }
         
+            // "Debounce" the plunger reading.  
+            //
+            // It takes us about 25ms to read the CCD and calculate the new
+            // plunger position.  That's not quite fast enough to keep up with
+            // very fast plunger motions.  And the single most important motion 
+            // the plunger makes - releasing from a retracted position it to 
+            // launch the ball - is just such a fast motion.  Our scan rate is
+            // fast enough to capture one or two intermediate frames in a release
+            // motion, but it's not nearly fast enough to get a clean reading on 
+            // the instantaneous speed, let alone accelerations.
+            //
+            // Fortunately, we don't need to take speed readings at all.  VP has
+            // its own internal simulated plunger model, which it uses to calculate
+            // the speed and force of the plunger movement.  Our readings tell VP
+            // where the plunger should be at any given moment, and VP makes its
+            // model move in that direction, using the model parameters for speed
+            // and acceleration.  So whatever speed we see physically is irrelevant;
+            // the VP model plunger can only move at the speed set in its model.
+            //
+            // This works out great for our relatively slow scan rate.  We don't
+            // have to take readings quickly enough to get instantaneous velocities;
+            // we just need to know where the plunger is once in a while so that
+            // VP can move its model plunger in the right direction for the right
+            // distance, and VP figures out the appropriate speed for the required
+            // travel.  
+            //
+            // But there is one complication.  We do scan fast enough to see *some* 
+            // intermediate positions during a fast motion.  Suppose that on one
+            // scan, the plunger is fully retracted.  Now suppose that the player
+            // releases the plunger just after that scan, such that our next scan
+            // catches the plunger *almost* back to the rest position, but not
+            // quite - just a hair short.  If we send these two consecutive reports
+            // to VP, VP will set its model plunger in motion with the *almost*
+            // reading as the destination.  VP will step its physics model with
+            // this new plunger destination until we send another reading.
+            // Ddpending on how the timing of our next scan works out, it's
+            // possible that the model plunger will have reached or almost reached
+            // the destination by the time we send our next report - so VP might
+            // be decelerating or stopping the model plunger as it approaches
+            // this position.  Our next scan will probably find the plunger back
+            // at the rest position, so we'll tell VP to continue moving the
+            // plunger to the zero spot.  The problem that just happened is that
+            // our intermediate *almost there* report might have robbed the
+            // motion in the model of some energy that should have been there,
+            // by causing it to decelerate briefly near the intermediate position.
+            //
+            // This is relatively easy to fix.  Because VP does all of the fast
+            // motion modeling on its own anyway, there's no advantage to sending
+            // VP intermediate positions during rapid motions - and there's the
+            // disadvantage we just described.  So all we need to do is skip
+            // reports while the plunger is moving rapidly - we just need to wait
+            // for it to settle at a new position before sending an update.
+            //
+            // So: only report the latest reading if it's relatively close to the
+            // previous reading, indicating we're moving slowly or at rest.  One
+            // exception: if we see a reversal of direction, report the previous
+            // reading, which is the peak in the previous direction.  This will
+            // catch cases where the player is moving the plunger very rapidly
+            // back and forth, as well as release motions where the plunger
+            // briefly overshoots the rest position.
+#if 1
+            // Check to see if plunger firing is in progress.  If not, check
+            // to see if it looks like we just started firing.
+            const int restTol = JOYMAX/npix * 4;
+            const int fireTol = JOYMAX/npix * 12;
+            if (firing)
+            {
+                // Firing in progress - we've already told VP to send its
+                // model plunger all the way back to the rest position, so
+                // send no further reports until the mechanical plunger
+                // actually comes to rest somewhere.
+                if (abs(z0 - z2) < restTol && abs(znew - z2) < restTol)
+                {
+                    // the plunger is back at rest - firing is done
+                    firing = false;
+                    
+                    // resume normal reporting
+                    z = z2;
+                }
+            }
+            else if (z0 < z2 && z1 < z2 && znew < z2
+                     && (z0 < z2 - fireTol 
+                         || z1 < z2 - fireTol
+                         || znew < z2 - fireTol))
+            {
+                // Big jumps toward rest position in last two readings - 
+                // firing has begun.  Report an immediate return to the
+                // rest position, and send no further reports until the
+                // physical plunger has come to rest.  This effectively
+                // detaches VP's model plunger from the real world for
+                // the duration of the spring return, letting VP evolve
+                // its model without trying to synchronize with the
+                // mechanical version.  The release motion is too fast
+                // for that to work well; we can't take samples quickly
+                // enough to get prcise velocity or acceleration
+                // readings.  It's better to let VP figure the speed
+                // and acceleration through modeling.  Plus, that lets
+                // each virtual table set the desired parameters for its
+                // virtual plunger, rather than imposing the actual
+                // mechanical charateristics of the physical plunger on
+                // every table.
+                firing = true;
+                z = 0;
+            }
+            else
+            {
+                // everything normal; report the 3rd recent position on
+                // tape delay
+                z = z2;
+            }
+        
+            // shift in the new reading
+            z2 = z1;
+            z1 = z0;
+            z0 = znew;
+#endif
+
+
+#if 0
+            // check for the anomalous fast return case, where we get two
+            // descending readings out of order
+            if (znew < z1 
+                && z0 < z1 
+                && znew > z0
+                && abs(znew - z1) > JOYMAX/npix*3 
+                && abs(z0 - z1) > JOYMAX/npix*3)
+            {
+                // drop the middle reading - report nothing this round
+                z0 = znew;
+            }
+            else
+            {   
+                // report the previous reading
+                z = z0;
+                
+                // shift in the new reading
+                z1 = z0;
+                z0 = znew;
+            }
+#endif
+#if 0
+            static int insertion = -1;
+            static int insertionList[] = { 0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200 };
+            static int overcnt = 0;
+            if (insertion >= 0)
+                z = insertionList[insertion--];
+            else if (znew > 3500 && z == 0)
+                z = 3500, overcnt = 1;
+            else if (znew > 3500)
+                ++overcnt;
+            else if (znew < 3500 && overcnt > 3)
+                insertion = sizeof(insertionList)/sizeof(insertionList[0]) - 1, z = 3500, overcnt = 0;
+            else
+                overcnt = 0, z = 0;
+#endif
+#if 0
+            if (znew != z) printf("%d\r\n", znew);
+            z = znew;
+#endif
+#if 0
+            // average the last three readings
+            z = int(round(0.0f + znew + z0 + z1)/3.0f);
+            
+            // shift in the new reading
+            z1 = z0;
+            z0 = znew;
+#endif
+#if 0
+            const int zTol = JOYMAX/npix*5;
+            if (abs(znew - z0) < zTol && abs(z0 - z1) < zTol)
+            {
+                // slow or at rest - report the current reading
+                z = znew;
+            }
+            else if ((z0 < z1 && znew > z0) || (z0 > z1 && znew < z0))
+            {
+                // direction reveersal - report the peak reading
+                z = z0;
+            }
+                
+            // in any case, remember this new reading, whether reporting it or not
+            z1 = z0;
+            z0 = znew;
+#endif
+        }
+
         // read the accelerometer
-        float xa, ya, rxa, rya;
+        int xa, ya, rxa, rya;
         accel.get(xa, ya, rxa, rya);
         
-        // confine the accelerometer results to the unit interval
-        if (xa < -1.0) xa = -1.0;
-        if (xa > 1.0) xa = 1.0;
-        if (ya < -1.0) ya = -1.0;
-        if (ya > 1.0) ya = 1.0;
-
-        // scale to our -127..127 reporting range
-        int xnew = int(127 * xa);
-        int ynew = int(127 * ya);
-
-        // store the updated joystick coordinates
-        x = xnew;
-        y = ynew;
-        z = znew;
+        // confine the results to our joystick axis range
+        if (xa < -JOYMAX) xa = -JOYMAX;
+        if (xa > JOYMAX) xa = JOYMAX;
+        if (ya < -JOYMAX) ya = -JOYMAX;
+        if (ya > JOYMAX) ya = JOYMAX;
         
-        // Send the status report.  It doesn't really matter what
-        // coordinate system we use, since Visual Pinball has config
-        // options for rotations and axis reversals, but reversing y
-        // at the device level seems to produce the most intuitive 
-        // results for the Windows joystick control panel view, which
-        // is an easy way to check that the device is working.
+        // store the updated accelerometer coordinates
+        x = xa;
+        y = ya;
+        
+        // Send the status report.
         //
         // $$$ button updates are for diagnostics, so we can see that the
         // device is sending data properly if the accelerometer gets stuck
-        js.update(x, -y, z, int(rxa*127), int(rya*127), hb ? 0x5500 : 0xAA00);
+        uint16_t btns = hb ? 0x5500 : 0xAA00;
+        js.update(x, y, z, rxa, rya, btns);
         
-        // show a heartbeat flash in blue every so often if not in 
-        // calibration mode
+#ifdef DEBUG_PRINTF
+        if (x != 0 || y != 0)
+            printf("%d,%d\r\n", x, y);
+#endif
+
+        // provide a visual status indication on the on-board LED
         if (calBtnState < 2 && hbTimer.read_ms() > 1000) 
         {
             if (js.isSuspended() || !js.isConnected())
@@ -1110,7 +1463,7 @@ int main(void)
                 // show a status flash every so often                
                 if (hbcnt % 3 == 0)
                 {
-                    // disconnected = red flash; suspended = red-red
+                    // disconnected = red/red flash; suspended = red
                     for (int n = js.isConnected() ? 1 : 2 ; n > 0 ; --n)
                     {
                         ledR = 0;
@@ -1120,21 +1473,30 @@ int main(void)
                     }
                 }
             }
-            else if (flash_valid)
+            else if (needReset)
             {
-                // connected, NVM valid - flash blue/green
+                // connected, need to reset due to changes in config parameters -
+                // flash red/green
+                hb = !hb;
+                ledR = (hb ? 0 : 1);
+                ledG = (hb ? 1 : 0);
+                ledB = 0;
+            }
+            else if (cfg.d.ccdEnabled && !cfg.d.plungerCal)
+            {
+                // connected, plunger calibration needed - flash yellow/green
+                hb = !hb;
+                ledR = (hb ? 0 : 1);
+                ledG = 0;
+                ledB = 1;
+            }
+            else
+            {
+                // connected - flash blue/green
                 hb = !hb;
                 ledR = 1;
                 ledG = (hb ? 0 : 1);
                 ledB = (hb ? 1 : 0);
-            }
-            else
-            {
-                // connected, factory reset - flash yellow/green
-                hb = !hb;
-                //ledR = (hb ? 0 : 1);
-                //ledG = 0;
-                ledB = 1;
             }
             
             // reset the heartbeat timer

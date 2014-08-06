@@ -91,7 +91,7 @@ class USBJoystick: public USBHID {
          * @param product_release Your product_release (default: 0x0001)
          */
          USBJoystick(uint16_t vendor_id = 0x1234, uint16_t product_id = 0x0100, uint16_t product_release = 0x0001, int waitForConnect = true): 
-             USBHID(8, 8, vendor_id, product_id, product_release, false)
+             USBHID(16, 8, vendor_id, product_id, product_release, false)
              { 
                  _init();
                  connect(waitForConnect);
@@ -152,11 +152,11 @@ class USBJoystick: public USBHID {
          virtual uint8_t *stringIproductDesc();
  
      private:
-         int8_t _x;                       
-         int8_t _y;     
-         int8_t _z;
-         int8_t _rx;
-         int8_t _ry;
+         int16_t _x;                       
+         int16_t _y;     
+         int16_t _z;
+         int16_t _rx;
+         int16_t _ry;
          uint16_t _buttons;
          
          void _init();                 

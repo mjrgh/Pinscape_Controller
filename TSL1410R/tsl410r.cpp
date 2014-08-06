@@ -26,7 +26,7 @@ void TSL1410R::clear()
 
 void TSL1410R::read(uint16_t *pix, int n)
 {
-    // Start the next integration cycle by pulsing SI and one clock.
+    // start the next integration cycle by pulsing SI and one clock
     si = 1;
     clock = 1;
     clock = 0;

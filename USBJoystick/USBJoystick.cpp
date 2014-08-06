@@ -39,12 +39,22 @@ bool USBJoystick::update() {
    // Fill the report according to the Joystick Descriptor
    report.data[0] = _buttons & 0xff;
    report.data[1] = (_buttons >> 8) & 0xff;
+#if 0 // 8-bit coordinate reports
    report.data[2] = _x & 0xff;            
    report.data[3] = _y & 0xff;            
    report.data[4] = _z & 0xff;
    report.data[5] = _rx & 0xff;
    report.data[6] = _ry & 0xff;
    report.length = 7; 
+#else // 16-bit reports
+#define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
+   put(2, _x);
+   put(4, _y);
+   put(6, _z);
+   put(8, _rx);
+   put(10, _ry);
+   report.length = 12;
+#endif
  
    // send the report
    return sendNB(&report);
@@ -84,7 +94,7 @@ uint8_t * USBJoystick::reportDesc()
          USAGE(1), 0x04,                 // Joystick
 
          COLLECTION(1), 0x01,            // Application
-      //     COLLECTION(1), 0x00,          // Physical
+       //  COLLECTION(1), 0x00,          // Physical
            
              USAGE_PAGE(1), 0x09,        // Buttons
              USAGE_MINIMUM(1), 0x01,     // { buttons }
@@ -103,9 +113,9 @@ uint8_t * USBJoystick::reportDesc()
              USAGE(1), 0x32,             // Z
              USAGE(1), 0x33,             // Rx
              USAGE(1), 0x34,             // Ry
-             LOGICAL_MINIMUM(1), 0x81,   // each value ranges -127...
-             LOGICAL_MAXIMUM(1), 0x7f,   // ...to 127
-             REPORT_SIZE(1), 0x08,       // 8 bits per report
+             LOGICAL_MINIMUM(2), 0x00,0xF0,   // each value ranges -4096
+             LOGICAL_MAXIMUM(2), 0x00,0x10,   // ...to +4096
+             REPORT_SIZE(1), 0x10,       // 16 bits per report
              REPORT_COUNT(1), 0x05,      // 5 reports (X, Y, Z, Rx, Ry)
              INPUT(1), 0x02,             // Data, Variable, Absolute
 
@@ -113,7 +123,7 @@ uint8_t * USBJoystick::reportDesc()
              0x09, 0x01,                 // usage
              0x91, 0x01,                 // Output (array)
 
-     //      END_COLLECTION(0),
+     //    END_COLLECTION(0),
          END_COLLECTION(0)
       };
  
