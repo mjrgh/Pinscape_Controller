@@ -1237,68 +1237,34 @@ int main(void)
                     }
                 }
             }
-        
-            // "Debounce" the plunger reading.  
+
+            // Determine if the plunger is being fired - i.e., if the player
+            // has just released the plunger from a retracted position.
             //
-            // It takes us about 25ms to read the CCD and calculate the new
-            // plunger position.  That's not quite fast enough to keep up with
-            // very fast plunger motions.  And the single most important motion 
-            // the plunger makes - releasing from a retracted position it to 
-            // launch the ball - is just such a fast motion.  Our scan rate is
-            // fast enough to capture one or two intermediate frames in a release
-            // motion, but it's not nearly fast enough to get a clean reading on 
-            // the instantaneous speed, let alone accelerations.
+            // We treat firing as an event.  That is, we tell VP when the
+            // plunger is fired, and then stop sending data until the firing
+            // is complete, allowing VP to carry out the firing motion using
+            // its internal model plunger rather than trying to track the
+            // intermediate positions of the mechanical plunger throughout
+            // the firing motion.  This has several benefits.  First is that 
+            // our readings aren't very accurate during rapid movement,
+            // because we get too much motion blur.  Second is that the
+            // event approach allows VP to simulate the plunger motion
+            // according to each table's particular plunger settings.
+            // Different tables have different plunger strengths and speeds,
+            // so we want to defer to the model for the physics of the firing
+            // motion within each simulation.
             //
-            // Fortunately, we don't need to take speed readings at all.  VP has
-            // its own internal simulated plunger model, which it uses to calculate
-            // the speed and force of the plunger movement.  Our readings tell VP
-            // where the plunger should be at any given moment, and VP makes its
-            // model move in that direction, using the model parameters for speed
-            // and acceleration.  So whatever speed we see physically is irrelevant;
-            // the VP model plunger can only move at the speed set in its model.
-            //
-            // This works out great for our relatively slow scan rate.  We don't
-            // have to take readings quickly enough to get instantaneous velocities;
-            // we just need to know where the plunger is once in a while so that
-            // VP can move its model plunger in the right direction for the right
-            // distance, and VP figures out the appropriate speed for the required
-            // travel.  
-            //
-            // But there is one complication.  We do scan fast enough to see *some* 
-            // intermediate positions during a fast motion.  Suppose that on one
-            // scan, the plunger is fully retracted.  Now suppose that the player
-            // releases the plunger just after that scan, such that our next scan
-            // catches the plunger *almost* back to the rest position, but not
-            // quite - just a hair short.  If we send these two consecutive reports
-            // to VP, VP will set its model plunger in motion with the *almost*
-            // reading as the destination.  VP will step its physics model with
-            // this new plunger destination until we send another reading.
-            // Ddpending on how the timing of our next scan works out, it's
-            // possible that the model plunger will have reached or almost reached
-            // the destination by the time we send our next report - so VP might
-            // be decelerating or stopping the model plunger as it approaches
-            // this position.  Our next scan will probably find the plunger back
-            // at the rest position, so we'll tell VP to continue moving the
-            // plunger to the zero spot.  The problem that just happened is that
-            // our intermediate *almost there* report might have robbed the
-            // motion in the model of some energy that should have been there,
-            // by causing it to decelerate briefly near the intermediate position.
-            //
-            // This is relatively easy to fix.  Because VP does all of the fast
-            // motion modeling on its own anyway, there's no advantage to sending
-            // VP intermediate positions during rapid motions - and there's the
-            // disadvantage we just described.  So all we need to do is skip
-            // reports while the plunger is moving rapidly - we just need to wait
-            // for it to settle at a new position before sending an update.
-            //
-            // So: only report the latest reading if it's relatively close to the
-            // previous reading, indicating we're moving slowly or at rest.  One
-            // exception: if we see a reversal of direction, report the previous
-            // reading, which is the peak in the previous direction.  This will
-            // catch cases where the player is moving the plunger very rapidly
-            // back and forth, as well as release motions where the plunger
-            // briefly overshoots the rest position.
-#if 1
+            // To detremine when a firing even occurs, we watch for rapid
+            // motion from a retracted position towards the rest position -
+            // that is, large position changes in the negative direction over
+            // a couple of consecutive readings.  When we see a rapid move
+            // toward zero, we set our internal 'firing' flag, immediately
+            // report to VP that the plunger has returned to the zero 
+            // position, and then suspend reports until the mechanical
+            // readings indicate that the plunger has come to rest (indicated
+            // by several readings in a row at roughly the same position).
+                    
             // Check to see if plunger firing is in progress.  If not, check
             // to see if it looks like we just started firing.
             const int restTol = JOYMAX/npix * 4;
@@ -1353,75 +1319,6 @@ int main(void)
             z2 = z1;
             z1 = z0;
             z0 = znew;
-#endif
-
-
-#if 0
-            // check for the anomalous fast return case, where we get two
-            // descending readings out of order
-            if (znew < z1 
-                && z0 < z1 
-                && znew > z0
-                && abs(znew - z1) > JOYMAX/npix*3 
-                && abs(z0 - z1) > JOYMAX/npix*3)
-            {
-                // drop the middle reading - report nothing this round
-                z0 = znew;
-            }
-            else
-            {   
-                // report the previous reading
-                z = z0;
-                
-                // shift in the new reading
-                z1 = z0;
-                z0 = znew;
-            }
-#endif
-#if 0
-            static int insertion = -1;
-            static int insertionList[] = { 0, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200 };
-            static int overcnt = 0;
-            if (insertion >= 0)
-                z = insertionList[insertion--];
-            else if (znew > 3500 && z == 0)
-                z = 3500, overcnt = 1;
-            else if (znew > 3500)
-                ++overcnt;
-            else if (znew < 3500 && overcnt > 3)
-                insertion = sizeof(insertionList)/sizeof(insertionList[0]) - 1, z = 3500, overcnt = 0;
-            else
-                overcnt = 0, z = 0;
-#endif
-#if 0
-            if (znew != z) printf("%d\r\n", znew);
-            z = znew;
-#endif
-#if 0
-            // average the last three readings
-            z = int(round(0.0f + znew + z0 + z1)/3.0f);
-            
-            // shift in the new reading
-            z1 = z0;
-            z0 = znew;
-#endif
-#if 0
-            const int zTol = JOYMAX/npix*5;
-            if (abs(znew - z0) < zTol && abs(z0 - z1) < zTol)
-            {
-                // slow or at rest - report the current reading
-                z = znew;
-            }
-            else if ((z0 < z1 && znew > z0) || (z0 > z1 && znew < z0))
-            {
-                // direction reveersal - report the peak reading
-                z = z0;
-            }
-                
-            // in any case, remember this new reading, whether reporting it or not
-            z1 = z0;
-            z0 = znew;
-#endif
         }
 
         // read the accelerometer
