@@ -1335,12 +1335,14 @@ int main(void)
         x = xa;
         y = ya;
         
-        // Send the status report.
-        //
-        // $$$ button updates are for diagnostics, so we can see that the
-        // device is sending data properly if the accelerometer gets stuck
-        uint16_t btns = hb ? 0x5500 : 0xAA00;
-        js.update(x, y, z, rxa, rya, btns);
+        // Send the status report.  Note that the nominal x and y axes
+        // are reversed - this makes it more intuitive to set up in VP.
+        // If we mount the Freesale card flat on the floor of the cabinet
+        // with the USB connectors facing the front of the cabinet, this
+        // arrangement of our nominal axes aligns with VP's standard
+        // setting, so that we can configure VP with X Axis = X on the
+        // joystick and Y Axis = Y on the joystick.
+        js.update(y, x, z, rxa, rya, 0);
         
 #ifdef DEBUG_PRINTF
         if (x != 0 || y != 0)
