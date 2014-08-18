@@ -20,14 +20,13 @@
 #include "stdint.h"
 #include "USBJoystick.h"
  
-bool USBJoystick::update(int16_t x, int16_t y, int16_t z, int16_t rx, int16_t ry, uint16_t buttons) 
+bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint16_t buttons, uint16_t status) 
 {
    _x = x;
    _y = y;
    _z = z;
-   _rx = rx;
-   _ry = ry;
    _buttons = buttons;     
+   _status = (uint8_t)status;
  
    // send the report
    return update();
@@ -37,29 +36,18 @@ bool USBJoystick::update() {
    HID_REPORT report;
  
    // Fill the report according to the Joystick Descriptor
-   report.data[0] = _buttons & 0xff;
-   report.data[1] = (_buttons >> 8) & 0xff;
-#if 0 // 8-bit coordinate reports
-   report.data[2] = _x & 0xff;            
-   report.data[3] = _y & 0xff;            
-   report.data[4] = _z & 0xff;
-   report.data[5] = _rx & 0xff;
-   report.data[6] = _ry & 0xff;
-   report.length = 7; 
-#else // 16-bit reports
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
+   put(0, _buttons);
    put(2, _x);
    put(4, _y);
    put(6, _z);
-   put(8, _rx);
-   put(10, _ry);
-   report.length = 12;
-#endif
+   report.data[8] = _status;
+   report.length = 9;
  
    // send the report
    return sendNB(&report);
 }
- 
+
 bool USBJoystick::move(int16_t x, int16_t y) {
      _x = x;
      _y = y;
@@ -83,6 +71,7 @@ void USBJoystick::_init() {
    _y = 0;     
    _z = 0;
    _buttons = 0x0000;
+   _status = 0;
 }
  
  
@@ -94,8 +83,29 @@ uint8_t * USBJoystick::reportDesc()
          USAGE(1), 0x04,                 // Joystick
 
          COLLECTION(1), 0x01,            // Application
+         
+         // NB - the canonical joystick has a nested collection at this
+         // point.  We remove the inner collection to enable the LedWiz 
+         // emulation.  The LedWiz API implementation on the PC side
+         // appears to use the collection structure as part of the
+         // device signature, and the real LedWiz descriptor has just
+         // one top-level collection.  The built-in Windows HID drivers 
+         // don't appear to care whether this collection is present or
+         // not for the purposes of recognizing a joystick, so it seems
+         // to make everyone happy to leave it out.  
+         //
+         // All of the reference material for USB joystick device builders 
+         // does use the inner collection, so it's possible that omitting 
+         // it will create an incompatibility with some non-Windows hosts.  
+         // But that seems largely moot in that VP only runs on Windows. 
+         //  If you're you're trying to adapt this code for a different 
+         // device and run into problems connecting to a non-Windows host, 
+         // try restoring the inner collection.  You probably won't 
+         // care about LedWiz compatibility in such a situation so there
+         // should be no reason not to return to the standard structure.
        //  COLLECTION(1), 0x00,          // Physical
            
+             // input report (device to host)
              USAGE_PAGE(1), 0x09,        // Buttons
              USAGE_MINIMUM(1), 0x01,     // { buttons }
              USAGE_MAXIMUM(1), 0x10,     // {  1-16   }
@@ -108,18 +118,26 @@ uint8_t * USBJoystick::reportDesc()
              INPUT(1), 0x02,             // Data, Variable, Absolute
            
              USAGE_PAGE(1), 0x01,        // Generic desktop
-             USAGE(1), 0x30,             // X
-             USAGE(1), 0x31,             // Y
-             USAGE(1), 0x32,             // Z
-             USAGE(1), 0x33,             // Rx
-             USAGE(1), 0x34,             // Ry
+             USAGE(1), 0x30,             // X axis
+             USAGE(1), 0x31,             // Y axis
+             USAGE(1), 0x32,             // Z axis
              LOGICAL_MINIMUM(2), 0x00,0xF0,   // each value ranges -4096
              LOGICAL_MAXIMUM(2), 0x00,0x10,   // ...to +4096
              REPORT_SIZE(1), 0x10,       // 16 bits per report
-             REPORT_COUNT(1), 0x05,      // 5 reports (X, Y, Z, Rx, Ry)
+             REPORT_COUNT(1), 0x03,      // 3 reports (X, Y, Z)
+             INPUT(1), 0x02,             // Data, Variable, Absolute
+             
+             USAGE_PAGE(1), 0x06,        // generic device controls - for config status
+             USAGE(1), 0x00,             // undefined device control
+             LOGICAL_MINIMUM(1), 0x00,   // 1-bit flags
+             LOGICAL_MAXIMUM(1), 0x01,
+             REPORT_SIZE(1), 0x01,       // 1 bit per report
+             REPORT_COUNT(1), 0x08,      // 8 reports (8 bits)
              INPUT(1), 0x02,             // Data, Variable, Absolute
 
-             REPORT_COUNT(1), 0x08,      // input report count (LEDWiz messages)
+             // output report (host to device)
+             REPORT_SIZE(1), 0x08,       // 8 bits per report
+             REPORT_COUNT(1), 0x08,      // output report count (LEDWiz messages)
              0x09, 0x01,                 // usage
              0x91, 0x01,                 // Output (array)
 
@@ -151,7 +169,7 @@ uint8_t * USBJoystick::stringIserialDesc() {
 
 uint8_t * USBJoystick::stringIproductDesc() {
     static uint8_t stringIproductDescriptor[] = {
-        0x2E,                                                       /*bLength*/
+        0x28,                                                       /*bLength*/
         STRING_DESCRIPTOR,                                          /*bDescriptorType 0x03*/
         'P',0,'i',0,'n',0,'s',0,'c',0,'a',0,'p',0,'e',0,
         ' ',0,'C',0,'o',0,'n',0,'t',0,'r',0,'o',0,'l',0,

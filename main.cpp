@@ -171,7 +171,16 @@
 //    byte 2 = new LedWiz unit number, 0x01 to 0x0f
 //    byte 3 = feature enable bit mask:
 //             0x01 = enable CCD (default = on)
-
+//
+// Plunger calibration mode: the host can activate plunger calibration mode
+// by sending this packet.  This has the same effect as pressing and holding
+// the plunger calibration button for two seconds, to allow activating this
+// mode without attaching a physical button.
+//
+//    length = 8 bytes
+//    byte 0 = 65 (0x41)
+//    byte 1 = 2 (0x02)
+//
  
 #include "mbed.h"
 #include "math.h"
@@ -219,6 +228,22 @@ const uint16_t USB_VENDOR_ID = 0xFAFA;
 const uint16_t USB_PRODUCT_ID = 0x00F0;
 const uint16_t USB_VERSION_NO = 0x0006;
 const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 0x07;
+
+// Number of pixels we read from the sensor on each frame.  This can be
+// less than the physical pixel count if desired; we'll read every nth
+// piexl if so.  E.g., with a 1280-pixel physical sensor, if npix is 320,
+// we'll read every 4th pixel.  It takes time to read each pixel, so the
+// fewer pixels we read, the higher the refresh rate we can achieve.
+// It's therefore better not to read more pixels than we have to.
+//
+// VP seems to have an internal resolution in the 8-bit range, so there's
+// no apparent benefit to reading more than 128-256 pixels when using VP.
+// Empirically, 160 pixels seems about right.  The overall travel of a
+// standard pinball plunger is about 3", so 160 pixels gives us resolution
+// of about 1/50".  This seems to take full advantage of VP's modeling
+// ability, and is probably also more precise than a human player's
+// perception of the plunger position.
+const int npix = 160;
 
 // On-board RGB LED elements - we use these for diagnostic displays.
 DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
@@ -302,23 +327,24 @@ struct {
     { PTD5, true },      // pin J2-4,  LW port 8  (PWM capable - TPM 0.5 = channel 6)
     { PTD0, true },      // pin J2-6,  LW port 9  (PWM capable - TPM 0.0 = channel 1)
     { PTD3, true },      // pin J2-10, LW port 10 (PWM capable - TPM 0.3 = channel 4)
-    { PTC8, false },     // pin J1-14, LW port 11
-    { PTC9, false },     // pin J1-16, LW port 12
-    { PTC7, false },     // pin J1-1,  LW port 13
-    { PTC0, false },     // pin J1-3,  LW port 14
-    { PTC3, false },     // pin J1-5,  LW port 15
-    { PTC4, false },     // pin J1-7,  LW port 16
-    { PTC5, false },     // pin J1-9,  LW port 17
-    { PTC6, false },     // pin J1-11, LW port 18
-    { PTC10, false },    // pin J1-13, LW port 19
-    { PTC11, false },    // pin J1-15, LW port 20
-    { PTC12, false },    // pin J2-1,  LW port 21
-    { PTC13, false },    // pin J2-3,  LW port 22
-    { PTC16, false },    // pin J2-5,  LW port 23
-    { PTC17, false },    // pin J2-7,  LW port 24
-    { PTA16, false },    // pin J2-9,  LW port 25
-    { PTA17, false },    // pin J2-11, LW port 26
-    { PTE31, false },    // pin J2-13, LW port 27
+    { PTD2, false },     // pin J2-8,  LW port 11
+    { PTC8, false },     // pin J1-14, LW port 12
+    { PTC9, false },     // pin J1-16, LW port 13
+    { PTC7, false },     // pin J1-1,  LW port 14
+    { PTC0, false },     // pin J1-3,  LW port 15
+    { PTC3, false },     // pin J1-5,  LW port 16
+    { PTC4, false },     // pin J1-7,  LW port 17
+    { PTC5, false },     // pin J1-9,  LW port 18
+    { PTC6, false },     // pin J1-11, LW port 19
+    { PTC10, false },    // pin J1-13, LW port 20
+    { PTC11, false },    // pin J1-15, LW port 21
+    { PTC12, false },    // pin J2-1,  LW port 22
+    { PTC13, false },    // pin J2-3,  LW port 23
+    { PTC16, false },    // pin J2-5,  LW port 24
+    { PTC17, false },    // pin J2-7,  LW port 25
+    { PTA16, false },    // pin J2-9,  LW port 26
+    { PTA17, false },    // pin J2-11, LW port 27
+    { PTE31, false },    // pin J2-13, LW port 28
     { PTD6, false },     // pin J2-17, LW port 29
     { PTD7, false },     // pin J2-19, LW port 30
     { PTE0, false },     // pin J2-18, LW port 31
@@ -341,6 +367,12 @@ const int MMA8451_I2C_ADDRESS = (0x1d<<1);
 // Joystick axis report range - we report from -JOYMAX to +JOYMAX
 #define JOYMAX 4096
 
+
+// ---------------------------------------------------------------------------
+// utilities
+
+// number of elements in an array
+#define countof(x) (sizeof(x)/sizeof((x)[0]))
 
 // ---------------------------------------------------------------------------
 //
@@ -381,7 +413,7 @@ static LwOut *lwPin[32];
 // initialize the output pin array
 void initLwOut()
 {
-    for (int i = 0 ; i < sizeof(lwPin) / sizeof(lwPin[0]) ; ++i)
+    for (int i = 0 ; i < countof(lwPin) ; ++i)
     {
         PinName p = ledWizPortMap[i].pin;
         lwPin[i] = (ledWizPortMap[i].isPWM
@@ -465,6 +497,15 @@ struct NVM
 
         // save the data
         iap.program_flash(addr, this, sizeof(*this));
+    }
+    
+    // reset calibration data for calibration mode
+    void resetPlunger()
+    {
+        // set extremes for the calibration data
+        d.plungerMax = 0;
+        d.plungerZero = npix;
+        d.plungerMin = npix;
     }
     
     // stored data (excluding the checksum)
@@ -640,7 +681,7 @@ public:
         tInt_.start();
     }
     
-    void get(int &x, int &y, int &rx, int &ry) 
+    void get(int &x, int &y) 
     {
          // disable interrupts while manipulating the shared data
          __disable_irq();
@@ -710,14 +751,6 @@ public:
          // report our integrated velocity reading in x,y
          x = rawToReport(vx);
          y = rawToReport(vy);
-         
-         // apply a small dead zone near the center
-         // if (abs(x) < 6) x = 0;
-         // if (abs(y) < 6) y = 0;
-         
-         // report the calibrated instantaneous acceleration in rx,ry
-         rx = int(round((ax - cx_)*JOYMAX));
-         ry = int(round((ay - cy_)*JOYMAX));
          
 #ifdef DEBUG_PRINTF
          if (x != 0 || y != 0)        
@@ -874,22 +907,6 @@ int main(void)
     // check for valid flash
     bool flash_valid = flash->valid();
                       
-    // Number of pixels we read from the sensor on each frame.  This can be
-    // less than the physical pixel count if desired; we'll read every nth
-    // piexl if so.  E.g., with a 1280-pixel physical sensor, if npix is 320,
-    // we'll read every 4th pixel.  It takes time to read each pixel, so the
-    // fewer pixels we read, the higher the refresh rate we can achieve.
-    // It's therefore better not to read more pixels than we have to.
-    //
-    // VP seems to have an internal resolution in the 8-bit range, so there's
-    // no apparent benefit to reading more than 128-256 pixels when using VP.
-    // Empirically, 160 pixels seems about right.  The overall travel of a
-    // standard pinball plunger is about 3", so 160 pixels gives us resolution
-    // of about 1/50".  This seems to take full advantage of VP's modeling
-    // ability, and is probably also more precise than a human player's
-    // perception of the plunger position.
-    const int npix = 160;
-
     // if the flash is valid, load it; otherwise initialize to defaults
     if (flash_valid) {
         memcpy(&cfg, flash, sizeof(cfg));
@@ -918,7 +935,6 @@ int main(void)
     // plunger calibration button debounce timer
     Timer calBtnTimer;
     calBtnTimer.start();
-    int calBtnDownTime = 0;
     int calBtnLit = false;
     
     // Calibration button state:
@@ -957,10 +973,16 @@ int main(void)
     // so when we detect the start of this motion, we immediately tell VP
     // to return the plunger to rest, then we monitor the real plunger 
     // until it atcually stops.
-    bool firing = false;
+    int firing = 0;
 
     // start the first CCD integration cycle
     ccd.clear();
+    
+    // Device status.  We report this on each update so that the host config
+    // tool can detect our current settings.  This is a bit mask consisting
+    // of these bits:
+    //    0x01  -> plunger sensor enabled
+    uint16_t statusFlags = (cfg.d.ccdEnabled ? 0x01 : 0x00);
 
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -1009,7 +1031,7 @@ int main(void)
                     // message type.
                     if (data[1] == 1)
                     {
-                        // Set Configuration:
+                        // 1 = Set Configuration:
                         //     data[2] = LedWiz unit number (0x00 to 0x0f)
                         //     data[3] = feature enable bit mask:
                         //               0x01 = enable CCD
@@ -1022,8 +1044,25 @@ int main(void)
                         cfg.d.ledWizUnitNo = newUnitNo;
                         cfg.d.ccdEnabled = data[3] & 0x01;
                         
+                        // update the status flags
+                        statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
+                        
+                        // if the ccd is no longer enabled, use 0 for z reports
+                        if (!cfg.d.ccdEnabled)
+                            z = 0;
+                        
                         // save the configuration
                         cfg.save(iap, flash_addr);
+                    }
+                    else if (data[1] == 2)
+                    {
+                        // 2 = Calibrate plunger
+                        // (No parameters)
+                        
+                        // enter calibration mode
+                        calBtnState = 3;
+                        calBtnTimer.reset();
+                        cfg.resetPlunger();
                     }
                 }
                 else 
@@ -1057,38 +1096,32 @@ int main(void)
             case 0: 
                 // button not yet pushed - start debouncing
                 calBtnTimer.reset();
-                calBtnDownTime = calBtnTimer.read_ms();
                 calBtnState = 1;
                 break;
                 
             case 1:
                 // pushed, not yet debounced - if the debounce time has
                 // passed, start the hold period
-                if (calBtnTimer.read_ms() - calBtnDownTime > 50)
+                if (calBtnTimer.read_ms() > 50)
                     calBtnState = 2;
                 break;
                 
             case 2:
                 // in the hold period - if the button has been held down
                 // for the entire hold period, move to calibration mode
-                if (calBtnTimer.read_ms() - calBtnDownTime > 2050)
+                if (calBtnTimer.read_ms() > 2050)
                 {
                     // enter calibration mode
                     calBtnState = 3;
-                    
-                    // set extremes for the calibration data, so that the actual
-                    // values we read will set new high/low water marks on the fly
-                    cfg.d.plungerMax = 0;
-                    cfg.d.plungerZero = npix;
-                    cfg.d.plungerMin = npix;
+                    calBtnTimer.reset();
+                    cfg.resetPlunger();
                 }
                 break;
                 
             case 3:
-                // Already in calibration mode - pushing the button in this
-                // state doesn't change the current state, but we won't leave
-                // this state as long as it's held down.  We can simply do
-                // nothing here.
+                // Already in calibration mode - pushing the button here
+                // doesn't change the current state, but we won't leave this
+                // state as long as it's held down.  So nothing changes here.
                 break;
             }
         }
@@ -1101,8 +1134,7 @@ int main(void)
             // Otherwise, return to the base state without saving anything.
             // If the button is released before we make it to calibration
             // mode, it simply cancels the attempt.
-            if (calBtnState == 3
-                && calBtnTimer.read_ms() - calBtnDownTime > 17500)
+            if (calBtnState == 3 && calBtnTimer.read_ms() > 15000)
             {
                 // exit calibration mode
                 calBtnState = 0;
@@ -1127,7 +1159,7 @@ int main(void)
         {
         case 2:
             // in the hold period - flash the light
-            newCalBtnLit = (((calBtnTimer.read_ms() - calBtnDownTime)/250) & 1);
+            newCalBtnLit = ((calBtnTimer.read_ms()/250) & 1);
             break;
             
         case 3:
@@ -1150,13 +1182,13 @@ int main(void)
                 calBtnLed = 1;
                 ledR = 1;
                 ledG = 1;
-                ledB = 1;
+                ledB = 0;
             }
             else {
                 calBtnLed = 0;
                 ledR = 1;
                 ledG = 1;
-                ledB = 0;
+                ledB = 1;
             }
         }
         
@@ -1246,14 +1278,34 @@ int main(void)
             // is complete, allowing VP to carry out the firing motion using
             // its internal model plunger rather than trying to track the
             // intermediate positions of the mechanical plunger throughout
-            // the firing motion.  This has several benefits.  First is that 
-            // our readings aren't very accurate during rapid movement,
-            // because we get too much motion blur.  Second is that the
-            // event approach allows VP to simulate the plunger motion
-            // according to each table's particular plunger settings.
-            // Different tables have different plunger strengths and speeds,
-            // so we want to defer to the model for the physics of the firing
-            // motion within each simulation.
+            // the firing motion.  This is essential because the firing
+            // motion is too fast for us to track - in the time it takes us
+            // to read one frame, the plunger can make it all the way to the
+            // zero position and bounce back halfway.  Fortunately, the range
+            // of motions for the plunger is limited, so if we see any rapid
+            // change of position toward the rest position, it's reasonably
+            // safe to interpret it as a firing event.  
+            //
+            // This isn't foolproof.  The user can trick us by doing a 
+            // controlled rapid forward push but stopping short of the rest 
+            // position.  We'll misinterpret that as a firing event.  But 
+            // that's not a natural motion that a user would make with a
+            // plunger, so it's probably an acceptable false positive.
+            //
+            // Possible future enhancement: we could add a second physical
+            // sensor that detects when the plunger reaches the zero position
+            // and asserts an interrupt.  In the interrupt handler, set a
+            // flag indicating the zero position signal.  On each scan of
+            // the CCD, also check that flag; if it's set, enter firing
+            // event mode just as we do now.  The key here is that the
+            // secondary sensor would have to be something much faster
+            // than our CCD scan - it would have to react on, say, the
+            // millisecond time scale.  A simple mechanical switch or a
+            // proximity sensor could work.  This would let us detect
+            // with certainty when the plunger physically fires, eliminating
+            // the case where the use can fool us with motion that's fast
+            // enough to look like a release but doesn't actually reach the
+            // starting position.
             //
             // To detremine when a firing even occurs, we watch for rapid
             // motion from a retracted position towards the rest position -
@@ -1264,12 +1316,38 @@ int main(void)
             // position, and then suspend reports until the mechanical
             // readings indicate that the plunger has come to rest (indicated
             // by several readings in a row at roughly the same position).
-                    
-            // Check to see if plunger firing is in progress.  If not, check
-            // to see if it looks like we just started firing.
-            const int restTol = JOYMAX/npix * 4;
-            const int fireTol = JOYMAX/npix * 12;
-            if (firing)
+            //
+            // Tolerance for firing is 1/3 of the current pull distance, or
+            // about 1/2", whichever is greater.  Making this value too small
+            // makes for too many false positives.  Empirically, 1/4" is too
+            // twitchy, so set a floor at about 1/2".  But we can be less
+            // sensitive the further back the plunger is pulled, since even
+            // a long pull will snap back quickly.  Note that JOYMAX always
+            // corresponds to about 3", no matter how many pixels we're
+            // reading, since the physical sensor is about 3" long; so we
+            // factor out the pixel count calculate (approximate) physical
+            // distances based on the normalized axis range.
+            // 
+            // Firing pattern: when firing, don't simply report a solid 0,
+            // but instead report a series of pseudo-bouces.  This looks
+            // more realistic, beacause the real plunger is also bouncing
+            // around during this time.  To get maximum firing power in
+            // the simulation, though, our pseudo-bounces are tiny cmopared
+            // to the real thing.
+            const int restTol = JOYMAX/24;
+            int fireTol = z/3 > JOYMAX/6 ? z/3 : JOYMAX/6;
+            static const int firePattern[] = { 
+                -JOYMAX/12, -JOYMAX/12, -JOYMAX/12, 
+                0, 0, 0,
+                JOYMAX/16, JOYMAX/16, JOYMAX/16,
+                0, 0, 0,
+                -JOYMAX/20, -JOYMAX/20, -JOYMAX/20,
+                0, 0, 0, 
+                JOYMAX/24, JOYMAX/24, JOYMAX/24,
+                0, 0, 0,
+                -JOYMAX/30, -JOYMAX/30, -JOYMAX/30 
+            };
+            if (firing != 0)
             {
                 // Firing in progress - we've already told VP to send its
                 // model plunger all the way back to the rest position, so
@@ -1278,10 +1356,22 @@ int main(void)
                 if (abs(z0 - z2) < restTol && abs(znew - z2) < restTol)
                 {
                     // the plunger is back at rest - firing is done
-                    firing = false;
+                    firing = 0;
                     
                     // resume normal reporting
                     z = z2;
+                }
+                else if (firing < countof(firePattern))
+                {
+                    // firing - report the next position in the pseudo-bounce 
+                    // pattern
+                    z = firePattern[firing++];
+                }
+                else
+                {
+                    // firing, out of pseudo-bounce items - just report the
+                    // rest position
+                    z = 0;
                 }
             }
             else if (z0 < z2 && z1 < z2 && znew < z2
@@ -1305,8 +1395,10 @@ int main(void)
                 // virtual plunger, rather than imposing the actual
                 // mechanical charateristics of the physical plunger on
                 // every table.
-                firing = true;
-                z = 0;
+                firing = 1;
+                
+                // report the first firing pattern position
+                z = firePattern[0];
             }
             else
             {
@@ -1320,10 +1412,16 @@ int main(void)
             z1 = z0;
             z0 = znew;
         }
+        else
+        {
+            // plunger disabled - pause 10ms to throttle updates to a
+            // reasonable pace
+            wait_ms(10);
+        }
 
         // read the accelerometer
-        int xa, ya, rxa, rya;
-        accel.get(xa, ya, rxa, rya);
+        int xa, ya;
+        accel.get(xa, ya);
         
         // confine the results to our joystick axis range
         if (xa < -JOYMAX) xa = -JOYMAX;
@@ -1342,7 +1440,7 @@ int main(void)
         // arrangement of our nominal axes aligns with VP's standard
         // setting, so that we can configure VP with X Axis = X on the
         // joystick and Y Axis = Y on the joystick.
-        js.update(y, x, z, rxa, rya, 0);
+        js.update(y, x, z, 0, statusFlags);
         
 #ifdef DEBUG_PRINTF
         if (x != 0 || y != 0)

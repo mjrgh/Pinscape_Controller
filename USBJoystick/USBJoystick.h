@@ -106,7 +106,7 @@ class USBJoystick: public USBHID {
          * @param buttons buttons state, as a bit mask (combination with '|' of JOY_Bn values)
          * @returns true if there is no error, false otherwise
          */
-         bool update(int16_t x, int16_t y, int16_t z, int16_t rx, int16_t ry, uint16_t buttons);
+         bool update(int16_t x, int16_t y, int16_t z, uint16_t buttons, uint16_t status);
  
          /**
          * Write a state of the mouse
@@ -114,7 +114,7 @@ class USBJoystick: public USBHID {
          * @returns true if there is no error, false otherwise
          */
          bool update();
- 
+         
          /**
          * Move the cursor to (x, y)
          *
@@ -155,9 +155,8 @@ class USBJoystick: public USBHID {
          int16_t _x;                       
          int16_t _y;     
          int16_t _z;
-         int16_t _rx;
-         int16_t _ry;
          uint16_t _buttons;
+         uint8_t _status;
          
          void _init();                 
 };
