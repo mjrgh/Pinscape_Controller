@@ -26,7 +26,7 @@ bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint16_t buttons, uint
    _y = y;
    _z = z;
    _buttons = buttons;     
-   _status = (uint8_t)status;
+   _status = status;
  
    // send the report
    return update();
@@ -37,15 +37,38 @@ bool USBJoystick::update() {
  
    // Fill the report according to the Joystick Descriptor
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
-   put(0, _buttons);
-   put(2, _x);
-   put(4, _y);
-   put(6, _z);
-   report.data[8] = _status;
-   report.length = 9;
+   put(0, _status);
+   put(2, 0);  // second byte of status isn't used in normal reports
+   put(4, _buttons);
+   put(6, _x);
+   put(8, _y);
+   put(10, _z);
+   report.length = 12;
  
    // send the report
-   return sendNB(&report);
+   return sendTO(&report, 100);
+}
+
+bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
+{
+    HID_REPORT report;
+    
+    // Set the special status bits to indicate it's an exposure report.
+    // The high 5 bits of the status word are set to 10000, and the
+    // low 11 bits are the current pixel index.
+    uint16_t s = idx | 0x8000;
+    put(0, s);
+        
+    // now fill out the remaining words with exposure values
+    report.length = 12;
+    for (int ofs = 2 ; ofs + 1 < report.length ; ofs += 2)
+    {
+        uint16_t p = (idx < npix ? pix[idx++] : 0);
+        put(ofs, p);
+    }
+    
+    // send the report
+    return send(&report);
 }
 
 bool USBJoystick::move(int16_t x, int16_t y) {
@@ -106,6 +129,15 @@ uint8_t * USBJoystick::reportDesc()
        //  COLLECTION(1), 0x00,          // Physical
            
              // input report (device to host)
+
+             USAGE_PAGE(1), 0x06,        // generic device controls - for config status
+             USAGE(1), 0x00,             // undefined device control
+             LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
+             LOGICAL_MAXIMUM(1), 0xFF,
+             REPORT_SIZE(1), 0x08,       // 8 bits per report
+             REPORT_COUNT(1), 0x04,      // 4 reports (4 bytes)
+             INPUT(1), 0x02,             // Data, Variable, Absolute
+
              USAGE_PAGE(1), 0x09,        // Buttons
              USAGE_MINIMUM(1), 0x01,     // { buttons }
              USAGE_MAXIMUM(1), 0x10,     // {  1-16   }
@@ -127,14 +159,6 @@ uint8_t * USBJoystick::reportDesc()
              REPORT_COUNT(1), 0x03,      // 3 reports (X, Y, Z)
              INPUT(1), 0x02,             // Data, Variable, Absolute
              
-             USAGE_PAGE(1), 0x06,        // generic device controls - for config status
-             USAGE(1), 0x00,             // undefined device control
-             LOGICAL_MINIMUM(1), 0x00,   // 1-bit flags
-             LOGICAL_MAXIMUM(1), 0x01,
-             REPORT_SIZE(1), 0x01,       // 1 bit per report
-             REPORT_COUNT(1), 0x08,      // 8 reports (8 bits)
-             INPUT(1), 0x02,             // Data, Variable, Absolute
-
              // output report (host to device)
              REPORT_SIZE(1), 0x08,       // 8 bits per report
              REPORT_COUNT(1), 0x08,      // output report count (LEDWiz messages)

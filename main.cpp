@@ -181,6 +181,31 @@
 //    byte 0 = 65 (0x41)
 //    byte 1 = 2 (0x02)
 //
+// Exposure reports: the host can request a report of the full set of pixel
+// values for the next frame by sending this special packet:
+//
+//    length = 8 bytes
+//    byte 0 = 65 (0x41)
+//    byte 1 = 3 (0x03)
+//
+// We'll respond with a series of special reports giving the exposure status.
+// Each report has the following structure:
+//
+//    bytes 0:1 = 11-bit index, with high 5 bits set to 10000.  For 
+//                example, 0x04 0x80 indicates index 4.  This is the 
+//                starting pixel number in the report.  The first report 
+//                will be 0x00 0x80 to indicate pixel #0.  
+//    bytes 2:3 = 16-bit unsigned int brightness level of pixel at index
+//    bytes 4:5 = brightness of pixel at index+1
+//    etc for the rest of the packet
+//
+// This still has the form of a joystick packet at the USB level, but
+// can be differentiated by the host via the status bits.  It would have
+// been cleaner to use a different Report ID at the USB level, but this
+// would have necessitated a different container structure in the report
+// descriptor, which would have broken LedWiz compatibility.  Given that
+// constraint, we have to re-use the joystick report type, making for
+// this somewhat kludgey approach.
  
 #include "mbed.h"
 #include "math.h"
@@ -983,6 +1008,9 @@ int main(void)
     // of these bits:
     //    0x01  -> plunger sensor enabled
     uint16_t statusFlags = (cfg.d.ccdEnabled ? 0x01 : 0x00);
+    
+    // flag: send a pixel dump after the next read
+    bool reportPix = false;
 
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -1063,6 +1091,17 @@ int main(void)
                         calBtnState = 3;
                         calBtnTimer.reset();
                         cfg.resetPlunger();
+                    }
+                    else if (data[1] == 3)
+                    {
+                        // 3 = pixel dump
+                        // (No parameters)
+                        reportPix = true;
+                        
+                        // show purple until we finish sending the report
+                        ledR = 0;
+                        ledB = 0;
+                        ledG = 1;
                     }
                 }
                 else 
@@ -1193,6 +1232,7 @@ int main(void)
         }
         
         // read the plunger sensor, if it's enabled
+        uint16_t pix[npix];
         if (cfg.d.ccdEnabled)
         {
             // start with the previous reading, in case we don't have a
@@ -1200,7 +1240,6 @@ int main(void)
             int znew = z;
 
             // read the array
-            uint16_t pix[npix];
             ccd.read(pix, npix);
     
             // get the average brightness at each end of the sensor
@@ -1338,14 +1377,6 @@ int main(void)
             int fireTol = z/3 > JOYMAX/6 ? z/3 : JOYMAX/6;
             static const int firePattern[] = { 
                 -JOYMAX/12, -JOYMAX/12, -JOYMAX/12, 
-                0, 0, 0,
-                JOYMAX/16, JOYMAX/16, JOYMAX/16,
-                0, 0, 0,
-                -JOYMAX/20, -JOYMAX/20, -JOYMAX/20,
-                0, 0, 0, 
-                JOYMAX/24, JOYMAX/24, JOYMAX/24,
-                0, 0, 0,
-                -JOYMAX/30, -JOYMAX/30, -JOYMAX/30 
             };
             if (firing != 0)
             {
@@ -1441,6 +1472,27 @@ int main(void)
         // setting, so that we can configure VP with X Axis = X on the
         // joystick and Y Axis = Y on the joystick.
         js.update(y, x, z, 0, statusFlags);
+        
+        // If we're in pixel dump mode, report all pixel exposure values
+        if (reportPix)
+        {
+            // we have satisfied this request
+            reportPix = false;
+            
+            // send reports for all pixels
+            int idx = 0;
+            while (idx < npix)
+                js.updateExposure(idx, npix, pix);
+                
+            // The pixel dump requires many USB reports, since each report
+            // can only send a few pixel values.  An integration cycle has
+            // been running all this time, since each read starts a new
+            // cycle.  Our timing is longer than usual on this round, so
+            // the integration won't be comparable to a normal cycle.  Throw
+            // this one away by doing a read now, and throwing it away - that 
+            // will get the timing of the *next* cycle roughly back to normal.
+            ccd.read(pix, npix);
+        }
         
 #ifdef DEBUG_PRINTF
         if (x != 0 || y != 0)

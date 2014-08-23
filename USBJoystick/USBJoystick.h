@@ -107,6 +107,18 @@ class USBJoystick: public USBHID {
          * @returns true if there is no error, false otherwise
          */
          bool update(int16_t x, int16_t y, int16_t z, uint16_t buttons, uint16_t status);
+         
+         /**
+         * Write an exposure report.  We'll fill out a report with as many pixels as
+         * will fit in the packet, send the report, and update the index to the next
+         * pixel to send.  The caller should call this repeatedly to send reports for
+         * all pixels.
+         *
+         * @param idx current index in pixel array, updated to point to next pixel to send
+         * @param npix number of pixels in the overall array
+         * @param pix pixel array
+         */
+         bool updateExposure(int &idx, int npix, const uint16_t *pix);
  
          /**
          * Write a state of the mouse
@@ -156,7 +168,7 @@ class USBJoystick: public USBHID {
          int16_t _y;     
          int16_t _z;
          uint16_t _buttons;
-         uint8_t _status;
+         uint16_t _status;
          
          void _init();                 
 };
