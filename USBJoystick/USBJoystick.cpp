@@ -20,30 +20,34 @@
 #include "stdint.h"
 #include "USBJoystick.h"
  
-bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint16_t buttons, uint16_t status) 
+bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status) 
 {
    _x = x;
    _y = y;
    _z = z;
-   _buttons = buttons;     
+   _buttonsLo = (uint16_t)(buttons & 0xffff);
+   _buttonsHi = (uint16_t)((buttons >> 16) & 0xffff);
    _status = status;
  
    // send the report
    return update();
 }
  
-bool USBJoystick::update() {
+const int reportLen = 14;
+bool USBJoystick::update() 
+{
    HID_REPORT report;
- 
+
    // Fill the report according to the Joystick Descriptor
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
    put(0, _status);
    put(2, 0);  // second byte of status isn't used in normal reports
-   put(4, _buttons);
-   put(6, _x);
-   put(8, _y);
-   put(10, _z);
-   report.length = 12;
+   put(4, _buttonsLo);
+   put(6, _buttonsHi);
+   put(8, _x);
+   put(10, _y);
+   put(12, _z);
+   report.length = reportLen;
  
    // send the report
    return sendTO(&report, 100);
@@ -60,7 +64,7 @@ bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
     put(0, s);
         
     // now fill out the remaining words with exposure values
-    report.length = 12;
+    report.length = reportLen;
     for (int ofs = 2 ; ofs + 1 < report.length ; ofs += 2)
     {
         uint16_t p = (idx < npix ? pix[idx++] : 0);
@@ -82,8 +86,9 @@ bool USBJoystick::setZ(int16_t z) {
     return update();
 }
  
-bool USBJoystick::buttons(uint16_t buttons) {
-     _buttons = buttons;
+bool USBJoystick::buttons(uint32_t buttons) {
+     _buttonsLo = (uint16_t)(buttons & 0xffff);
+     _buttonsHi = (uint16_t)((buttons >> 16) & 0xffff);
      return update();
 }
  
@@ -93,7 +98,8 @@ void USBJoystick::_init() {
    _x = 0;                       
    _y = 0;     
    _z = 0;
-   _buttons = 0x0000;
+   _buttonsLo = 0x0000;
+   _buttonsHi = 0x0000;
    _status = 0;
 }
  
@@ -140,11 +146,11 @@ uint8_t * USBJoystick::reportDesc()
 
              USAGE_PAGE(1), 0x09,        // Buttons
              USAGE_MINIMUM(1), 0x01,     // { buttons }
-             USAGE_MAXIMUM(1), 0x10,     // {  1-16   }
+             USAGE_MAXIMUM(1), 0x20,     // {  1-32   }
              LOGICAL_MINIMUM(1), 0x00,   // 1-bit buttons - 0...
              LOGICAL_MAXIMUM(1), 0x01,   // ...to 1
              REPORT_SIZE(1), 0x01,       // 1 bit per report
-             REPORT_COUNT(1), 0x10,      // 16 reports
+             REPORT_COUNT(1), 0x20,      // 32 reports
              UNIT_EXPONENT(1), 0x00,     // Unit_Exponent (0)
              UNIT(1), 0x00,              // Unit (None)                                           
              INPUT(1), 0x02,             // Data, Variable, Absolute

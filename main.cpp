@@ -277,11 +277,70 @@ DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 DigitalIn calBtn(PTE29);
 DigitalOut calBtnLed(PTE23);
 
-// LED-Wiz emulation output pin assignments.  The LED-Wiz protocol
-// can support up to 32 outputs.  The KL25Z can physically provide
-// about 48 (in addition to the ports we're already using for the
-// CCD sensor and the calibration button), but to stay compatible
-// with the LED-Wiz protocol we'll stop at 32.  
+// Joystick button input pin assignments.  You can wire up to
+// 32 GPIO ports to buttons (equipped with momentary switches).
+// Connect each switch between the desired GPIO port and ground
+// (J9 pin 12 or 14).  When the button is pressed, we'll tell the
+// host PC that the corresponding joystick button as pressed.  We
+// debounce the keystrokes in software, so you can simply wire
+// directly to pushbuttons with no additional external hardware.
+//
+// Note that we assign 24 buttons by default, even though the USB
+// joystick interface can handle up to 32 buttons.  VP itself only
+// allows mapping of up to 24 buttons in the preferences dialog 
+// (although it can recognize 32 buttons internally).  If you want 
+// more buttons, you can reassign pins that are assigned by default
+// as LedWiz outputs.  To reassign a pin, find the pin you wish to
+// reassign in the LedWizPortMap array below, and change the pin name 
+// there to NC (for Not Connected).  You can then change one of the
+// "NC" entries below to the reallocated pin name.  The limit is 32
+// buttons total.
+//
+// Note: PTD1 (pin J2-12) should NOT be assigned as a button input,
+// as this pin is physically connected on the KL25Z to the on-board
+// indicator LED's blue segment.  This precludes any other use of
+// the pin.
+PinName buttonMap[] = {
+    PTC2,      // J10 pin 10, joystick button 1
+    PTB3,      // J10 pin 8,  joystick button 2
+    PTB2,      // J10 pin 6,  joystick button 3
+    PTB1,      // J10 pin 4,  joystick button 4
+    
+    PTE30,     // J10 pin 11, joystick button 5
+    PTE22,     // J10 pin 5,  joystick button 6
+    
+    PTE5,      // J9 pin 15,  joystick button 7
+    PTE4,      // J9 pin 13,  joystick button 8
+    PTE3,      // J9 pin 11,  joystick button 9
+    PTE2,      // J9 pin 9,   joystick button 10
+    PTB11,     // J9 pin 7,   joystick button 11
+    PTB10,     // J9 pin 5,   joystick button 12
+    PTB9,      // J9 pin 3,   joystick button 13
+    PTB8,      // J9 pin 1,   joystick button 14
+    
+    PTC12,     // J2 pin 1,   joystick button 15
+    PTC13,     // J2 pin 3,   joystick button 16
+    PTC16,     // J2 pin 5,   joystick button 17
+    PTC17,     // J2 pin 7,   joystick button 18
+    PTA16,     // J2 pin 9,   joystick button 19
+    PTA17,     // J2 pin 11,  joystick button 20
+    PTE31,     // J2 pin 13,  joystick button 21
+    PTD6,      // J2 pin 17,  joystick button 22
+    PTD7,      // J2 pin 19,  joystick button 23
+    
+    PTE1,      // J2 pin 20,  joystick button 24
+
+    NC,        // not used,   joystick button 25
+    NC,        // not used,   joystick button 26
+    NC,        // not used,   joystick button 27
+    NC,        // not used,   joystick button 28
+    NC,        // not used,   joystick button 29
+    NC,        // not used,   joystick button 30
+    NC,        // not used,   joystick button 31
+    NC         // not used,   joystick button 32
+};
+
+// LED-Wiz emulation output pin assignments.  
 //
 // The LED-Wiz protocol allows setting individual intensity levels
 // on all outputs, with 48 levels of intensity.  This can be used
@@ -293,6 +352,15 @@ DigitalOut calBtnLed(PTE23);
 // dimming on these, so they'll ignore any intensity level setting 
 // requested by the host.  Use these for devices that don't have any
 // use for intensity settings anyway, such as contactors and knockers.
+//
+// Ports with pins assigned as "NC" are not connected.  That is,
+// there's no physical pin for that LedWiz port number.  You can
+// send LedWiz commands to turn NC ports on and off, but doing so
+// will have no effect.  The reason we leave some ports unassigned
+// is that we don't have enough physical GPIO pins to fill out the
+// full LedWiz complement of 32 ports.  Many pins are already taken
+// for other purposes, such as button inputs or the plunger CCD
+// interface.
 //
 // The mapping between physical output pins on the KL25Z and the
 // assigned LED-Wiz port numbers is essentially arbitrary - you can
@@ -337,6 +405,21 @@ DigitalOut calBtnLed(PTE23);
 // file, for example) to address the port.  PWM-capable ports are
 // marked as such - we group the PWM-capable ports into the first
 // 10 LED-Wiz port numbers.
+//
+// If you wish to reallocate a pin in the array below to some other
+// use, such as a button input port, simply change the pin name in
+// the entry to NC (for Not Connected).  This will disable the given
+// logical LedWiz port number and free up the physical pin.
+//
+// If you wish to reallocate a pin currently assigned to the button
+// input array, simply change the entry for the pin in the buttonMap[]
+// array above to NC (for "not connected"), and plug the pin name into
+// a slot of your choice in the array below.
+//
+// Note: PTD1 (pin J2-12) should NOT be assigned as an LedWiz output,
+// as this pin is physically connected on the KL25Z to the on-board
+// indicator LED's blue segment.  This precludes any other use of
+// the pin.
 // 
 struct {
     PinName pin;
@@ -363,17 +446,17 @@ struct {
     { PTC6, false },     // pin J1-11, LW port 19
     { PTC10, false },    // pin J1-13, LW port 20
     { PTC11, false },    // pin J1-15, LW port 21
-    { PTC12, false },    // pin J2-1,  LW port 22
-    { PTC13, false },    // pin J2-3,  LW port 23
-    { PTC16, false },    // pin J2-5,  LW port 24
-    { PTC17, false },    // pin J2-7,  LW port 25
-    { PTA16, false },    // pin J2-9,  LW port 26
-    { PTA17, false },    // pin J2-11, LW port 27
-    { PTE31, false },    // pin J2-13, LW port 28
-    { PTD6, false },     // pin J2-17, LW port 29
-    { PTD7, false },     // pin J2-19, LW port 30
-    { PTE0, false },     // pin J2-18, LW port 31
-    { PTE1, false }      // pin J2-20, LW port 32
+    { PTE0, false },     // pin J2-18, LW port 22
+    { NC, false },       // Not used,  LW port 23
+    { NC, false },       // Not used,  LW port 24
+    { NC, false },       // Not used,  LW port 25
+    { NC, false },       // Not used,  LW port 26
+    { NC, false },       // Not used,  LW port 27
+    { NC, false },       // Not used,  LW port 28
+    { NC, false },       // Not used,  LW port 29
+    { NC, false },       // Not used,  LW port 30
+    { NC, false },       // Not used,  LW port 31
+    { NC, false }        // Not used,  LW port 32
 };
 
 
@@ -431,6 +514,12 @@ public:
     virtual void set(float val) { p = val; }
     DigitalOut p;
 };
+class LwUnusedOut: public LwOut
+{
+public:
+    LwUnusedOut() { }
+    virtual void set(float val) { }
+};
 
 // output pin array
 static LwOut *lwPin[32];
@@ -440,10 +529,13 @@ void initLwOut()
 {
     for (int i = 0 ; i < countof(lwPin) ; ++i)
     {
-        PinName p = ledWizPortMap[i].pin;
-        lwPin[i] = (ledWizPortMap[i].isPWM
-                    ? (LwOut *)new LwPwmOut(p) 
-                    : (LwOut *)new LwDigOut(p));
+        PinName p = (i < countof(ledWizPortMap) ? ledWizPortMap[i].pin : NC);
+        if (p == NC)
+            lwPin[i] = new LwUnusedOut();
+        else if (ledWizPortMap[i].isPWM)
+            lwPin[i] = new LwPwmOut(p);
+        else
+            lwPin[i] = new LwDigOut(p);
     }
 }
 
@@ -480,6 +572,100 @@ static void updateWizOuts()
 {
     for (int i = 0 ; i < 32 ; ++i)
         lwPin[i]->set(wizState(i));
+}
+
+
+// ---------------------------------------------------------------------------
+//
+// Button input
+//
+
+// button input map array
+DigitalIn *buttonDigIn[32];
+
+// initialize the button inputs
+void initButtons()
+{
+    // create the digital inputs
+    for (int i = 0 ; i < countof(buttonDigIn) ; ++i)
+    {
+        if (i < countof(buttonMap) && buttonMap[i] != NC)
+            buttonDigIn[i] = new DigitalIn(buttonMap[i]);
+        else
+            buttonDigIn[i] = 0;
+    }
+}
+
+
+// read the raw button input state
+uint32_t readButtonsRaw()
+{
+    // start with all buttons off
+    uint32_t buttons = 0;
+    
+    // scan the button list
+    uint32_t bit = 1;
+    for (int i = 0 ; i < countof(buttonDigIn) ; ++i, bit <<= 1)
+    {
+        if (buttonDigIn[i] != 0 && !buttonDigIn[i]->read())
+            buttons |= bit;
+    }
+    
+    // return the button list
+    return buttons;
+}
+
+// Read buttons with debouncing.  We keep a circular buffer
+// of recent input readings.  We'll AND together the status of
+// each button over the past 50ms.  A button that has been on
+// continuously for 50ms will be reported as ON.  All others
+// will be reported as OFF.
+uint32_t readButtonsDebounced()
+{
+    struct reading {
+        int dt;           // time since previous reading
+        uint32_t b;       // button state at this reading
+    };
+    static Timer t;       // timer for tracking time between readings
+    static reading readings[8];  // circular buffer of readings
+    static int ri = 0;    // reading buffer index (next write position)
+        
+    // get the write pointer
+    reading *r = &readings[ri];
+
+    // figure the time since the last reading, and read the raw button state
+    r->dt = t.read_ms();
+    uint32_t b = r->b = readButtonsRaw();
+    
+    // start timing the next interval
+    t.start();
+    t.reset();
+    
+    // AND together readings over 50ms
+    int ms = 0;
+    for (int i = 0 ; i < countof(readings) && ms < 50 ; ++i)
+    {
+        // find the next prior reading, wrapping in the circular buffer
+        int j = ri - i;
+        if (j < 0) 
+            j = countof(readings) - 1;
+            
+        reading *rj = &readings[j];
+        
+        // AND the buttons for this reading
+        b &= rj->b;
+        
+        // count the time
+        ms += rj->dt;
+    }
+    
+    // advance the write position for next time
+    ri += 1;
+    if (ri > countof(readings)) 
+        ri = 0;
+        
+    // return the debounced result
+    return b;
 }
 
 // ---------------------------------------------------------------------------
@@ -914,6 +1100,9 @@ int main(void)
     
     // initialize the LedWiz ports
     initLwOut();
+    
+    // initialize the button input ports
+    initButtons();
     
     // we don't need a reset yet
     bool needReset = false;
@@ -1464,6 +1653,9 @@ int main(void)
         x = xa;
         y = ya;
         
+        // update the buttons
+        uint32_t buttons = readButtonsDebounced();
+        
         // Send the status report.  Note that the nominal x and y axes
         // are reversed - this makes it more intuitive to set up in VP.
         // If we mount the Freesale card flat on the floor of the cabinet
@@ -1471,7 +1663,7 @@ int main(void)
         // arrangement of our nominal axes aligns with VP's standard
         // setting, so that we can configure VP with X Axis = X on the
         // joystick and Y Axis = Y on the joystick.
-        js.update(y, x, z, 0, statusFlags);
+        js.update(y, x, z, buttons, statusFlags);
         
         // If we're in pixel dump mode, report all pixel exposure values
         if (reportPix)

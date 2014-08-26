@@ -106,7 +106,7 @@ class USBJoystick: public USBHID {
          * @param buttons buttons state, as a bit mask (combination with '|' of JOY_Bn values)
          * @returns true if there is no error, false otherwise
          */
-         bool update(int16_t x, int16_t y, int16_t z, uint16_t buttons, uint16_t status);
+         bool update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status);
          
          /**
          * Write an exposure report.  We'll fill out a report with as many pixels as
@@ -149,7 +149,7 @@ class USBJoystick: public USBHID {
          * @param buttons button state, as a bitwise combination of JOY_Bn values
          * @returns true if there is no error, false otherwise
          */
-         bool buttons(uint16_t buttons);
+         bool buttons(uint32_t buttons);
          
          /*
          * To define the report descriptor. Warning: this method has to store the length of the report descriptor in reportLength.
@@ -167,7 +167,8 @@ class USBJoystick: public USBHID {
          int16_t _x;                       
          int16_t _y;     
          int16_t _z;
-         uint16_t _buttons;
+         uint16_t _buttonsLo;
+         uint16_t _buttonsHi;
          uint16_t _status;
          
          void _init();                 
