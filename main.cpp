@@ -583,6 +583,9 @@ static void updateWizOuts()
 // button input map array
 DigitalIn *buttonDigIn[32];
 
+// timer for button reports
+static Timer buttonTimer;
+
 // initialize the button inputs
 void initButtons()
 {
@@ -594,6 +597,9 @@ void initButtons()
         else
             buttonDigIn[i] = 0;
     }
+    
+    // start the button timer
+    buttonTimer.start();
 }
 
 
@@ -626,7 +632,6 @@ uint32_t readButtonsDebounced()
         int dt;           // time since previous reading
         uint32_t b;       // button state at this reading
     };
-    static Timer t;       // timer for tracking time between readings
     static reading readings[8];  // circular buffer of readings
     static int ri = 0;    // reading buffer index (next write position)
         
@@ -634,16 +639,15 @@ uint32_t readButtonsDebounced()
     reading *r = &readings[ri];
 
     // figure the time since the last reading, and read the raw button state
-    r->dt = t.read_ms();
+    r->dt = buttonTimer.read_ms();
     uint32_t b = r->b = readButtonsRaw();
     
     // start timing the next interval
-    t.start();
-    t.reset();
+    buttonTimer.reset();
     
     // AND together readings over 50ms
     int ms = 0;
-    for (int i = 0 ; i < countof(readings) && ms < 50 ; ++i)
+    for (int i = 1 ; i < countof(readings) && ms < 50 ; ++i)
     {
         // find the next prior reading, wrapping in the circular buffer
         int j = ri - i;
@@ -661,7 +665,7 @@ uint32_t readButtonsDebounced()
     
     // advance the write position for next time
     ri += 1;
-    if (ri > countof(readings)) 
+    if (ri >= countof(readings)) 
         ri = 0;
         
     // return the debounced result
