@@ -110,6 +110,20 @@
 //    the plunger are removed and reinstalled, since the relative alignment of the
 //    parts could cahnge slightly when reinstalling.
 //
+//  - Button input wiring.  24 of the KL25Z's GPIO ports are mapped as digital inputs
+//    for buttons and switches.  The software reports these as joystick buttons when
+//    it sends reports to the PC.  These can be used to wire physical pinball-style
+//    buttons in the cabinet (e.g., flipper buttons, the Start button) and miscellaneous 
+//    switches (such as a tilt bob) to the PC.  Visual Pinball can use joystick buttons
+//    for input - you just have to assign a VP function to each button using VP's
+//    keyboard options dialog.  To wire a button physically, connect one terminal of
+//    the button switch to the KL25Z ground, and connect the other terminal to the
+//    the GPIO port you wish to assign to the button.  See the buttonMap[] array
+//    below for the available GPIO ports and their assigned joystick button numbers.
+//    If you're not using a GPIO port, you can just leave it unconnected - the digital
+//    inputs have built-in pull-up resistors, so an unconnected port is the same as
+//    an open switch (an "off" state for the button).
+//
 //  - LedWiz emulation.  The KL25Z can appear to the PC as an LedWiz device, and will
 //    accept and process LedWiz commands from the host.  The software can turn digital
 //    output ports on and off, and can set varying PWM intensitiy levels on a subset
@@ -281,7 +295,7 @@ DigitalOut calBtnLed(PTE23);
 // 32 GPIO ports to buttons (equipped with momentary switches).
 // Connect each switch between the desired GPIO port and ground
 // (J9 pin 12 or 14).  When the button is pressed, we'll tell the
-// host PC that the corresponding joystick button as pressed.  We
+// host PC that the corresponding joystick button is pressed.  We
 // debounce the keystrokes in software, so you can simply wire
 // directly to pushbuttons with no additional external hardware.
 //
@@ -503,16 +517,26 @@ public:
 class LwPwmOut: public LwOut
 {
 public:
-    LwPwmOut(PinName pin) : p(pin) { }
-    virtual void set(float val) { p = val; }
+    LwPwmOut(PinName pin) : p(pin) { prv = -1; }
+    virtual void set(float val) 
+    { 
+        if (val != prv)
+            p.write(prv = val); 
+    }
     PwmOut p;
+    float prv;
 };
 class LwDigOut: public LwOut
 {
 public:
-    LwDigOut(PinName pin) : p(pin) { }
-    virtual void set(float val) { p = val; }
+    LwDigOut(PinName pin) : p(pin) { prv = -1; }
+    virtual void set(float val) 
+    {
+         if (val != prv)
+            p.write((prv = val) == 0.0 ? 0 : 1); 
+    }
     DigitalOut p;
+    float prv;
 };
 class LwUnusedOut: public LwOut
 {
@@ -544,27 +568,64 @@ static uint8_t wizOn[32];
 
 // profile (brightness/blink) state for each LedWiz output
 static uint8_t wizVal[32] = {
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0
+    48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48,
+    48, 48, 48, 48, 48, 48, 48, 48
 };
 
 static float wizState(int idx)
 {
-    if (wizOn[idx]) {
+    if (wizOn[idx]) 
+    {
         // on - map profile brightness state to PWM level
         uint8_t val = wizVal[idx];
-        if (val >= 1 && val <= 48)
-            return 1.0 - val/48.0;
-        else if (val >= 129 && val <= 132)
-            return 0.0;
-        else
+        if (val <= 48)
+        {
+            // PWM brightness/intensity level - rescale from the LedWiz
+            // 0..48 integer range to our internal PwmOut 0..1 float range
+            return val/48.0;
+        }
+        else if (val == 49)
+        {
+            // 49 is undefined in the LedWiz documentation.  Even so, DOF2
+            // *does* set outputs to 49 in some cases where it intends for
+            // them to be fully on.  This is a DOF2 bug, but the real LedWiz 
+            // treats 49 as fully on, so it's a harmless bug when used with 
+            // real LedWiz units.  For the sake of bug-for-bug compatibility, 
+            // we must do the same thing.
             return 1.0;
+        }
+        else if (val >= 129 && val <= 132)
+        {
+            // Values of 129-132 select different flashing modes.  We don't
+            // support any of these.  Instead, simply treat them as fully on.  
+            // Note that DOF doesn't ever use modes 129-132, as it implements 
+            // all flashing modes itself on the host side, so this limitation 
+            // won't have any effect on DOF users.  You can observe it using 
+            // LedBlinky, though.
+            return 1.0;
+        }
+        else
+        {
+            // Other values are undefined in the LedWiz documentation.  Hosts
+            // *should* never send undefined values, since whatever behavior an
+            // LedWiz unit exhibits in response is accidental and could change
+            // in a future version.  We'll treat all undefined values as equivalent 
+            // to 48 (fully on).
+            // 
+            // NB: the 49 and 129-132 cases are broken out above for the sake
+            // of documentation.  We end up using 1.0 as the return value for
+            // everything outside of the defined 0-48 range, so we could collapse
+            // this whole thing to a single 'else' branch, but I wanted to call 
+            // out the specific reasons for handling the settings above as we do.
+            return 1.0;
+        }
     }
-    else {
-        // off
-        return 1.0;
+    else 
+    {
+        // off - show at 0 intensity
+        return 0.0;
     }
 }
 
@@ -1311,10 +1372,12 @@ int main(void)
     
                     // update the physical LED state if this is the last bank                    
                     if (pbaIdx == 24)
+                    {
                         updateWizOuts();
-    
-                    // advance to the next bank
-                    pbaIdx = (pbaIdx + 8) & 31;
+                        pbaIdx = 0;
+                    }
+                    else
+                        pbaIdx += 8;
                 }
             }
         }
