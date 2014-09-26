@@ -706,9 +706,9 @@ uint32_t readButtonsDebounced()
     // start timing the next interval
     buttonTimer.reset();
     
-    // AND together readings over 50ms
+    // AND together readings over 25ms
     int ms = 0;
-    for (int i = 1 ; i < countof(readings) && ms < 50 ; ++i)
+    for (int i = 1 ; i < countof(readings) && ms < 25 ; ++i)
     {
         // find the next prior reading, wrapping in the circular buffer
         int j = ri - i;
@@ -1125,11 +1125,19 @@ private:
 
 // ---------------------------------------------------------------------------
 //
-// Clear the I2C bus for the MMA8451!.  This seems necessary some of the time
+// Clear the I2C bus for the MMA8451Q.  This seems necessary some of the time
 // for reasons that aren't clear to me.  Doing a hard power cycle has the same
 // effect, but when we do a soft reset, the hardware sometimes seems to leave
 // the MMA's SDA line stuck low.  Forcing a series of 9 clock pulses through
-// the SCL line is supposed to clear this conidtion.
+// the SCL line is supposed to clear this condition.  I'm not convinced this
+// actually works with the way this component is wired on the KL25Z, but it
+// seems harmless, so we'll do it on reset in case it does some good.  What
+// we really seem to need is a way to power cycle the MMA8451Q if it ever 
+// gets stuck, but this is simply not possible in software on the KL25Z. 
+// 
+// If the accelerometer does get stuck, and a software reboot doesn't reset
+// it, the only workaround is to manually power cycle the whole KL25Z by 
+// unplugging both of its USB connections.
 //
 void clear_i2c()
 {
@@ -1145,6 +1153,21 @@ void clear_i2c()
         scl = 0;
         wait_us(20);
     }
+}
+ 
+// ---------------------------------------------------------------------------
+//
+// CCD read interval callback.  When reading the CCD, we'll call this
+// several times over the course of the read loop to refresh the button
+// states.  This allows us to debounce the buttons while the long CCD
+// read cycle is taking place, so that we can reliably report button
+// states after each CCD read cycle.  (The read cycle takes about 30ms,
+// which should be enough time to reliably debounce the buttons.)
+//
+void ccdReadCB(void *)
+{
+    // read the keyboard
+    readButtonsDebounced();
 }
 
 // ---------------------------------------------------------------------------
@@ -1496,7 +1519,7 @@ int main(void)
             int znew = z;
 
             // read the array
-            ccd.read(pix, npix);
+            ccd.read(pix, npix, ccdReadCB, 0, 3);
     
             // get the average brightness at each end of the sensor
             long avg1 = (long(pix[0]) + long(pix[1]) + long(pix[2]) + long(pix[3]) + long(pix[4]))/5;

@@ -24,7 +24,7 @@ void TSL1410R::clear()
     }
 }
 
-void TSL1410R::read(uint16_t *pix, int n)
+void TSL1410R::read(uint16_t *pix, int n, void (*cb)(void *ctx), void *cbctx, int cbcnt)
 {
     // start the next integration cycle by pulsing SI and one clock
     si = 1;
@@ -34,22 +34,41 @@ void TSL1410R::read(uint16_t *pix, int n)
         
     // figure how many pixels to skip on each read
     int skip = nPix/n - 1;
+    
+    // figure the callback interval
+    int cbInterval = nPix;
+    if (cb != 0)
+        cbInterval = nPix/(cbcnt+1);
 
-    // read the pixels
-    for (int src = 0, dst = 0 ; src < nPix ; ++src)
+    // read all of the pixels
+    for (int src = 0, dst = 0 ; src < nPix ; )
     {
-        // read this pixel
-        pix[dst++] = ao.read_u16();
+        // figure the end of this callback interval
+        int srcEnd = src + cbInterval;
+        if (srcEnd > nPix)
+            srcEnd = nPix;
         
-        // clock in the next pixel
-        clock = 1;
-        clock = 0;
+        // read one callback chunk of pixels
+        for ( ; src < srcEnd ; ++src)
+        {
+            // read this pixel
+            pix[dst++] = ao.read_u16();
         
-        // clock skipped pixels
-        for (int i = 0 ; i < skip ; ++i, ++src) {
+            // clock in the next pixel
             clock = 1;
             clock = 0;
+            
+            // clock skipped pixels
+            for (int i = 0 ; i < skip ; ++i, ++src) 
+            {
+                clock = 1;
+                clock = 0;
+            }
         }
+        
+        // call the callback, if we're not at the last pixel
+        if (cb != 0 && src < nPix)
+            (*cb)(cbctx);
     }
     
     // clock out one extra pixel to leave A1 in the high-Z state

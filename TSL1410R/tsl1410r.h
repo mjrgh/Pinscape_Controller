@@ -34,7 +34,11 @@ public:
     // If the caller has other work to tend to that takes longer than the
     // desired maximum integration time, it can call clear() to clock out
     // the current pixels and start a fresh integration cycle.
-    void read(uint16_t *pix, int n);
+    void read(uint16_t *pix, int n) { read(pix, n, 0, 0, 0); }
+    
+    // Read with interval callback.  We'll call the callback the given
+    // number of times per read cycle.
+    void read(uint16_t *pix, int n, void (*cb)(void *ctx), void *cbctx, int cbcnt);
 
     // Clock through all pixels to clear the array.  Pulses SI at the
     // beginning of the operation, which starts a new integration cycle.
