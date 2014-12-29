@@ -449,7 +449,7 @@ struct {
     { PTD5, true },      // pin J2-4,  LW port 8  (PWM capable - TPM 0.5 = channel 6)
     { PTD0, true },      // pin J2-6,  LW port 9  (PWM capable - TPM 0.0 = channel 1)
     { PTD3, true },      // pin J2-10, LW port 10 (PWM capable - TPM 0.3 = channel 4)
-    { PTD2, false },     // pin J2-8,  LW port 11
+    { PTD2, false },     // pin J2(Althou-8,  LW port 11
     { PTC8, false },     // pin J1-14, LW port 12
     { PTC9, false },     // pin J1-16, LW port 13
     { PTC7, false },     // pin J1-1,  LW port 14
@@ -582,18 +582,37 @@ static float wizState(int idx)
         uint8_t val = wizVal[idx];
         if (val <= 48)
         {
-            // PWM brightness/intensity level - rescale from the LedWiz
-            // 0..48 integer range to our internal PwmOut 0..1 float range
+            // PWM brightness/intensity level.  Rescale from the LedWiz
+            // 0..48 integer range to our internal PwmOut 0..1 float range.
+            // Note that on the actual LedWiz, level 48 is actually about
+            // 98% on - contrary to the LedWiz documentation, level 49 is 
+            // the true 100% level.  (In the documentation, level 49 is
+            // simply not a valid setting.)  Even so, we treat level 48 as
+            // 100% on to match the documentation.  This won't be perfectly
+            // ocmpatible with the actual LedWiz, but it makes for such a
+            // small difference in brightness (if the output device is an
+            // LED, say) that no one should notice.  It seems better to
+            // err in this direction, because while the difference in
+            // brightness when attached to an LED won't be noticeable, the
+            // difference in duty cycle when attached to something like a
+            // contactor *can* be noticeable - anything less than 100%
+            // can cause a contactor or relay to chatter.  There's almost
+            // never a situation where you'd want values other than 0% and
+            // 100% for a contactor or relay, so treating level 48 as 100%
+            // makes us work properly with software that's expecting the
+            // documented LedWiz behavior and therefore uses level 48 to
+            // turn a contactor or relay fully on.
             return val/48.0;
         }
         else if (val == 49)
         {
-            // 49 is undefined in the LedWiz documentation.  Even so, DOF2
-            // *does* set outputs to 49 in some cases where it intends for
-            // them to be fully on.  This is a DOF2 bug, but the real LedWiz 
-            // treats 49 as fully on, so it's a harmless bug when used with 
-            // real LedWiz units.  For the sake of bug-for-bug compatibility, 
-            // we must do the same thing.
+            // 49 is undefined in the LedWiz documentation, but actually
+            // means 100% on.  The documentation says that levels 1-48 are
+            // the full PWM range, but empirically it appears that the real
+            // range implemented in the firmware is 1-49.  Some software on
+            // the PC side (notably DOF) is aware of this and uses level 49
+            // to mean "100% on".  To ensure compatibility with existing 
+            // PC-side software, we need to recognize level 49.
             return 1.0;
         }
         else if (val >= 129 && val <= 132)
