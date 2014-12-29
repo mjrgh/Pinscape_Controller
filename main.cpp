@@ -449,7 +449,7 @@ struct {
     { PTD5, true },      // pin J2-4,  LW port 8  (PWM capable - TPM 0.5 = channel 6)
     { PTD0, true },      // pin J2-6,  LW port 9  (PWM capable - TPM 0.0 = channel 1)
     { PTD3, true },      // pin J2-10, LW port 10 (PWM capable - TPM 0.3 = channel 4)
-    { PTD2, false },     // pin J2(Althou-8,  LW port 11
+    { PTD2, false },     // pin J2-8,  LW port 11
     { PTC8, false },     // pin J1-14, LW port 12
     { PTC9, false },     // pin J1-16, LW port 13
     { PTC7, false },     // pin J1-1,  LW port 14
