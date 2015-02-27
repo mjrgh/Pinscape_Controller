@@ -522,7 +522,7 @@ uint32_t readButtons()
                     
                     // start a new sticky period for debouncing this
                     // state change
-                    bs->t = 1000;
+                    bs->t = 25;
                 }
             }
             
@@ -535,91 +535,6 @@ uint32_t readButtons()
     // return the new button list
     return buttons;
 }
-
-#if 0
-// Read buttons with debouncing.  
-//
-// Debouncing is the process of filtering out transients from button
-// state changes.  When an electrical switch is closed or opened, the
-// signal can have a brief period of instability that makes the switch
-// appear to turn on and off very rapidly.  This is known as "bouncing".
-//
-// To remove the transients, we filter the signal by requiring each 
-// change to stick for at least a minimum interval (we use 50ms).  We
-// keep a short recent history of each button's state for this purpose.
-// If we see a button change state, we ignore the change if we saw the
-// same button make another change within the same interval.
-uint32_t readButtonsDebounced()
-{
-    struct reading {
-        // elapsed time between this reading and the previous reading
-        int dt;
-        
-        // Final button state for each button that changed on this
-        // report.  OR this with a new report (after applying the
-        // mask 'm') to carry forward the changes that occurred in
-        // this report to the new report.
-        uint32_t b;
-        
-        // Change mask at this report.  This is a bit mask of the buttons
-        // that changed on this report.  AND the NOT of this mask with a
-        // new reading to filter buttons out of the new reading that
-        // changed on this report.
-        uint32_t m;
-    };
-    static reading readings[8];  // circular buffer of readings
-    static int ri = 0;    // reading buffer index (next write position)
-    static int bPrv = 0;  // immediately previous report
-        
-    // get the write pointer
-    reading *r = &readings[ri];
-
-    // figure the time since the last reading, and read the raw button state
-    int ms = r->dt = buttonTimer.read_ms();
-    uint32_t b = readButtonsRaw();
-    
-    // start timing the next interval
-    buttonTimer.reset();
-    
-    // Mask out changes for any buttons that changed state within the
-    // past 50ms.  This ensures that each state change sticks for at
-    // least 50ms, which should be long enough to be sure that a change
-    // that reverses a prior change isn't just a transient.
-    for (int i = 1, j = ri - 1 ; i < countof(readings) && ms < 50 ; ++i, --j)
-    {
-        // find the next prior reading, wrapping in the circular buffer
-        if (j < 0) 
-            j = countof(readings) - 1;
-        reading *rj = &readings[j];
-
-        // For any button that changed state in the prior reading 'rj',
-        // remove any new change and restore it to its 'rj' state.
-        b &= ~rj->m;
-        b |= rj->b;
-                
-        // add in the time to the next prior report
-        ms += rj->dt;
-    }
-    
-    // figure which buttons changed on this report vs the prior report
-    uint32_t m = b ^ bPrv;
-    
-    // save the change mask and changed button vector in our history entry
-    r->m = m;
-    r->b = b & m;
-    
-    // save this as the prior report
-    bPrv = b;
-    
-    // advance the write position for next time
-    ri += 1;
-    if (ri >= countof(readings)) 
-        ri = 0;
-        
-    // return the debounced result
-    return b;
-}
-#endif
 
 // ---------------------------------------------------------------------------
 //
