@@ -1,15 +1,20 @@
+#if 0
+// this file is no longer used - the method bodies are no in the header,
+// which was necessary because of the change to a template class, which
+// itself was necessary because of the use of the FastIO library
+
 #include "mbed.h"
 #include "tsl1410r.h"
 
-TSL1410R::TSL1410R(PinName siPort, PinName clockPort, PinName aoPort)
-    : si(siPort), clock(clockPort), ao(aoPort)
+template <PinName siPin, PinName clockPin> TSL1410R<siPin, clockPin>::
+    TSL1410R<siPin, clockPin>(PinName aoPort) : ao(aoPort)
 {
     // clear out power-on noise by clocking through all pixels twice
     clear();
     clear();
 }
 
-void TSL1410R::clear()
+template <PinName siPin, PinName clockPin> void TSL1410R<siPin, clockPin>::clear()
 {
     // clock in an SI pulse
     si = 1;
@@ -24,7 +29,8 @@ void TSL1410R::clear()
     }
 }
 
-void TSL1410R::read(uint16_t *pix, int n, void (*cb)(void *ctx), void *cbctx, int cbcnt)
+template <PinName siPin, PinName clockPin> void TSL1410R<siPin, clockPin>::
+    read(uint16_t *pix, int n, void (*cb)(void *ctx), void *cbctx, int cbcnt)
 {
     // start the next integration cycle by pulsing SI and one clock
     si = 1;
@@ -75,3 +81,5 @@ void TSL1410R::read(uint16_t *pix, int n, void (*cb)(void *ctx), void *cbctx, in
     clock = 1;
     clock = 0;
 }
+
+#endif /* 0 */
