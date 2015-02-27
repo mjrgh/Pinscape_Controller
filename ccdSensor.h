@@ -92,21 +92,21 @@ public:
     bool highResScan(int &pos)
     {
         // read the array
-        ccd.read(pix, npix, ccdReadCB, 0, 3);
+        ccd.read(pix, npix);
 
-        // get the average brightness at each end of the sensor
-        long avg1 = (long(pix[0]) + long(pix[1]) + long(pix[2]) + long(pix[3]) + long(pix[4]))/5;
-        long avg2 = (long(pix[npix-1]) + long(pix[npix-2]) + long(pix[npix-3]) + long(pix[npix-4]) + long(pix[npix-5]))/5;
+        // get the brightness at each end of the sensor
+        long b1 = pix[0];
+        long b2 = pix[npix-1];
         
         // Work from the bright end to the dark end.  VP interprets the
         // Z axis value as the amount the plunger is pulled: zero is the
         // rest position, and the axis maximum is fully pulled.  So we 
         // essentially want to report how much of the sensor is lit,
         // since this increases as the plunger is pulled back.
-        int si = 1, di = 1;
-        long avgHi = avg1;
-        if (avg1 < avg2)
-            si = npix - 2, di = -1, avgHi = avg2;
+        int si = 0, di = 1;
+        long hi = b1;
+        if (b1 < b2)
+            si = npix - 1, di = -1, hi = b2;
 
         // Figure the shadow threshold.  In practice, the portion of the
         // sensor that's not in shadow has all pixels consistently near
@@ -122,17 +122,9 @@ public:
         //             = lo*1/3 + hi*2/3
         //             = (lo + hi*2)/3
         //
-        // Then multiply the whole thing by 3 to factor out the averaging
-        // of each three adjacent pixels that we do in the loop (to save a
-        // little time on a mulitply on each loop):
-        //
-        //    threshold' = lo + 2*hi
-        //
-        // Now, 'lo' is always one of avg1 or avg2, and 'hi' is the other
-        // one, so we can rewrite this as hi + avg1 + avg2.  We also already
-        // pulled out 'hi' as avgHi, so we finally come to the final
-        // simplified expression:
-        long midpt = avg1 + avg2 + avgHi;
+        // Now, 'lo' is always one of b1 or b2, and 'hi' is the other
+        // one, so we can rewrite this as:
+        long midpt = (b1 + b2 + hi)/3;
         
         // If we have enough contrast, proceed with the scan.
         //
@@ -141,13 +133,13 @@ public:
         // or the sensor is misaligned and is either fully in or out of shadow
         // (it's supposed to be mounted such that the edge of the shadow always
         // falls within the sensor, for any possible plunger position).
-        if (labs(avg1 - avg2) > 0x1000)
+        if (labs(b1 - b2) > 0x1000)
         {
             uint16_t *pixp = pix + si;           
-            for (int n = 1 ; n < npix - 1 ; ++n, pixp += di)
+            for (int n = 0 ; n < npix ; ++n, pixp += di)
             {
                 // if we've crossed the midpoint, report this position
-                if (long(pixp[-1]) + long(pixp[0]) + long(pixp[1]) < midpt)
+                if (long(*pixp) < midpt)
                 {
                     // note the new position
                     pos = n;
@@ -166,7 +158,10 @@ public:
         // send reports for all pixels
         int idx = 0;
         while (idx < npix)
+        {
             js.updateExposure(idx, npix, pix);
+            wait_ms(1);
+        }
             
         // The pixel dump requires many USB reports, since each report
         // can only send a few pixel values.  An integration cycle has

@@ -165,6 +165,26 @@ const PinName CAL_BUTTON_LED = PTE23;
 const int ZBLaunchBallPort = 32;
 const int LaunchBallButton = 24;
 
+// Distance necessary to push the plunger to activate the simulated 
+// launch ball button, in inches.  A standard pinball plunger can be 
+// pushed forward about 1/2".  However, the barrel spring is very
+// stiff, and anything more than about 1/8" requires quite a bit
+// of force.  Ideally the force required should be about the same as 
+// for any ordinary pushbutton.
+//
+// On my cabinet, empirically, a distance around 2mm (.08") seems
+// to work pretty well.  It's far enough that it doesn't trigger
+// spuriously, but short enough that it responds to a reasonably
+// light push.
+//
+// You might need to adjust this up or down to get the right feel.
+// Alternatively, if you don't like the "push" gesture at all and
+// would prefer to only make the plunger respond to a pull-and-release
+// motion, simply set this to, say, 2.0 - it's impossible to push a 
+// plunger forward that far, so that will effectively turn off the 
+// push mode.
+const float LaunchBallPushDistance = .08;
+
 
 // --------------------------------------------------------------------------
 //

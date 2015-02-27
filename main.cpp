@@ -153,9 +153,10 @@
 //    long yellow/green = everything's working, but the plunger hasn't
 //        been calibrated; follow the calibration procedure described above.
 //        This flash mode won't appear if the CCD has been disabled.  Note
-//        that the device can't tell whether a CCD is physically attached,
-//        so you should use the config command to disable the CCD software 
-//        features if you won't be attaching a CCD.
+//        that the device can't tell whether a CCD is physically attached;
+//        if you don't have a CCD attached, you can set the appropriate option 
+//        in config.h or use the  Windows config tool to disable the CCD 
+//        software features.
 //
 //    alternating blue/green = everything's working
 //
@@ -442,6 +443,19 @@ static void updateWizOuts()
 // button input map array
 DigitalIn *buttonDigIn[32];
 
+// button state
+struct ButtonState
+{
+    // current on/off state
+    int pressed;
+    
+    // Sticky time remaining for current state.  When a
+    // state transition occurs, we set this to a debounce
+    // period.  Future state transitions will be ignored
+    // until the debounce time elapses.
+    int t;
+} buttonState[32];
+
 // timer for button reports
 static Timer buttonTimer;
 
@@ -462,24 +476,67 @@ void initButtons()
 }
 
 
-// read the raw button input state
-uint32_t readButtonsRaw()
+// read the button input state
+uint32_t readButtons()
 {
     // start with all buttons off
     uint32_t buttons = 0;
     
+    // figure the time elapsed since the last scan
+    int dt = buttonTimer.read_ms();
+    
+    // reset the timef for the next scan
+    buttonTimer.reset();
+    
     // scan the button list
     uint32_t bit = 1;
-    for (int i = 0 ; i < countof(buttonDigIn) ; ++i, bit <<= 1)
+    DigitalIn **di = buttonDigIn;
+    ButtonState *bs = buttonState;
+    for (int i = 0 ; i < countof(buttonDigIn) ; ++i, ++di, ++bs, bit <<= 1)
     {
-        if (buttonDigIn[i] != 0 && !buttonDigIn[i]->read())
-            buttons |= bit;
+        // read this button
+        if (*di != 0)
+        {
+            // deduct the elapsed time since the last update
+            // from the button's remaining sticky time
+            bs->t -= dt;
+            if (bs->t < 0)
+                bs->t = 0;
+            
+            // If the sticky time has elapsed, note the new physical
+            // state of the button.  If we still have sticky time
+            // remaining, ignore the physical state; the last state
+            // change persists until the sticky time elapses so that
+            // we smooth out any "bounce" (electrical transients that
+            // occur when the switch contact is opened or closed).
+            if (bs->t == 0)
+            {
+                // get the new physical state
+                int pressed = !(*di)->read();
+                
+                // update the button's logical state if this is a change
+                if (pressed != bs->pressed)
+                {
+                    // store the new state
+                    bs->pressed = pressed;
+                    
+                    // start a new sticky period for debouncing this
+                    // state change
+                    bs->t = 1000;
+                }
+            }
+            
+            // if it's pressed, OR its bit into the state
+            if (bs->pressed)
+                buttons |= bit;
+        }
     }
     
-    // return the button list
+    // return the new button list
     return buttons;
 }
 
+#if 0
 // Read buttons with debouncing.  
 //
 // Debouncing is the process of filtering out transients from button
@@ -505,7 +562,7 @@ uint32_t readButtonsDebounced()
         uint32_t b;
         
         // Change mask at this report.  This is a bit mask of the buttons
-        // that *didn't* change on this report.  AND this mask with a
+        // that changed on this report.  AND the NOT of this mask with a
         // new reading to filter buttons out of the new reading that
         // changed on this report.
         uint32_t m;
@@ -524,19 +581,20 @@ uint32_t readButtonsDebounced()
     // start timing the next interval
     buttonTimer.reset();
     
-    // mask out changes for any buttons that changed state within the
-    // past 50ms
-    for (int i = 1 ; i < countof(readings) && ms < 50 ; ++i)
+    // Mask out changes for any buttons that changed state within the
+    // past 50ms.  This ensures that each state change sticks for at
+    // least 50ms, which should be long enough to be sure that a change
+    // that reverses a prior change isn't just a transient.
+    for (int i = 1, j = ri - 1 ; i < countof(readings) && ms < 50 ; ++i, --j)
     {
         // find the next prior reading, wrapping in the circular buffer
-        int j = ri - i;
         if (j < 0) 
             j = countof(readings) - 1;
         reading *rj = &readings[j];
 
         // For any button that changed state in the prior reading 'rj',
         // remove any new change and restore it to its 'rj' state.
-        b &= rj->m;
+        b &= ~rj->m;
         b |= rj->b;
                 
         // add in the time to the next prior report
@@ -547,7 +605,7 @@ uint32_t readButtonsDebounced()
     uint32_t m = b ^ bPrv;
     
     // save the change mask and changed button vector in our history entry
-    r->m = ~m;
+    r->m = m;
     r->b = b & m;
     
     // save this as the prior report
@@ -561,6 +619,7 @@ uint32_t readButtonsDebounced()
     // return the debounced result
     return b;
 }
+#endif
 
 // ---------------------------------------------------------------------------
 //
@@ -917,21 +976,6 @@ void clear_i2c()
  
 // ---------------------------------------------------------------------------
 //
-// CCD read interval callback.  When reading the CCD, we'll call this
-// several times over the course of the read loop to refresh the button
-// states.  This allows us to debounce the buttons while the long CCD
-// read cycle is taking place, so that we can reliably report button
-// states after each CCD read cycle.  (The read cycle takes about 30ms,
-// which should be enough time to reliably debounce the buttons.)
-//
-void ccdReadCB(void *)
-{
-    // read the keyboard
-    readButtonsDebounced();
-}
-
-// ---------------------------------------------------------------------------
-//
 // Include the appropriate plunger sensor definition.  This will define a
 // class called PlungerSensor, with a standard interface that we use in
 // the main loop below.  This is *kind of* like a virtual class interface,
@@ -1185,6 +1229,11 @@ int main(void)
     Timer lbTimer;
     lbTimer.start();
     
+    // Launch Ball simulated push timer.  We start this when we simulate
+    // the button push, and turn off the simulated button when enough time
+    // has elapsed.
+    Timer lbBtnTimer;
+    
     // Simulated button states.  This is a vector of button states
     // for the simulated buttons.  We combine this with the physical
     // button states on each USB joystick report, so we will report
@@ -1245,12 +1294,11 @@ int main(void)
     // host requests
     for (;;)
     {
-        // Look for an incoming report.  Continue processing input as
-        // long as there's anything pending - this ensures that we
-        // handle input in as timely a fashion as possible by deferring
-        // output tasks as long as there's input to process.
+        // Look for an incoming report.  Process a few input reports in
+        // a row, but stop after a few so that a barrage of inputs won't
+        // starve our output event processing.
         HID_REPORT report;
-        while (js.readNB(&report))
+        for (int rr = 0 ; rr < 4 && js.readNB(&report) ; ++rr)
         {
             // all Led-Wiz reports are 8 bytes exactly
             if (report.length == 8)
@@ -1559,8 +1607,10 @@ int main(void)
             }
             
             // Check for a simulated Launch Ball button press, if enabled
-            if (ZBLaunchBallPort != 0 && wizOn[ZBLaunchBallPort-1])
+            if (ZBLaunchBallPort != 0)
             {
+                const int cockThreshold = JOYMAX/3;
+                const int pushThreshold = int(-JOYMAX/3 * LaunchBallPushDistance);
                 int newState = lbState;
                 switch (lbState)
                 {
@@ -1568,9 +1618,9 @@ int main(void)
                     // Base state.  If the plunger is pulled back by an inch
                     // or more, go to "cocked" state.  If the plunger is pushed
                     // forward by 1/4" or more, go to "launch" state.
-                    if (znew >= JOYMAX/3)
+                    if (znew >= cockThreshold)
                         newState = 1;
-                    else if (znew < -JOYMAX/12)
+                    else if (znew <= pushThreshold)
                         newState = 3;
                     break;
                     
@@ -1582,7 +1632,7 @@ int main(void)
                     // to trigger a launch.
                     if (firing || znew <= 0)
                         newState = 3;
-                    else if (znew < JOYMAX/3)
+                    else if (znew < cockThreshold)
                         newState = 2;
                     break;
                     
@@ -1590,8 +1640,11 @@ int main(void)
                     // Uncocked state.  If the plunger is more than an inch
                     // retracted, return to cocked state.  If we've been in
                     // the uncocked state for more than half a second, return
-                    // to the base state.
-                    if (znew >= JOYMAX/3)
+                    // to the base state.  This allows the user to return the
+                    // plunger to rest without triggering a launch, by moving
+                    // it at manual speed to the rest position rather than
+                    // releasing it.
+                    if (znew >= cockThreshold)
                         newState = 1;
                     else if (lbTimer.read_ms() > 500)
                         newState = 0;
@@ -1600,7 +1653,7 @@ int main(void)
                 case 3:
                     // Launch state.  If the plunger is no longer pushed
                     // forward, switch to launch rest state.
-                    if (znew > -JOYMAX/24)
+                    if (znew >= 0)
                         newState = 4;
                     break;    
                     
@@ -1609,7 +1662,7 @@ int main(void)
                     // again, switch back to launch state.  If not, and we've
                     // been in this state for at least 200ms, return to the
                     // default state.
-                    if (znew < -JOYMAX/12)
+                    if (znew <= pushThreshold)
                         newState = 3;
                     else if (lbTimer.read_ms() > 200)
                         newState = 0;                    
@@ -1617,11 +1670,18 @@ int main(void)
                 }
                 
                 // change states if desired
+                const uint32_t lbButtonBit = (1 << (LaunchBallButton - 1));
                 if (newState != lbState)
                 {
-                    // if we're entering Launch state, press the Launch Ball button
-                    if (newState == 3 && lbState != 4)
-                        simButtons |= (1 << (LaunchBallButton - 1));
+                    // if we're entering Launch state, and the ZB Launch Ball
+                    // LedWiz signal is turned on, simulate a Launch Ball button
+                    // press
+                    if (newState == 3 && lbState != 4 && wizOn[ZBLaunchBallPort-1])
+                    {
+                        lbBtnTimer.reset();
+                        lbBtnTimer.start();
+                        simButtons |= lbButtonBit;
+                    }
                         
                     // if we're switching to state 0, release the button
                     if (newState == 0)
@@ -1633,6 +1693,17 @@ int main(void)
                     // start timing in the new state
                     lbTimer.reset();
                 }
+
+                // if the simulated Launch Ball button press is in effect,
+                // and either it's been in effect too long or the ZB Launch
+                // Ball signal is no longer active, turn off the button
+                if ((simButtons & lbButtonBit) != 0
+                    && (!wizOn[ZBLaunchBallPort-1] || lbBtnTimer.read_ms() > 250))
+                {
+                    lbBtnTimer.stop();
+                    simButtons &= ~lbButtonBit;
+                }
+
             }
                 
             // If a firing event is in progress, generate synthetic reports to 
@@ -1719,7 +1790,7 @@ int main(void)
         }
 
         // update the buttons
-        uint32_t buttons = readButtonsDebounced();
+        uint32_t buttons = readButtons();
 
         // If it's been long enough since our last USB status report,
         // send the new report.  We throttle the report rate because

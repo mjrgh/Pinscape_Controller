@@ -63,11 +63,7 @@ public:
     // If the caller has other work to tend to that takes longer than the
     // desired maximum integration time, it can call clear() to clock out
     // the current pixels and start a fresh integration cycle.
-    void read(uint16_t *pix, int n) { read(pix, n, 0, 0, 0); }
-    
-    // Read with interval callback.  We'll call the callback the given
-    // number of times per read cycle.
-    void read(uint16_t *pix, int n, void (*cb)(void *ctx), void *cbctx, int cbcnt)
+    void read(uint16_t *pix, int n)
     {
         // start the next integration cycle by pulsing SI and one clock
         si = 1;
@@ -78,42 +74,24 @@ public:
         // figure how many pixels to skip on each read
         int skip = nPix/n - 1;
         
-        // figure the callback interval
-        int cbInterval = nPix;
-        if (cb != 0)
-            cbInterval = nPix/(cbcnt+1);
-    
         // read all of the pixels
-        for (int src = 0, dst = 0 ; src < nPix ; )
+        for (int src = 0, dst = 0 ; src < nPix ; ++src)
         {
-            // figure the end of this callback interval
-            int srcEnd = src + cbInterval;
-            if (srcEnd > nPix)
-                srcEnd = nPix;
-                
-            // read one callback chunk of pixels
-            for ( ; src < srcEnd ; ++src)
-            {
-                // clock in and read the next pixel
-                clock = 1;
-                ao.enable();
-                wait_us(1);
-                clock = 0;
-                wait_us(11);
-                pix[dst++] = ao.read_u16();
-                ao.disable();
-                
-                // clock skipped pixels
-                for (int i = 0 ; i < skip ; ++i, ++src) 
-                {
-                    clock = 1;
-                    clock = 0;
-                }
-            }
+            // clock in and read the next pixel
+            clock = 1;
+            ao.enable();
+            wait_us(1);
+            clock = 0;
+            wait_us(11);
+            pix[dst++] = ao.read_u16();
+            ao.disable();
             
-            // call the callback, if we're not at the last pixel
-            if (cb != 0 && src < nPix)
-                (*cb)(cbctx);
+            // clock skipped pixels
+            for (int i = 0 ; i < skip ; ++i, ++src) 
+            {
+                clock = 1;
+                clock = 0;
+            }
         }
         
         // clock out one extra pixel to leave A1 in the high-Z state
