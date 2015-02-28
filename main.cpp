@@ -1211,9 +1211,12 @@ int main(void)
     {
         // Look for an incoming report.  Process a few input reports in
         // a row, but stop after a few so that a barrage of inputs won't
-        // starve our output event processing.
+        // starve our output event processing.  Also, pause briefly between
+        // reads; allowing reads to occur back-to-back seems to occasionally 
+        // stall the USB pipeline (for reasons unknown; I'd fix the underlying 
+        // problem if I knew what it was).
         HID_REPORT report;
-        for (int rr = 0 ; rr < 4 && js.readNB(&report) ; ++rr)
+        for (int rr = 0 ; rr < 4 && js.readNB(&report) ; ++rr, wait_ms(1))
         {
             // all Led-Wiz reports are 8 bytes exactly
             if (report.length == 8)
