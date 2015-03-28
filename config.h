@@ -7,40 +7,78 @@
 
 
 // --------------------------------------------------------------------------
+//
+// Enable/disable joystick functions.
+//
+// This controls whether or not we send joystick reports to the PC with the 
+// plunger and accelerometer readings.  By default, this is enabled.   If
+// you want to use two or more physical KL25Z Pinscape controllers in your
+// system (e.g., if you want to increase the number of output ports
+// available by using two or more KL25Z's), you should disable the joystick
+// features on the second (and third+) controller.  It's not useful to have
+// more than one board reporting the accelerometer readings to the host -
+// doing so will just add USB overhead.  This setting lets you turn off the
+// reports for the secondary controllers, turning the secondary boards into
+// output-only devices.
+//
+// Note that you can't use button inputs on a controller that has the
+// joystick features disabled, because the buttons are handled via the
+// joystick reports.  Wire all of your buttons to the primary KL25Z that
+// has the joystick features enabled.
+//
+// To disable the joystick features, just comment out the next line (add
+// two slashes at the beginning of the line).
+//
+#define ENABLE_JOYSTICK
+
+
+// --------------------------------------------------------------------------
 // 
 // LedWiz default unit number.
 //
-// Each LedWiz device has a unit number, from 0 to 15.  This lets you install
+// Each LedWiz device has a unit number, from 1 to 16.  This lets you install
 // more than one LedWiz in your system: as long as each one has a different
 // unit number, the software on the PC can tell them apart and route commands 
 // to the right device.
 //
-// A *real* LedWiz has its unit number set at the factory.  This will be 0
-// unless you specifically request a different number.
+// A *real* LedWiz has its unit number set at the factory; they set it to
+// unit 1 unless you specifically request a different number when you place
+// your order.
 //
-// We use 7 as our default unit number, to avoid conflicting with any real 
-// LedWiz devices that you might have in your system.  If you have a real 
-// one, it will most likely be unit #0.  If you have two real ones, you
-// probably asked for the second one to be unit #1.  If you have three,
-// the third is probably #2.  And so on.  I don't think *anyone* has seven
-// of these things - that would be 224 separate channels, which seems like
-// a lot.  That's why I set the default to #7.  But if you do happen to have
-// a conflict, you can just change this number to one that you're not using
-// for one of your real LedWiz devices.
+// For our *emulated* LedWiz, we default to unit #8.  However, if we're set 
+// up as a secondary Pinscape controller with the joystick functions turned 
+// off, we'll use unit #9 instead.  
 //
-// Note 1:  on the PC side, all of the software adds 1 to the number you
-// see here.  0 here will show up as unit #1 on the PC; 7 here will be #8
-// on the PC.  They do it that way because programmers like to start
-// counting from 0, but they figure that civilians can't handle that and
-// have to start counting at 1.
+// The reason we start at unit #8 is that we want to avoid conflicting with
+// any real LedWiz devices you have in your system.  If you have a real
+// LedWiz, it's probably unit #1, since that's the standard factor setting.
+// If you have two real LedWiz's, they're probably units #1 and #2.  If you 
+// have three... well, I don't think anyone actually has three, but if you 
+// did it would probably be unit #3.  And so on.  That's why we start at #8 - 
+// it seems really unlikely that this will conflict with anybody's existing 
+// setup.  On the off chance it does, simply change the setting here to a 
+// different unit number that's not already used in your system.
+//
+// Note 1:  the unit number here is the *user visible* unit number that
+// you use on the PC side.  It's the number you specify in your DOF
+// configuration and so forth.  Internally, the USB reports subtract
+// one from this number - e.g., nominal unit #1 shows up as 0 in the USB
+// reports.  If you're trying to puzzle out why all of the USB reports
+// are all off by one from the unit number you select here, that's why.
 //
 // Note 2:  the DOF Configtool (google it) knows about the Pinscape 
-// controller and knows that it uses 7 as its default unit number, so it
-// will name the .ini file for this controller xxx8.ini (the 7 becomes
-// an 8 on the PC side as described in the note above).  If you change
-// this number, you'll have to compensate by changing the number at the
-// end of the .ini filename to match.
-const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 0x07;
+// controller (it's known there as just a "KL25Z" rather than Pinscape).
+// And the DOF tool knows that it uses #8 as its default unit number, so
+// it names the .ini file for this controller xxx8.ini.  If you change the 
+// unit number here, remember to rename the DOF-generated .ini file to 
+// match, by changing the "8" at the end of the filename to the new number
+// you set here.
+const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 
+#ifdef ENABLE_JOYSTICK
+   0x08;   // joystick enabled - assume we're the primary KL25Z, so use unit #8
+#else
+   0x09;   // joystick disabled - assume we're a secondary, output-only KL25Z, so use #9
+#endif
 
 // --------------------------------------------------------------------------
 //
@@ -49,7 +87,7 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 0x07;
 // If you're NOT using the CCD sensor, comment out the next line (by adding
 // two slashes at the start of the line).
 
-#define ENABLE_CCD_SENSOR 1
+#define ENABLE_CCD_SENSOR
 
 // The KL25Z pins that the CCD sensor is physically attached to:
 //
@@ -78,7 +116,7 @@ const PinName CCD_SO_PIN = PTB0;
 // next line (by removing the two slashes at the start of the line), and be
 // sure to comment out the ENABLE_CCD_SENSOR line above.
 
-//#define ENABLE_POT_SENSOR 1
+//#define ENABLE_POT_SENSOR
 
 // The KL25Z pin that your potentiometer is attached to.  Wire the end of
 // the potentiometer at the retracted end of the plunger to the 3.3V output
@@ -159,8 +197,7 @@ const PinName CAL_BUTTON_LED = PTE23;
 // dialog, and find the Plunger item.  Open the drop-down list under that
 // item and select the button number defined below.
 //
-// If you wish to disable this feature, just set the LedWiz port number
-// to 0.
+// To disable this feature, just set ZBLaunchBallPort to 0 here.
 
 const int ZBLaunchBallPort = 32;
 const int LaunchBallButton = 24;
@@ -186,6 +223,7 @@ const int LaunchBallButton = 24;
 const float LaunchBallPushDistance = .08;
 
 
+#ifdef DECL_EXTERNS
 // --------------------------------------------------------------------------
 //
 
@@ -374,3 +412,5 @@ struct {
     { NC, false }        // Not used,  LW port 32
 };
 
+
+#endif // DECL_EXTERNS

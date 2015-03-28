@@ -109,6 +109,11 @@ class USBJoystick: public USBHID {
          bool update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status);
          
          /**
+         * Update just the status
+         */
+         bool updateStatus(uint32_t stat);
+         
+         /**
          * Write an exposure report.  We'll fill out a report with as many pixels as
          * will fit in the packet, send the report, and update the index to the next
          * pixel to send.  The caller should call this repeatedly to send reports for

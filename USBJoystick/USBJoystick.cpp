@@ -19,7 +19,14 @@
  
 #include "stdint.h"
 #include "USBJoystick.h"
- 
+
+#include "config.h"  // Pinscape configuration
+
+// Length of our joystick reports.  Important: This must be kept in sync 
+// with the actual joystick report format sent in update().
+const int reportLen = 14;
+
+#ifdef ENABLE_JOYSTICK
 bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status) 
 {
    _x = x;
@@ -33,7 +40,6 @@ bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint
    return update();
 }
  
-const int reportLen = 14;
 bool USBJoystick::update() 
 {
    HID_REPORT report;
@@ -47,6 +53,9 @@ bool USBJoystick::update()
    put(8, _x);
    put(10, _y);
    put(12, _z);
+   
+   // important: keep reportLen in sync with the actual byte length of
+   // the reports we build here
    report.length = reportLen;
  
    // send the report
@@ -91,6 +100,24 @@ bool USBJoystick::buttons(uint32_t buttons) {
      _buttonsHi = (uint16_t)((buttons >> 16) & 0xffff);
      return update();
 }
+
+#else /* ENABLE_JOYSTICK */
+
+bool USBJoystick::updateStatus(uint32_t status)
+{
+   HID_REPORT report;
+
+   // Fill the report according to the Joystick Descriptor
+#define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
+   memset(report.data, 0, reportLen);
+   put(0, status);
+   report.length = reportLen;
+ 
+   // send the report
+   return sendTO(&report, 100);
+}
+
+#endif /* ENABLE_JOYSTICK */
  
  
 void USBJoystick::_init() {
@@ -106,6 +133,9 @@ void USBJoystick::_init() {
  
 uint8_t * USBJoystick::reportDesc() 
 {    
+#ifdef ENABLE_JOYSTICK
+    // Joystick reports are enabled.  Use the full joystick report
+    // format.
     static uint8_t reportDescriptor[] = 
     {         
          USAGE_PAGE(1), 0x01,            // Generic desktop
@@ -174,7 +204,39 @@ uint8_t * USBJoystick::reportDesc()
      //    END_COLLECTION(0),
          END_COLLECTION(0)
       };
+#else /* defined(ENABLE_JOYSTICK) */
+
+    // Joystick reports are disabled.  We still want to appear
+    // as a USB device for the LedWiz output emulation, but we
+    // don't want to appear as a joystick.
+     
+    static uint8_t reportDescriptor[] = 
+    {         
+         USAGE_PAGE(1), 0x01,            // Generic desktop
+         USAGE(1), 0x00,                 // Undefined
+
+         COLLECTION(1), 0x01,            // Application
+         
+             // input report (device to host)
+             USAGE_PAGE(1), 0x06,        // generic device controls - for config status
+             USAGE(1), 0x00,             // undefined device control
+             LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
+             LOGICAL_MAXIMUM(1), 0xFF,
+             REPORT_SIZE(1), 0x08,       // 8 bits per report
+             REPORT_COUNT(1), reportLen, // standard report length (same as if we were in joystick mode)
+             INPUT(1), 0x02,             // Data, Variable, Absolute
+
+             // output report (host to device)
+             REPORT_SIZE(1), 0x08,       // 8 bits per report
+             REPORT_COUNT(1), 0x08,      // output report count (LEDWiz messages)
+             0x09, 0x01,                 // usage
+             0x91, 0x01,                 // Output (array)
+
+         END_COLLECTION(0)
+      };
  
+#endif /* defined(ENABLE_JOYSTICK) */
+
       reportLength = sizeof(reportDescriptor);
       return reportDescriptor;
 }

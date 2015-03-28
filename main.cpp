@@ -216,6 +216,7 @@
 #include "crc32.h"
 
 // our local configuration file
+#define DECL_EXTERNS
 #include "config.h"
 
 
@@ -260,14 +261,19 @@ const uint16_t USB_VERSION_NO = 0x0006;
 
 // --------------------------------------------------------------------------
 //
-// Potentiometer configuration
+// Define a symbol to tell us whether any sort of plunger sensor code
+// is enabled in this build.  Note that this doesn't tell us that a
+// plunger device is actually attached or *currently* enabled; it just
+// tells us whether or not the code for plunger sensing is enabled in 
+// the software build.  This lets us leave out some unnecessary code
+// on installations where no physical plunger is attached.
 //
-#ifdef POT_SENSOR_ENABLED
-#define IF_POT(x) x
+const int PLUNGER_CODE_ENABLED =
+#if defined(ENABLE_CCD_SENSOR) || defined(ENABLE_POT_SENSOR)
+    1;
 #else
-#define IF_POT(x)
+    0;
 #endif
-
 
 // ---------------------------------------------------------------------------
 //
@@ -1049,8 +1055,8 @@ int main(void)
         cfg.d.plungerMin = 0;        // assume we can go all the way forward...
         cfg.d.plungerMax = npix;     // ...and all the way back
         cfg.d.plungerZero = npix/6;  // the rest position is usually around 1/2" back
-        cfg.d.ledWizUnitNo = DEFAULT_LEDWIZ_UNIT_NUMBER;
-        cfg.d.plungerEnabled = true;
+        cfg.d.ledWizUnitNo = DEFAULT_LEDWIZ_UNIT_NUMBER - 1;  // unit numbering starts from 0 internally
+        cfg.d.plungerEnabled = PLUNGER_CODE_ENABLED;
     }
     
     // Create the joystick USB client.  Note that we use the LedWiz unit
@@ -1094,10 +1100,15 @@ int main(void)
     // create the accelerometer object
     Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, MMA8451_INT_PIN);
     
+#ifdef ENABLE_JOYSTICK
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
     int x = 0, y = 0;
     
+    // flag: send a pixel dump after the next read
+    bool reportPix = false;
+#endif
+
     // create our plunger sensor object
     PlungerSensor plungerSensor;
 
@@ -1129,9 +1140,10 @@ int main(void)
     //   0 = default
     //   1 = cocked (plunger has been pulled back about 1" from state 0)
     //   2 = uncocked (plunger is pulled back less than 1" from state 1)
-    //   3 = launching (plunger has been released from state 1 or 2, or 
-    //       pushed forward about 1/4" from state 0)
-    //   4 = launching, plunger is no longer pushed forward
+    //   3 = launching, plunger is forward beyond park position
+    //   4 = launching, plunger is behind park position
+    //   5 = pressed and holding (plunger has been pressed forward beyond 
+    //       the park position from state 0)
     int lbState = 0;
     
     // Time since last lbState transition.  Some of the states are time-
@@ -1202,9 +1214,6 @@ int main(void)
     //    0x01  -> plunger sensor enabled
     uint16_t statusFlags = (cfg.d.plungerEnabled ? 0x01 : 0x00);
     
-    // flag: send a pixel dump after the next read
-    bool reportPix = false;
-
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
     for (;;)
@@ -1257,7 +1266,7 @@ int main(void)
                         // 1 = Set Configuration:
                         //     data[2] = LedWiz unit number (0x00 to 0x0f)
                         //     data[3] = feature enable bit mask:
-                        //               0x01 = enable CCD
+                        //               0x01 = enable plunger sensor
                         
                         // we'll need a reset if the LedWiz unit number is changing
                         uint8_t newUnitNo = data[2] & 0x0f;
@@ -1277,6 +1286,7 @@ int main(void)
                         // save the configuration
                         cfg.save(iap, flash_addr);
                     }
+#ifdef ENABLE_JOYSTICK
                     else if (data[1] == 2)
                     {
                         // 2 = Calibrate plunger
@@ -1298,6 +1308,7 @@ int main(void)
                         ledB = 0;
                         ledG = 1;
                     }
+#endif // ENABLE_JOYSTICK
                 }
                 else 
                 {
@@ -1535,11 +1546,11 @@ int main(void)
                 case 0:
                     // Base state.  If the plunger is pulled back by an inch
                     // or more, go to "cocked" state.  If the plunger is pushed
-                    // forward by 1/4" or more, go to "launch" state.
+                    // forward by 1/4" or more, go to "pressed" state.
                     if (znew >= cockThreshold)
                         newState = 1;
                     else if (znew <= pushThreshold)
-                        newState = 3;
+                        newState = 5;
                     break;
                     
                 case 1:
@@ -1585,22 +1596,34 @@ int main(void)
                     else if (lbTimer.read_ms() > 200)
                         newState = 0;                    
                     break;
+                    
+                case 5:
+                    // Press-and-Hold state.  If the plunger is no longer pushed
+                    // forward, AND it's been at least 50ms since we generated
+                    // the simulated Launch Ball button press, return to the base 
+                    // state.  The minimum time is to ensure that VP has a chance
+                    // to see the button press and to avoid transient key bounce
+                    // effects when the plunger position is right on the threshold.
+                    if (znew > pushThreshold && lbTimer.read_ms() > 50)
+                        newState = 0;
+                    break;
                 }
                 
                 // change states if desired
                 const uint32_t lbButtonBit = (1 << (LaunchBallButton - 1));
                 if (newState != lbState)
                 {
-                    // if we're entering Launch state, and the ZB Launch Ball
-                    // LedWiz signal is turned on, simulate a Launch Ball button
-                    // press
-                    if (newState == 3 && lbState != 4 && wizOn[ZBLaunchBallPort-1])
+                    // If we're entering Launch state OR we're entering the
+                    // Press-and-Hold state, AND the ZB Launch Ball LedWiz signal 
+                    // is turned on, simulate a Launch Ball button press.
+                    if (((newState == 3 && lbState != 4) || newState == 5)
+                        && wizOn[ZBLaunchBallPort-1])
                     {
                         lbBtnTimer.reset();
                         lbBtnTimer.start();
                         simButtons |= lbButtonBit;
                     }
-                        
+                    
                     // if we're switching to state 0, release the button
                     if (newState == 0)
                         simButtons &= ~(1 << (LaunchBallButton - 1));
@@ -1611,17 +1634,48 @@ int main(void)
                     // start timing in the new state
                     lbTimer.reset();
                 }
-
-                // if the simulated Launch Ball button press is in effect,
-                // and either it's been in effect too long or the ZB Launch
-                // Ball signal is no longer active, turn off the button
-                if ((simButtons & lbButtonBit) != 0
-                    && (!wizOn[ZBLaunchBallPort-1] || lbBtnTimer.read_ms() > 250))
+                
+                // If the Launch Ball button press is in effect, but the
+                // ZB Launch Ball LedWiz signal is no longer turned on, turn
+                // off the button.
+                //
+                // If we're in one of the Launch states (state #3 or #4),
+                // and the button has been on for long enough, turn it off.
+                // The Launch mode is triggered by a pull-and-release gesture.
+                // From the user's perspective, this is just a single gesture
+                // that should trigger just one momentary press on the Launch
+                // Ball button.  Physically, though, the plunger usually
+                // bounces back and forth for 500ms or so before coming to
+                // rest after this gesture.  That's what the whole state
+                // #3-#4 business is all about - we stay in this pair of
+                // states until the plunger comes to rest.  As long as we're
+                // in these states, we won't send duplicate button presses.
+                // But we also don't want the one button press to continue 
+                // the whole time, so we'll time it out now.
+                //
+                // (This could be written as one big 'if' condition, but
+                // I'm breaking it out verbosely like this to make it easier
+                // for human readers such as myself to comprehend the logic.)
+                if ((simButtons & lbButtonBit) != 0)
                 {
-                    lbBtnTimer.stop();
-                    simButtons &= ~lbButtonBit;
+                    int turnOff = false;
+                    
+                    // turn it off if the ZB Launch Ball signal is off
+                    if (!wizOn[ZBLaunchBallPort-1])
+                        turnOff = true;
+                        
+                    // also turn it off if we're in state 3 or 4 ("Launch"),
+                    // and the button has been on long enough
+                    if ((lbState == 3 || lbState == 4) && lbBtnTimer.read_ms() > 250)
+                        turnOff = true;
+                        
+                    // if we decided to turn off the button, do so
+                    if (turnOff)
+                    {
+                        lbBtnTimer.stop();
+                        simButtons &= ~lbButtonBit;
+                    }
                 }
-
             }
                 
             // If a firing event is in progress, generate synthetic reports to 
@@ -1710,6 +1764,7 @@ int main(void)
         // update the buttons
         uint32_t buttons = readButtons();
 
+#ifdef ENABLE_JOYSTICK
         // If it's been long enough since our last USB status report,
         // send the new report.  We throttle the report rate because
         // it can overwhelm the PC side if we report too frequently.
@@ -1732,6 +1787,13 @@ int main(void)
             x = xa;
             y = ya;
             
+            // Report the current plunger position UNLESS the ZB Launch Ball 
+            // signal is on, in which case just report a constant 0 value.  
+            // ZB Launch Ball turns off the plunger position because it
+            // tells us that the table has a Launch Ball button instead of
+            // a traditional plunger.
+            int zrep = (ZBLaunchBallPort != 0 && wizOn[ZBLaunchBallPort-1] ? 0 : z);
+            
             // Send the status report.  Note that the nominal x and y axes
             // are reversed - this makes it more intuitive to set up in VP.
             // If we mount the Freesale card flat on the floor of the cabinet
@@ -1739,12 +1801,12 @@ int main(void)
             // arrangement of our nominal axes aligns with VP's standard
             // setting, so that we can configure VP with X Axis = X on the
             // joystick and Y Axis = Y on the joystick.
-            js.update(y, x, z, buttons | simButtons, statusFlags);
+            js.update(y, x, zrep, buttons | simButtons, statusFlags);
             
             // we've just started a new report interval, so reset the timer
             reportTimer.reset();
         }
-        
+
         // If we're in pixel dump mode, report all pixel exposure values
         if (reportPix)
         {
@@ -1754,6 +1816,17 @@ int main(void)
             // we have satisfied this request
             reportPix = false;
         }
+        
+#else // ENABLE_JOYSTICK
+        // We're a secondary controller, with no joystick reporting.  Send
+        // a generic status report to the host periodically for the sake of
+        // the Windows config tool.
+        if (reportTimer.read_ms() > 200)
+        {
+            js.updateStatus(0);
+        }
+
+#endif // ENABLE_JOYSTICK
         
 #ifdef DEBUG_PRINTF
         if (x != 0 || y != 0)
