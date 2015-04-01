@@ -905,9 +905,9 @@ void clear_i2c()
 // because we don't need to be able to change sensor types on the fly.
 //
 
-#ifdef ENABLE_CCD_SENSOR
+#if defined(ENABLE_CCD_SENSOR)
 #include "ccdSensor.h"
-#elif ENABLE_POT_SENSOR
+#elif defined(ENABLE_POT_SENSOR)
 #include "potSensor.h"
 #else
 #include "nullSensor.h"
