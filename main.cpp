@@ -1489,7 +1489,7 @@ int main(void)
                     //
                     // Note that negative values are allowed.  Zero represents the
                     // "park" position, where the plunger sits when at rest.  A mechanical 
-                    // plunger has a smmall amount of travel in the "push" direction,
+                    // plunger has a small amount of travel in the "push" direction,
                     // since the barrel spring can be compressed slightly.  Negative
                     // values represent travel in the push direction.
                     if (pos > cfg.d.plungerMax)
@@ -1511,25 +1511,44 @@ int main(void)
                 // The plunger has moved forward since the previous report.
                 // Watch it for a few more ms to see if we can get a stable
                 // new position.
-                int pos1 = plungerSensor.lowResScan();
+                int pos0 = plungerSensor.lowResScan();
+                int pos1 = pos0;
                 Timer tw;
                 tw.start();
                 while (tw.read_ms() < 6)
                 {
-                    // if we've crossed the rest position, it's a firing event
-                    if (pos1 < cfg.d.plungerZero)
+                    // read the new position
+                    int pos2 = plungerSensor.lowResScan();
+                    
+                    // If it's stable over consecutive readings, stop looping.
+                    // (Count it as stable if the position is within about 1/8".
+                    // pos1 and pos2 are reported in pixels, so they range from
+                    // 0 to npix.  The overall travel of a standard plunger is
+                    // about 3.2", so we have (npix/3.2) pixels per inch, hence
+                    // 1/8" is (npix/3.2)*(1/8) pixels.)
+                    if (abs(pos2 - pos1) < int(npix/(3.2*8)))
+                        break;
+
+                    // If we've crossed the rest position, and we've moved by
+                    // a minimum distance from where we starting this loop, begin
+                    // a firing event.  (We require a minimum distance to prevent
+                    // spurious firing from random analog noise in the readings
+                    // when the plunger is actually just sitting still at the 
+                    // rest position.  If it's at rest, it's normal to see small
+                    // random fluctuations in the analog reading +/- 1% or so
+                    // from the 0 point, especially with a sensor like a
+                    // potentionemeter that reports the position as a single 
+                    // analog voltage.)  Note that we compare the latest reading
+                    // to the first reading of the loop - we don't require the
+                    // threshold motion over consecutive readings, but any time
+                    // over the stability wait loop.
+                    if (pos1 < cfg.d.plungerZero
+                        && abs(pos2 - pos0) > int(npix/(3.2*8)))
                     {
                         firing = 1;
                         break;
                     }
-                    
-                    // read the new position
-                    int pos2 = plungerSensor.lowResScan();
-                    
-                    // if it's stable, stop looping
-                    if (abs(pos2 - pos1) < int(npix/(3.2*8)))
-                        break;
-                        
+                                            
                     // the new reading is now the prior reading
                     pos1 = pos2;
                 }

@@ -22,28 +22,41 @@ class PlungerSensor
 public:
     PlungerSensor() : pot(POT_PIN)
     {
-        pot.enable();
     }
     
     void init() 
     {
     }
     
-    int lowResScan()
-    {
-        return int(pot.read() * npix);
-    }
-        
     bool highResScan(int &pos)
     {
-        pos = int(pot.read() * npix);
+        // Take a few readings and use the average, to reduce the effect
+        // of analog voltage fluctuations.  The voltage range on the ADC
+        // is 0-3.3V, and empirically it looks like we can expect random
+        // voltage fluctuations of up to 50 mV, which is about 1.5% of
+        // the overall range.  We try to quantize at about the mm level
+        // (in terms of the plunger motion range), which is about 1%.
+        // So 1.5% noise is big enough to be visible in the joystick
+        // reports.  Averaging several readings should help smooth out
+        // random noise in the readings.
+        pos = int((pot.read() + pot.read() + pot.read())/3.0 * npix);
         return true;
     }
     
+    int lowResScan()
+    {
+        // Use an average of several readings.  Note that even though this
+        // is nominally a "low res" scan, we can still afford to take an
+        // average.  The point of the low res interface is speed, and since
+        // we only have one analog value to read, we can afford to take
+        // several samples here even in the low res case.
+        return int((pot.read() + pot.read() + pot.read())/3.0 * npix);
+    }
+        
     void sendExposureReport(USBJoystick &) 
     { 
     }
     
 private:
-    FastAnalogIn pot;
+    AnalogIn pot;
 };

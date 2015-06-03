@@ -87,7 +87,7 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER =
 // If you're NOT using the CCD sensor, comment out the next line (by adding
 // two slashes at the start of the line).
 
-#define ENABLE_CCD_SENSOR
+//#define ENABLE_CCD_SENSOR
 
 // The KL25Z pins that the CCD sensor is physically attached to:
 //
@@ -112,21 +112,30 @@ const PinName CCD_SO_PIN = PTB0;
 //
 // Plunger potentiometer sensor.
 //
-// If you ARE using a potentiometer as the plunger sensor, un-comment the
-// next line (by removing the two slashes at the start of the line), and be
-// sure to comment out the ENABLE_CCD_SENSOR line above.
+// If you're using a potentiometer as the plunger sensor, un-comment the
+// next line (by removing the two slashes at the start of the line), and 
+// also comment out the ENABLE_CCD_SENSOR line above.
 
-//#define ENABLE_POT_SENSOR
+#define ENABLE_POT_SENSOR
 
-// The KL25Z pin that your potentiometer is attached to.  Wire the end of
-// the potentiometer at the retracted end of the plunger to the 3.3V output
-// from the KL25Z.  Wire the variable output from the potentiometer to the
-// gpio pin below.  This must be an AnalogIn capable pin - only a few of the
-// KL25Z gpio pins qualify, so check the pinout diagram to find a suitable
-// candidate if you need to change this for any reason.  Note that we use
-// the same analog input that the CCD sensor would use if it were enabled,
-// which is why you have to be sure to disable the CCD code if you're using
-// this.
+// The KL25Z pin that your potentiometer is attached to.  The potentiometer
+// requires wiring three connectins:
+//
+// - Wire the fixed resistance end of the potentiometer nearest the KNOB 
+//   end of the plunger to the 3.3V output from the KL25Z
+//
+// - Wire the other fixed resistance end to KL25Z Ground
+//
+// -  Wire the potentiometer wiper (the variable output terminal) to the 
+//    KL25Z pin identified below.  
+//
+// Note that you can change the pin selection below, but if you do, the new
+// pin must be AnalogIn capable.  Only a few of the KL25Z pins qualify.  Refer
+// to the KL25Z pinout diagram to find another AnalogIn pin if you need to
+// change this for any reason.  Note that the default is to use the same analog 
+// input that the CCD sensor would use if it were enabled, which is why you 
+// have to be sure to disable the CCD support in the software if you're using 
+// a potentiometer as the sensor.
 
 const PinName POT_PIN = PTB0;
 
