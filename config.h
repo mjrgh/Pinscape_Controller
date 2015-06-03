@@ -87,7 +87,7 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER =
 // If you're NOT using the CCD sensor, comment out the next line (by adding
 // two slashes at the start of the line).
 
-//#define ENABLE_CCD_SENSOR
+#define ENABLE_CCD_SENSOR
 
 // The KL25Z pins that the CCD sensor is physically attached to:
 //
@@ -116,7 +116,7 @@ const PinName CCD_SO_PIN = PTB0;
 // next line (by removing the two slashes at the start of the line), and 
 // also comment out the ENABLE_CCD_SENSOR line above.
 
-#define ENABLE_POT_SENSOR
+//#define ENABLE_POT_SENSOR
 
 // The KL25Z pin that your potentiometer is attached to.  The potentiometer
 // requires wiring three connectins:
