@@ -5,37 +5,11 @@
 
 
 
-// Number of pixels we read from the CCD on each frame.  This can be
-// less than the actual sensor size if desired; if so, we'll read every
-// nth pixel.  E.g., with a 1280-pixel physical sensor, if npix is 320,
-// we'll read every 4th pixel.  Reading a pixel is fairly time-consuming,
-// because it requires waiting for the pixel's electric charge to
-// stabilize on the CCD output, for the charge to transfer to the KL25Z 
-// input, and then for the KL25Z analog voltage sampler to get a stable
-// reading.  This all takes about 15us per pixel, which adds up to
-// a relatively long time in such a large array.  However, we can skip
-// a pixel without waiting for all of that charge stabilization time,
-// so we can get higher frame rates by only sampling a subset of the
-// pixels.  The array is so dense (400dpi) that we can still get
-// excellent resolution by reading a fraction of the total pixels.
-//
-// Empirically, 160 pixels seems to be the point of diminishing returns
-// for resolution - going higher will only improve the apparent smoothness
-// slightly, if at all.  160 pixels gives us 50dpi on the sensor, which 
-// is roughly the same as the physical pixel pitch of a typical cabinet 
-// playfield monitor.  (1080p HDTV displayed 1920x1080 pixels, and a 40" 
-// TV is about 35" wide, so the dot pitch is about 55dpi across the width 
-// of the TV.  If on-screen plunger is displayed at roughly the true
-// physical size, it's about 3" on the screen, or about 165 pixels.  So at
-// 160 pixels on the sensor, one pixel on the sensor translates to almost
-// exactly one on-screen pixel on the TV, which makes the animated motion 
-// on-screen about as smooth as it can be.  Looked at another way, 50dpi
-// means that we're measuring the physical shooter rod position in about
-// half-millimeter increments, which is probably better than I can 
-// discern by feel or sight.
-const int npix = 160;
+// Number of pixels we read from the CCD on each frame.  Use the
+// sample size from config.h.
+const int npix = CCD_NPIXELS_SAMPLED;
 
-
+// PlungerSensor interface implementation for the CCD
 class PlungerSensor
 {
 public:

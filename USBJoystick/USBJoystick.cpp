@@ -71,10 +71,20 @@ bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
     // low 11 bits are the current pixel index.
     uint16_t s = idx | 0x8000;
     put(0, s);
+    
+    // start at the second byte
+    int ofs = 2;
+    
+    // in the first report, add the total pixel count as the next two bytes
+    if (idx == 0)
+    {
+        put(ofs, npix);
+        ofs += 2;
+    }
         
     // now fill out the remaining words with exposure values
     report.length = reportLen;
-    for (int ofs = 2 ; ofs + 1 < report.length ; ofs += 2)
+    for ( ; ofs + 1 < report.length ; ofs += 2)
     {
         uint16_t p = (idx < npix ? pix[idx++] : 0);
         put(ofs, p);

@@ -5,6 +5,8 @@
 // button at the top of the window.  That will generate a customized .bin
 // file that you can download onto your KL25Z board.
 
+#ifndef CONFIG_H
+#define CONFIG_H
 
 // --------------------------------------------------------------------------
 //
@@ -30,6 +32,27 @@
 // two slashes at the beginning of the line).
 //
 #define ENABLE_JOYSTICK
+
+
+// Accelerometer orientation.  The accelerometer feature lets Visual Pinball 
+// (and other pinball software) sense nudges to the cabinet, and simulate 
+// the effect on the ball's trajectory during play.  We report the direction
+// of the accelerometer readings as well as the strength, so it's important
+// for VP and the KL25Z to agree on the physical orientation of the
+// accelerometer relative to the cabinet.  The accelerometer on the KL25Z
+// is always mounted the same way on the board, but we still have to know
+// which way you mount the board in your cabinet.  We assume as default
+// orientation where the KL25Z is mounted flat on the bottom of your
+// cabinet with the USB ports pointing forward, toward the coin door.  If
+// it's more convenient for you to mount the board in a different direction,
+// you simply need to select the matching direction here.  Comment out the
+// ORIENTATION_PORTS_AT_FRONT line and un-comment the line that matches
+// your board's orientation.
+
+#define ORIENTATION_PORTS_AT_FRONT      // USB ports pointing toward front of cabinet
+// #define ORIENTATION_PORTS_AT_LEFT    // USB ports pointing toward left side of cab
+// #define ORIENTATION_PORTS_AT_RIGHT   // USB ports pointing toward right side of cab
+// #define ORIENTATION_PORTS_AT_REAR    // USB ports pointing toward back of cabinet
 
 
 // --------------------------------------------------------------------------
@@ -88,6 +111,50 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER =
 // two slashes at the start of the line).
 
 #define ENABLE_CCD_SENSOR
+
+// Physical pixel count for your sensor.  This software has been tested with
+// TAOS TSL1410R (1280 pixels) and TSL1412R (1536 pixels) sensors.  It might
+// work with other similar sensors as well, but you'll probably have to make
+// some changes to the software interface to the sensor if you're using any
+// sensor outside of the TAOS TSL14xxR series.
+//
+// If you're not using a CCD sensor, you can ignore this.
+const int CCD_NPIXELS = 1280;
+
+// Number of pixels from the CCD to sample on each high-res scan.  We don't
+// sample every pixel from the sensor on each scan, because (a) we don't
+// have to, and (b) we don't want to.  We don't have to sample all of the
+// pixels because these sensors have much finer resolution than we need to
+// get good results.  On a typical pinball cabinet setup with a 1920x1080
+// HD TV display, the on-screen plunger travel distance is about 165 pixels,
+// so that's all the pixels we need to sample for pixel-accurate animation.
+// Even so, we still *could* sample at higher resolution, but we don't *want*
+// to sample more pixels than we have to,  because reading each pixel takes 
+// time.  The limiting factor for read speed is the sampling time for the ADC 
+// (analog to digital  converter); it needs about 20us per sample to get an 
+// accurate voltage reading.  We want to animate the on-screen plunger in 
+// real time, with minimal lag, so it's important that we complete each scan 
+// as quickly as possible.  The fewer pixels we sample, the faster we 
+// complete each scan.
+//
+// Happily, the time needed to read the approximately 165 pixels required
+// for pixel-accurate positioning on the display is short enough that we can
+// complete a scan within the cycle time for USB reports.  USB gives us a
+// whole separate timing factor; we can't go much *faster* with USB than
+// sending a new report about every 10ms.  The sensor timing is such that
+// we can read about 165 pixels in well under 10ms.  So that's really the
+// sweet spot for our scans.
+//
+// Note that we distribute the sampled pixels evenly across the full range
+// of the sensor's pixels.  That is, we read every nth pixel, and skip the
+// ones in between.  That means that the sample count here has to be an even
+// divisor of the physical pixel count.  Empirically, reading every 8th
+// pixel gives us good results on both the TSL1410R and TSL1412R, so you
+// shouldn't need to change this if you're using one of those sensors.  If
+// you're using a different sensor, you should be sure to adjust this so that 
+// it works out to an integer result with no remainder.
+//
+const int CCD_NPIXELS_SAMPLED = CCD_NPIXELS / 8;
 
 // The KL25Z pins that the CCD sensor is physically attached to:
 //
@@ -230,6 +297,8 @@ const int LaunchBallButton = 24;
 // plunger forward that far, so that will effectively turn off the 
 // push mode.
 const float LaunchBallPushDistance = .08;
+
+#endif // CONFIG_H
 
 
 #ifdef DECL_EXTERNS
@@ -409,16 +478,16 @@ struct {
     { PTC10, false },    // pin J1-13, LW port 20
     { PTC11, false },    // pin J1-15, LW port 21
     { PTE0, false },     // pin J2-18, LW port 22
-    { NC, false },       // Not used,  LW port 23
-    { NC, false },       // Not used,  LW port 24
-    { NC, false },       // Not used,  LW port 25
-    { NC, false },       // Not used,  LW port 26
-    { NC, false },       // Not used,  LW port 27
-    { NC, false },       // Not used,  LW port 28
-    { NC, false },       // Not used,  LW port 29
-    { NC, false },       // Not used,  LW port 30
-    { NC, false },       // Not used,  LW port 31
-    { NC, false }        // Not used,  LW port 32
+    { NC, false },       // Not connected,  LW port 23
+    { NC, false },       // Not connected,  LW port 24
+    { NC, false },       // Not connected,  LW port 25
+    { NC, false },       // Not connected,  LW port 26
+    { NC, false },       // Not connected,  LW port 27
+    { NC, false },       // Not connected,  LW port 28
+    { NC, false },       // Not connected,  LW port 29
+    { NC, false },       // Not connected,  LW port 30
+    { NC, false },       // Not connected,  LW port 31
+    { NC, false }        // Not connected,  LW port 32
 };
 
 

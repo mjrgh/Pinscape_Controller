@@ -5,6 +5,7 @@
  */
  
  #include "mbed.h"
+ #include "config.h"
  #include "FastIO.h"
  #include "FastAnalogIn.h"
  
@@ -119,7 +120,7 @@ public:
     }
 
     // number of pixels in the array
-    static const int nPix = 1280;
+    static const int nPix = CCD_NPIXELS;
     
     
 private:

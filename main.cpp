@@ -258,6 +258,36 @@ const uint16_t USB_VERSION_NO = 0x0006;
 // Joystick axis report range - we report from -JOYMAX to +JOYMAX
 #define JOYMAX 4096
 
+// --------------------------------------------------------------------------
+//
+// Set up mappings for the joystick X and Y reports based on the mounting
+// orientation of the KL25Z in the cabinet.  Visual Pinball and other 
+// pinball software effectively use video coordinates to define the axes:
+// positive X is to the right of the table, negative Y to the left, positive
+// Y toward the front of the table, negative Y toward the back.  The KL25Z
+// accelerometer is mounted on the board with positive Y toward the USB
+// ports and positive X toward the right side of the board with the USB
+// ports pointing up.  It's a simple matter to remap the KL25Z coordinate
+// system to match VP's coordinate system for mounting orientations at
+// 90-degree increments...
+//
+#if defined(ORIENTATION_PORTS_AT_FRONT)
+# define JOY_X(x, y)   (y)
+# define JOY_Y(x, y)   (x)
+#elif defined(ORIENTATION_PORTS_AT_LEFT)
+# define JOY_X(x, y)   (-(x))
+# define JOY_Y(x, y)   (y)
+#elif defined(ORIENTATION_PORTS_AT_RIGHT)
+# define JOY_X(x, y)   (x)
+# define JOY_Y(x, y)   (-(y))
+#elif defined(ORIENTATION_PORTS_AT_REAR)
+# define JOY_X(x, y)   (-(y))
+# define JOY_Y(x, y)   (-(x))
+#else
+# error Please define one of the ORIENTATION_PORTS_AT_xxx macros to establish the accelerometer orientation in your cabinet
+#endif
+
+
 
 // --------------------------------------------------------------------------
 //
@@ -1813,14 +1843,11 @@ int main(void)
             // a traditional plunger.
             int zrep = (ZBLaunchBallPort != 0 && wizOn[ZBLaunchBallPort-1] ? 0 : z);
             
-            // Send the status report.  Note that the nominal x and y axes
-            // are reversed - this makes it more intuitive to set up in VP.
-            // If we mount the Freesale card flat on the floor of the cabinet
-            // with the USB connectors facing the front of the cabinet, this
-            // arrangement of our nominal axes aligns with VP's standard
-            // setting, so that we can configure VP with X Axis = X on the
-            // joystick and Y Axis = Y on the joystick.
-            js.update(y, x, zrep, buttons | simButtons, statusFlags);
+            // Send the status report.  Note that we have to map the X and Y
+            // axes from the accelerometer to match the Windows joystick axes.
+            // The mapping is determined according to the mounting direction
+            // set in config.h via the ORIENTATION_xxx macros.
+            js.update(JOY_X(x,y), JOY_Y(x,y), zrep, buttons | simButtons, statusFlags);
             
             // we've just started a new report interval, so reset the timer
             reportTimer.reset();
