@@ -131,7 +131,7 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER =
 // for device outputs and reassign them to control the TLC5940 hardware.
 
 // Uncomment this line if using TLC5940 chips
-#define ENABLE_TLC5940
+//#define ENABLE_TLC5940
 
 // Number of TLC5940 chips you're using.  For a full LedWiz-compatible
 // setup, you need two of these chips, for 32 outputs.
