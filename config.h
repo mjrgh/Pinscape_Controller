@@ -105,6 +105,52 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER =
 
 // --------------------------------------------------------------------------
 //
+// TLC5940 PWM controller chip setup - Enhanced LedWiz emulation
+//
+// By default, the Pinscape Controller software can provide limited LedWiz
+// emulation through the KL25Z's on-board GPIO ports.  This lets you hook
+// up external devices, such as LED flashers or solenoids, to the KL25Z
+// outputs (using external circuitry to boost power - KL25Z GPIO ports
+// are limited to a meager 4mA per port).  This capability is limited by
+// the number of available GPIO ports on the KL25Z, and even smaller limit
+// of 10 PWM-capable GPIO ports.
+//
+// As an alternative, the controller software lets you use external PWM
+// controller chips to control essentially unlimited channels with full
+// PWM control on all channels.  This requires building external circuitry
+// using TLC5940 chips.  Each TLC5940 chip provides 16 full PWM channels,
+// and you can daisy-chain multiple TLC5940 chips together to set up 32, 
+// 48, 64, or more channels.
+//
+// If you do add TLC5940 circuits to your controller hardware, use this
+// section to configure the connection to the KL25Z.
+//
+// Note that if you're using TLC5940 outputs, ALL of the outputs must go
+// through the TLC5940s - you can't mix TLC5940s and the default GPIO
+// device outputs.  This lets us take GPIO ports that we'd normally use
+// for device outputs and reassign them to control the TLC5940 hardware.
+
+// Uncomment this line if using TLC5940 chips
+#define ENABLE_TLC5940
+
+// Number of TLC5940 chips you're using.  For a full LedWiz-compatible
+// setup, you need two of these chips, for 32 outputs.
+#define TLC5940_NCHIPS   3
+
+// If you're using TLC5940s, change any of these as needed to match the
+// GPIO pins that you connected to the TLC5940 control pins.  Note that
+// SIN and SCLK *must* be connected to the KL25Z SPI0 MOSI and SCLK
+// outputs, respectively, which effectively limits them to the default
+// selections, and that the GSCLK pin must be PWM-capable.
+#define TLC5940_SIN    PTC6    // Must connect to SPI0 MOSI -> PTC6 or PTD2
+#define TLC5940_SCLK   PTC5    // Must connect to SPI0 SCLK -> PTC5 or PTD1; however, PTD1 isn't
+                               //   recommended because it's hard-wired to the on-board blue LED
+#define TLC5940_XLAT   PTC10   // Any GPIO pin can be used
+#define TLC5940_BLANK  PTC0    // Any GPIO pin can be used
+#define TLC5940_GSCLK  PTD4    // Must be a PWM-capable pin
+
+// --------------------------------------------------------------------------
+//
 // Plunger CCD sensor.
 //
 // If you're NOT using the CCD sensor, comment out the next line (by adding
@@ -325,6 +371,10 @@ const float LaunchBallPushDistance = .08;
 // "NC" entries below to the reallocated pin name.  The limit is 32
 // buttons total.
 //
+// (If you're using TLC5940 chips to control outputs, ALL of the
+// LedWiz mapped ports can be reassigned as keys, except, of course,
+// those taken over for the 5940 interface.)
+//
 // Note: PTD1 (pin J2-12) should NOT be assigned as a button input,
 // as this pin is physically connected on the KL25Z to the on-board
 // indicator LED's blue segment.  This precludes any other use of
@@ -372,6 +422,11 @@ PinName buttonMap[] = {
 // --------------------------------------------------------------------------
 //
 // LED-Wiz emulation output pin assignments.  
+//
+//   NOTE!  This section isn't used if you have TLC5940 outputs - ALL
+//   device outputs will be through the 5940s if you're using them.
+//   See the TLC5940 setup section above to configure your interface
+//   pins if you're using those chips.
 //
 // The LED-Wiz protocol allows setting individual intensity levels
 // on all outputs, with 48 levels of intensity.  This can be used

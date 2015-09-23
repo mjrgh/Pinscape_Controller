@@ -137,6 +137,15 @@
 //    but with a slight practical need for a handful of extra ports (I'm using the
 //    cutting-edge 10-contactor setup, so my real LedWiz is full!).
 //
+//  - Enhanced LedWiz emulation with TLC5940 PWM controller chips.  You can attach
+//    external PWM controller chips for controlling device outputs, instead of using
+//    the limited LedWiz emulation through the on-board GPIO ports as described above. 
+//    The software can control a set of daisy-chained TLC5940 chips, which provide
+//    16 PWM outputs per chip.  Two of these chips give you the full complement
+//    of 32 output ports of an actual LedWiz, and four give you 64 ports, which
+//    should be plenty for nearly any virtual pinball project.
+//
+//
 // The on-board LED on the KL25Z flashes to indicate the current device status:
 //
 //    two short red flashes = the device is powered but hasn't successfully
@@ -214,6 +223,7 @@
 #include "tsl1410r.h"
 #include "FreescaleIAP.h"
 #include "crc32.h"
+#include "TLC5940.h"
 
 // our local configuration file
 #define DECL_EXTERNS
@@ -225,6 +235,12 @@
 
 // number of elements in an array
 #define countof(x) (sizeof(x)/sizeof((x)[0]))
+
+// floating point square of a number
+inline float square(float x) { return x*x; }
+
+// floating point rounding
+inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
 
 
 // ---------------------------------------------------------------------------
@@ -309,6 +325,13 @@ const int PLUNGER_CODE_ENABLED =
 //
 // On-board RGB LED elements - we use these for diagnostic displays.
 //
+// Note that LED3 (the blue segment) is hard-wired on the KL25Z to PTD1,
+// so PTD1 shouldn't be used for any other purpose (e.g., as a keyboard
+// input or a device output).  (This is kind of unfortunate in that it's 
+// one of only two ports exposed on the jumper pins that can be muxed to 
+// SPI0 SCLK.  This effectively limits us to PTC5 if we want to use the 
+// SPI capability.)
+//
 DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 
 
@@ -316,20 +339,77 @@ DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 //
 // LedWiz emulation
 //
+// There are two modes for this feature.  The default mode uses the on-board
+// GPIO ports to implement device outputs - each LedWiz software port is
+// connected to a physical GPIO pin on the KL25Z.  The KL25Z only has 10
+// PWM channels, so in this mode only 10 LedWiz ports will be dimmable; the
+// rest are strictly on/off.  The KL25Z also has a limited number of GPIO
+// ports overall - not enough for the full complement of 32 LedWiz ports
+// and 24 VP joystick inputs, so it's necessary to trade one against the
+// other if both features are to be used.
+//
+// The alternative, enhanced mode uses external TLC5940 PWM controller
+// chips to control device outputs.  In this mode, each LedWiz software
+// port is mapped to an output on one of the external TLC5940 chips.
+// Two 5940s is enough for the full set of 32 LedWiz ports, and we can
+// support even more chips for even more outputs (although doing so requires
+// breaking LedWiz compatibility, since the LedWiz USB protocol is hardwired
+// for 32 outputs).  Every port in this mode has full PWM support.
+//
 
+// Current starting output index for "PBA" messages from the PC (using
+// the LedWiz USB protocol).  Each PBA message implicitly uses the
+// current index as the starting point for the ports referenced in
+// the message, and increases it (by 8) for the next call.
 static int pbaIdx = 0;
 
-// LedWiz output pin interface.  We create a cover class to virtualize
-// digital vs PWM outputs and give them a common interface.  The KL25Z
-// unfortunately doesn't have enough hardware PWM channels to support 
-// PWM on all 32 LedWiz outputs, so we provide as many PWM channels as
-// we can (10), and fill out the rest of the outputs with plain digital
-// outs.
+// Generic LedWiz output port interface.  We create a cover class to 
+// virtualize digital vs PWM outputs, and on-board KL25Z GPIO vs external 
+// TLC5940 outputs, and give them all a common interface.  
 class LwOut
 {
 public:
+    // Set the output intensity.  'val' is 0.0 for fully off, 1.0 for
+    // fully on, and fractional values for intermediate intensities.
     virtual void set(float val) = 0;
 };
+
+
+#ifdef ENABLE_TLC5940
+
+// The TLC5940 interface object.
+TLC5940 tlc5940(TLC5940_SCLK, TLC5940_SIN, TLC5940_GSCLK, TLC5940_BLANK,
+    TLC5940_XLAT, TLC5940_NCHIPS);
+
+// LwOut class for TLC5940 outputs.  These are fully PWM capable.
+// The 'idx' value in the constructor is the output index in the
+// daisy-chained TLC5940 array.  0 is output #0 on the first chip,
+// 1 is #1 on the first chip, 15 is #15 on the first chip, 16 is
+// #0 on the second chip, 32 is #0 on the third chip, etc.
+class Lw5940Out: public LwOut
+{
+public:
+    Lw5940Out(int idx) : idx(idx) { prv = -1; }
+    virtual void set(float val)
+    {
+        if (val != prv)
+            tlc5940.set(idx, (int)(val * 4095));
+    }
+    int idx;
+    float prv;
+};
+
+#else // ENABLE_TLC5940
+
+// 
+// Default LedWiz mode - using on-board GPIO ports.  In this mode, we
+// assign a KL25Z GPIO port to each LedWiz output.  We have to use a
+// mix of PWM-capable and Digital-Only ports in this configuration, 
+// since the KL25Z hardware only has 10 PWM channels, which isn't
+// enough to fill out the full complement of 32 LedWiz outputs.
+//
+
+// LwOut class for a PWM-capable GPIO port
 class LwPwmOut: public LwOut
 {
 public:
@@ -342,6 +422,8 @@ public:
     PwmOut p;
     float prv;
 };
+
+// LwOut class for a Digital-Only (Non-PWM) GPIO port
 class LwDigOut: public LwOut
 {
 public:
@@ -354,6 +436,17 @@ public:
     DigitalOut p;
     float prv;
 };
+
+#endif // ENABLE_TLC5940
+
+// LwOut class for unmapped ports.  The LedWiz protocol is hardwired
+// for 32 ports, but we might not want to assign all 32 software ports
+// to physical output pins - the KL25Z has a limited number of GPIO
+// ports, so we might not have enough available GPIOs to fill out the
+// full LedWiz complement after assigning GPIOs for other functions.
+// This class is used to populate the LedWiz mapping array for ports
+// that aren't connected to physical outputs; it simply ignores value 
+// changes.
 class LwUnusedOut: public LwOut
 {
 public:
@@ -361,7 +454,11 @@ public:
     virtual void set(float val) { }
 };
 
-// output pin array
+// Array of output assignments.  This array is indexed by the LedWiz
+// output port number; that protocol is hardwired for 32 ports, so we
+// need 32 elements in the array.  Each element is an LwOut object
+// that provides the mapping to the physical output corresponding to
+// the software port.
 static LwOut *lwPin[32];
 
 // initialize the output pin array
@@ -369,6 +466,18 @@ void initLwOut()
 {
     for (int i = 0 ; i < countof(lwPin) ; ++i)
     {
+#ifdef ENABLE_TLC5940
+        // Set up a TLC5940 output.  If the output is within range of
+        // the connected number of chips (16 outputs per chip), assign it
+        // to the current index, otherwise leave it unattached.
+        if (i < TLC5940_NCHIPS*16)
+            lwPin[i] = new Lw5940Out(i);
+        else
+            lwPin[i] = new LwUnusedOut();
+
+#else // ENABLE_TLC5940
+        // Set up the GPIO pin, according to whether it's PWM-capable or
+        // digital-only, and whether or not it's assigned at all.
         PinName p = (i < countof(ledWizPortMap) ? ledWizPortMap[i].pin : NC);
         if (p == NC)
             lwPin[i] = new LwUnusedOut();
@@ -376,6 +485,9 @@ void initLwOut()
             lwPin[i] = new LwPwmOut(p);
         else
             lwPin[i] = new LwDigOut(p);
+            
+#endif // ENABLE_TLC5940
+
     }
 }
 
@@ -599,14 +711,6 @@ protected:
     // are we suspended?
     int suspended_; 
 };
-
-// ---------------------------------------------------------------------------
-//
-// Some simple math service routines
-//
-
-inline float square(float x) { return x*x; }
-inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
 
 // ---------------------------------------------------------------------------
 // 
