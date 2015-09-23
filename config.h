@@ -135,7 +135,7 @@ const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER =
 
 // Number of TLC5940 chips you're using.  For a full LedWiz-compatible
 // setup, you need two of these chips, for 32 outputs.
-#define TLC5940_NCHIPS   3
+#define TLC5940_NCHIPS   2
 
 // If you're using TLC5940s, change any of these as needed to match the
 // GPIO pins that you connected to the TLC5940 control pins.  Note that

@@ -116,10 +116,11 @@ public:
           blank(BLANK),
           xlat(XLAT),
           nchips(nchips),
-          newGSData(false)
+          newGSData(true)
     {
         // allocate the grayscale buffer
         gs = new unsigned short[nchips*16];
+        memset(gs, 0, nchips*16*sizeof(gs[0]));
         
         // Configure SPI format and speed.  Note that KL25Z ONLY supports 8-bit
         // mode.  The TLC5940 nominally requires 12-bit data blocks for the
@@ -139,7 +140,7 @@ public:
         gsclk.period(1.0/GSCLK_SPEED);
         gsclk.write(.5);
         blank = 0;
-
+        
         // Set up the first call to the reset function, which asserts BLANK to
         // end the PWM cycle and handles new grayscale data output and latching.
         // The original version of this library uses a timer to call reset
