@@ -101,7 +101,7 @@
 // here.
 const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 
 #ifdef ENABLE_JOYSTICK
-   0x01;   // joystick enabled - assume we're the primary KL25Z, so use unit #8
+   0x08;   // joystick enabled - assume we're the primary KL25Z, so use unit #8
 #else
    0x09;   // joystick disabled - assume we're a secondary, output-only KL25Z, so use #9
 #endif

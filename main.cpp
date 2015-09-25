@@ -610,25 +610,24 @@ static float wizState(int idx)
     else if (val == 129)
     {
         //   129 = ramp up / ramp down
-        if (wizFlashCounter < 128)
-            return wizFlashCounter/127.0;
-        else
-            return (255 - wizFlashCounter)/127.0;
+        return wizFlashCounter < 128 
+            ? wizFlashCounter/128.0 
+            : (256 - wizFlashCounter)/128.0;
     }
     else if (val == 130)
     {
         //   130 = flash on / off
-        return (wizFlashCounter < 128 ? 1.0 : 0.0);
+        return wizFlashCounter < 128 ? 1.0 : 0.0;
     }
     else if (val == 131)
     {
         //   131 = on / ramp down
-        return (255 - wizFlashCounter)/255.0;
+        return wizFlashCounter < 128 ? 1.0 : (255 - wizFlashCounter)/128.0;
     }
     else if (val == 132)
     {
         //   132 = ramp up / on
-        return wizFlashCounter/255.0;
+        return wizFlashCounter < 128 ? wizFlashCounter/128.0 : 1.0;
     }
     else
     {
