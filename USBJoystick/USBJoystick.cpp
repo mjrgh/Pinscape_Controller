@@ -150,30 +150,8 @@ uint8_t * USBJoystick::reportDesc()
     {         
          USAGE_PAGE(1), 0x01,            // Generic desktop
          USAGE(1), 0x04,                 // Joystick
-
          COLLECTION(1), 0x01,            // Application
          
-         // NB - the canonical joystick has a nested collection at this
-         // point.  We remove the inner collection to enable the LedWiz 
-         // emulation.  The LedWiz API implementation on the PC side
-         // appears to use the collection structure as part of the
-         // device signature, and the real LedWiz descriptor has just
-         // one top-level collection.  The built-in Windows HID drivers 
-         // don't appear to care whether this collection is present or
-         // not for the purposes of recognizing a joystick, so it seems
-         // to make everyone happy to leave it out.  
-         //
-         // All of the reference material for USB joystick device builders 
-         // does use the inner collection, so it's possible that omitting 
-         // it will create an incompatibility with some non-Windows hosts.  
-         // But that seems largely moot in that VP only runs on Windows. 
-         //  If you're you're trying to adapt this code for a different 
-         // device and run into problems connecting to a non-Windows host, 
-         // try restoring the inner collection.  You probably won't 
-         // care about LedWiz compatibility in such a situation so there
-         // should be no reason not to return to the standard structure.
-       //  COLLECTION(1), 0x00,          // Physical
-           
              // input report (device to host)
 
              USAGE_PAGE(1), 0x06,        // generic device controls - for config status
@@ -207,12 +185,12 @@ uint8_t * USBJoystick::reportDesc()
              
              // output report (host to device)
              REPORT_SIZE(1), 0x08,       // 8 bits per report
-             REPORT_COUNT(1), 0x08,      // output report count (LEDWiz messages)
+             REPORT_COUNT(1), 0x08,      // output report count - 8-byte LedWiz format
              0x09, 0x01,                 // usage
              0x91, 0x01,                 // Output (array)
 
-     //    END_COLLECTION(0),
          END_COLLECTION(0)
+
       };
 #else /* defined(ENABLE_JOYSTICK) */
 

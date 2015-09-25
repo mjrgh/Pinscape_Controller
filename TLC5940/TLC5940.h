@@ -48,6 +48,7 @@
   * isn't a factor.  E.g., at SPI=30MHz and GSCLK=500kHz, 
   * t(blank) is 8192us and t(refresh) is 25us.
   */
+#define USE_SPI 1
 #define SPI_SPEED 3000000
 
 /**
@@ -111,7 +112,11 @@ public:
       *  @param nchips - The number of TLC5940s (if you are daisy chaining)
       */
     TLC5940(PinName SCLK, PinName MOSI, PinName GSCLK, PinName BLANK, PinName XLAT, int nchips)
+#if USE_SPI
         : spi(MOSI, NC, SCLK),
+#else
+        : sin(MOSI), sclk(SCLK),
+#endif
           gsclk(GSCLK),
           blank(BLANK),
           xlat(XLAT),
@@ -122,6 +127,7 @@ public:
         gs = new unsigned short[nchips*16];
         memset(gs, 0, nchips*16*sizeof(gs[0]));
         
+#if USE_SPI
         // Configure SPI format and speed.  Note that KL25Z ONLY supports 8-bit
         // mode.  The TLC5940 nominally requires 12-bit data blocks for the
         // grayscale levels, but SPI is ultimately just a bit-level serial format,
@@ -131,7 +137,10 @@ public:
         // format 0.
         spi.format(8, 0);
         spi.frequency(SPI_SPEED);
-        
+#else
+        sclk = 1;
+#endif
+
         // Set output pin states
         xlat = 0;
         blank = 1;
@@ -140,7 +149,11 @@ public:
         gsclk.period(1.0/GSCLK_SPEED);
         gsclk.write(.5);
         blank = 0;
-        
+    }
+    
+    // start the clock running
+    void start()
+    {        
         // Set up the first call to the reset function, which asserts BLANK to
         // end the PWM cycle and handles new grayscale data output and latching.
         // The original version of this library uses a timer to call reset
@@ -176,15 +189,20 @@ public:
     {
         // store the data, and flag the pending update for the interrupt handler to carry out
         gs[idx] = data; 
-        newGSData = true;
+//        newGSData = true;
     }
 
 private:
     // current level for each output
     unsigned short *gs;
     
+#if USE_SPI
     // SPI port - only MOSI and SCK are used
     SPI spi;
+#else
+    DigitalOut sin;
+    DigitalOut sclk;
+#endif
 
     // use a PWM out for the grayscale clock - this provides a stable
     // square wave signal without consuming CPU
@@ -212,7 +230,7 @@ private:
         blank = 1;        
 
         // If we have new GS data, send it now
-        if (newGSData)
+        if (true) // (newGSData)
         {
             // Send the new grayscale data.
             //
@@ -267,6 +285,7 @@ private:
     
     void update()
     {
+#if USE_SPI
         // Send GS data.  The serial format orders the outputs from last to first
         // (output #15 on the last chip in the daisy-chain to output #0 on the
         // first chip).  For each output, we send 12 bits containing the grayscale
@@ -281,7 +300,7 @@ private:
         //   [    element i+1 bits   ]  [ element i bits        ]
         //   11 10 9 8 7 6 5 4 3 2 1 0  11 10 9 8 7 6 5 4 3 2 1 0
         //   [  first byte   ] [   second byte  ] [  third byte ]
-        for (int i = (16 * nchips) - 2 ; i >= 0 ; i -= 2)
+        for (int i = 61 /* (16 * nchips) - 2 */ ; i >= 0 ; i -= 2)
         {
             // first byte - element i+1 bits 4-11
             spi.write(((gs[i+1] & 0xFF0) >> 4) & 0xff);
@@ -292,6 +311,20 @@ private:
             // third byte - element i bits 0-7
             spi.write(gs[i] & 0x0FF);
         }
+#else
+        // Send GS data, from last output to first output, 12 bits per output,
+        // most significant bit first.
+        for (int i = 16*3 - 1 ; i >= 0 ; --i)
+        {
+            unsigned data = gs[i];
+            for (unsigned int mask = 1 << 11, bit = 0 ; bit < 12 ; ++bit, mask >>= 1)
+            {
+                sclk = 0;                    
+                sin = (data & mask) ? 1 : 0;
+                sclk = 1;
+            }
+        }
+#endif
     }
 };
 

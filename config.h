@@ -74,13 +74,15 @@
 //
 // The reason we start at unit #8 is that we want to avoid conflicting with
 // any real LedWiz devices you have in your system.  If you have a real
-// LedWiz, it's probably unit #1, since that's the standard factor setting.
-// If you have two real LedWiz's, they're probably units #1 and #2.  If you 
-// have three... well, I don't think anyone actually has three, but if you 
-// did it would probably be unit #3.  And so on.  That's why we start at #8 - 
-// it seems really unlikely that this will conflict with anybody's existing 
-// setup.  On the off chance it does, simply change the setting here to a 
-// different unit number that's not already used in your system.
+// LedWiz, it's probably unit #1, since that's the default factory setting
+// that they'll give you if you didn't specifically ask for something else
+// when you ordered it.  If you have two real LedWiz's, they're probably 
+// units #1 and #2.  If you have three... well, I don't think anyone 
+// actually has three, but if you did it would probably be unit #3.  And so 
+// on.  That's why we start at #8: it seems really unlikely that anyone
+// with a pin cab has a real LedWiz unit #8.  On the off chance that you
+// do, simply change the setting here to a different unit number that's not 
+// already used in your system.
 //
 // Note 1:  the unit number here is the *user visible* unit number that
 // you use on the PC side.  It's the number you specify in your DOF
@@ -90,64 +92,19 @@
 // are all off by one from the unit number you select here, that's why.
 //
 // Note 2:  the DOF Configtool (google it) knows about the Pinscape 
-// controller (it's known there as just a "KL25Z" rather than Pinscape).
-// And the DOF tool knows that it uses #8 as its default unit number, so
-// it names the .ini file for this controller xxx8.ini.  If you change the 
-// unit number here, remember to rename the DOF-generated .ini file to 
-// match, by changing the "8" at the end of the filename to the new number
-// you set here.
+// controller.  There it's referred to as simply "KL25Z" rather than 
+// Pinscape Controller, but that's what they're talking about.  The DOF 
+// tool knows that it uses #8 as its default unit number, so it names the 
+// .ini file for this controller xxx8.ini.  If you change the unit number 
+// here, remember to rename the DOF-generated .ini file to match, by 
+// changing the "8" at the end of the filename to the new number you set 
+// here.
 const uint8_t DEFAULT_LEDWIZ_UNIT_NUMBER = 
 #ifdef ENABLE_JOYSTICK
-   0x08;   // joystick enabled - assume we're the primary KL25Z, so use unit #8
+   0x01;   // joystick enabled - assume we're the primary KL25Z, so use unit #8
 #else
    0x09;   // joystick disabled - assume we're a secondary, output-only KL25Z, so use #9
 #endif
-
-// --------------------------------------------------------------------------
-//
-// TLC5940 PWM controller chip setup - Enhanced LedWiz emulation
-//
-// By default, the Pinscape Controller software can provide limited LedWiz
-// emulation through the KL25Z's on-board GPIO ports.  This lets you hook
-// up external devices, such as LED flashers or solenoids, to the KL25Z
-// outputs (using external circuitry to boost power - KL25Z GPIO ports
-// are limited to a meager 4mA per port).  This capability is limited by
-// the number of available GPIO ports on the KL25Z, and even smaller limit
-// of 10 PWM-capable GPIO ports.
-//
-// As an alternative, the controller software lets you use external PWM
-// controller chips to control essentially unlimited channels with full
-// PWM control on all channels.  This requires building external circuitry
-// using TLC5940 chips.  Each TLC5940 chip provides 16 full PWM channels,
-// and you can daisy-chain multiple TLC5940 chips together to set up 32, 
-// 48, 64, or more channels.
-//
-// If you do add TLC5940 circuits to your controller hardware, use this
-// section to configure the connection to the KL25Z.
-//
-// Note that if you're using TLC5940 outputs, ALL of the outputs must go
-// through the TLC5940s - you can't mix TLC5940s and the default GPIO
-// device outputs.  This lets us take GPIO ports that we'd normally use
-// for device outputs and reassign them to control the TLC5940 hardware.
-
-// Uncomment this line if using TLC5940 chips
-//#define ENABLE_TLC5940
-
-// Number of TLC5940 chips you're using.  For a full LedWiz-compatible
-// setup, you need two of these chips, for 32 outputs.
-#define TLC5940_NCHIPS   2
-
-// If you're using TLC5940s, change any of these as needed to match the
-// GPIO pins that you connected to the TLC5940 control pins.  Note that
-// SIN and SCLK *must* be connected to the KL25Z SPI0 MOSI and SCLK
-// outputs, respectively, which effectively limits them to the default
-// selections, and that the GSCLK pin must be PWM-capable.
-#define TLC5940_SIN    PTC6    // Must connect to SPI0 MOSI -> PTC6 or PTD2
-#define TLC5940_SCLK   PTC5    // Must connect to SPI0 SCLK -> PTC5 or PTD1; however, PTD1 isn't
-                               //   recommended because it's hard-wired to the on-board blue LED
-#define TLC5940_XLAT   PTC10   // Any GPIO pin can be used
-#define TLC5940_BLANK  PTC0    // Any GPIO pin can be used
-#define TLC5940_GSCLK  PTD4    // Must be a PWM-capable pin
 
 // --------------------------------------------------------------------------
 //
@@ -344,10 +301,59 @@ const int LaunchBallButton = 24;
 // push mode.
 const float LaunchBallPushDistance = .08;
 
-#endif // CONFIG_H
+
+// --------------------------------------------------------------------------
+//
+// TLC5940 PWM controller chip setup - Enhanced LedWiz emulation
+//
+// By default, the Pinscape Controller software can provide limited LedWiz
+// emulation through the KL25Z's on-board GPIO ports.  This lets you hook
+// up external devices, such as LED flashers or solenoids, to the KL25Z
+// outputs (using external circuitry to boost power - KL25Z GPIO ports
+// are limited to a meager 4mA per port).  This capability is limited by
+// the number of available GPIO ports on the KL25Z, and even smaller limit
+// of 10 PWM-capable GPIO ports.
+//
+// As an alternative, the controller software lets you use external PWM
+// controller chips to control essentially unlimited channels with full
+// PWM control on all channels.  This requires building external circuitry
+// using TLC5940 chips.  Each TLC5940 chip provides 16 full PWM channels,
+// and you can daisy-chain multiple TLC5940 chips together to set up 32, 
+// 48, 64, or more channels.
+//
+// If you do add TLC5940 circuits to your controller hardware, use this
+// section to configure the connection to the KL25Z.
+//
+// Note that if you're using TLC5940 outputs, ALL of the outputs must go
+// through the TLC5940s - you can't mix TLC5940s and the default GPIO
+// device outputs.  This lets us take GPIO ports that we'd normally use
+// for device outputs and reassign them to control the TLC5940 hardware.
+
+// Uncomment this line if using TLC5940 chips
+#define ENABLE_TLC5940
+
+// Number of TLC5940 chips you're using.  For a full LedWiz-compatible
+// setup, you need two of these chips, for 32 outputs.
+#define TLC5940_NCHIPS   4
+
+// If you're using TLC5940s, change any of these as needed to match the
+// GPIO pins that you connected to the TLC5940 control pins.  Note that
+// SIN and SCLK *must* be connected to the KL25Z SPI0 MOSI and SCLK
+// outputs, respectively, which effectively limits them to the default
+// selections, and that the GSCLK pin must be PWM-capable.
+#define TLC5940_SIN    PTC6    // Must connect to SPI0 MOSI -> PTC6 or PTD2
+#define TLC5940_SCLK   PTC5    // Must connect to SPI0 SCLK -> PTC5 or PTD1; however, PTD1 isn't
+                               //   recommended because it's hard-wired to the on-board blue LED
+#define TLC5940_XLAT   PTC10   // Any GPIO pin can be used
+#define TLC5940_BLANK  PTC0    // Any GPIO pin can be used
+#define TLC5940_GSCLK  PTD4    // Must be a PWM-capable pin
 
 
-#ifdef DECL_EXTERNS
+#endif // CONFIG_H - end of include-once section (code below this point can be multiply included)
+
+
+#ifdef DECL_EXTERNS  // this section defines global variables, only if this macro is set
+
 // --------------------------------------------------------------------------
 //
 
@@ -421,7 +427,7 @@ PinName buttonMap[] = {
 
 // --------------------------------------------------------------------------
 //
-// LED-Wiz emulation output pin assignments.  
+// LED-Wiz emulation output pin assignments - GPIO mode
 //
 //   NOTE!  This section isn't used if you have TLC5940 outputs - ALL
 //   device outputs will be through the 5940s if you're using them.

@@ -337,7 +337,7 @@ DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 
 // ---------------------------------------------------------------------------
 //
-// LedWiz emulation
+// LedWiz emulation, and enhanced TLC5940 output controller
 //
 // There are two modes for this feature.  The default mode uses the on-board
 // GPIO ports to implement device outputs - each LedWiz software port is
@@ -356,6 +356,17 @@ DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 // breaking LedWiz compatibility, since the LedWiz USB protocol is hardwired
 // for 32 outputs).  Every port in this mode has full PWM support.
 //
+
+// Figure the number of outputs.  If we're in the default LedWiz mode,
+// we have a fixed set of 32 outputs.  If we're in TLC5940 enhanced mode,
+// we have 16 outputs per chip.  To simplify the LedWiz compatibility code,
+// always use a minimum of 32 outputs even if we have fewer than two of the
+// TLC5940 chips.
+#if !defined(ENABLE_TLC5940) || (TLC_NCHIPS) < 2
+# define NUM_OUTPUTS   32
+#else
+# define NUM_OUTPUTS   ((TLC5940_NCHIPS)*16)
+#endif
 
 // Current starting output index for "PBA" messages from the PC (using
 // the LedWiz USB protocol).  Each PBA message implicitly uses the
@@ -393,7 +404,7 @@ public:
     virtual void set(float val)
     {
         if (val != prv)
-            tlc5940.set(idx, (int)(val * 4095));
+           tlc5940.set(idx, (int)(val * 4095));
     }
     int idx;
     float prv;
@@ -454,12 +465,14 @@ public:
     virtual void set(float val) { }
 };
 
-// Array of output assignments.  This array is indexed by the LedWiz
-// output port number; that protocol is hardwired for 32 ports, so we
-// need 32 elements in the array.  Each element is an LwOut object
-// that provides the mapping to the physical output corresponding to
-// the software port.
-static LwOut *lwPin[32];
+// Array of output physical pin assignments.  This array is indexed
+// by LedWiz logical port number - lwPin[n] is the maping for LedWiz
+// port n (0-based).  If we're using GPIO ports to implement outputs,
+// we initialize the array at start-up to map each logical port to the 
+// physical GPIO pin for the port specified in the ledWizPortMap[] 
+// array in config.h.  If we're using TLC5940 chips for the outputs,
+// we map each logical port to the corresponding TLC5940 output.
+static LwOut *lwPin[NUM_OUTPUTS];
 
 // initialize the output pin array
 void initLwOut()
@@ -470,14 +483,16 @@ void initLwOut()
         // Set up a TLC5940 output.  If the output is within range of
         // the connected number of chips (16 outputs per chip), assign it
         // to the current index, otherwise leave it unattached.
-        if (i < TLC5940_NCHIPS*16)
+        if (i < (TLC5940_NCHIPS)*16)
             lwPin[i] = new Lw5940Out(i);
         else
             lwPin[i] = new LwUnusedOut();
 
 #else // ENABLE_TLC5940
-        // Set up the GPIO pin, according to whether it's PWM-capable or
-        // digital-only, and whether or not it's assigned at all.
+        // Set up the GPIO pin.  If the pin is not connected ("NC" in the
+        // pin map), set up a dummy "unused" output for it.  If it's a
+        // real pin, set up a PWM-capable or Digital-Only output handler
+        // object, according to the pin type in the map.
         PinName p = (i < countof(ledWizPortMap) ? ledWizPortMap[i].pin : NC);
         if (p == NC)
             lwPin[i] = new LwUnusedOut();
@@ -491,10 +506,44 @@ void initLwOut()
     }
 }
 
+// Current absolute brightness level for an output.  This is a float
+// value from 0.0 for fully off to 1.0 for fully on.  This is the final
+// derived value for the port.  For outputs set by LedWiz messages, 
+// this is derived from te LedWiz state, and is updated on each pulse 
+// timer interrupt for lights in flashing states.  For outputs set by 
+// extended protocol messages, this is simply the brightness last set.
+static float outLevel[NUM_OUTPUTS];
+
+// LedWiz output states.
+//
+// The LedWiz protocol has two separate control axes for each output.
+// One axis is its on/off state; the other is its "profile" state, which
+// is either a fixed brightness or a blinking pattern for the light.
+// The two axes are independent.
+//
+// Note that the LedWiz protocol can only address 32 outputs, so the
+// wizOn and wizVal arrays have fixed sizes of 32 elements no matter
+// how many physical outputs we're using.
+
 // on/off state for each LedWiz output
 static uint8_t wizOn[32];
 
-// profile (brightness/blink) state for each LedWiz output
+// Profile (brightness/blink) state for each LedWiz output.  If the
+// output was last updated through an LedWiz protocol message, it
+// will have one of these values:
+//
+//   0-48 = fixed brightness 0% to 100%
+//   129 = ramp up / ramp down
+//   130 = flash on / off
+//   131 = on / ramp down
+//   132 = ramp up / on
+//
+// Special value 255:  If the output was updated through the 
+// extended protocol, we'll set the wizVal entry to 255, which has 
+// no meaning in the LedWiz protocol.  This tells us that the value 
+// in outLevel[] was set directly from the extended protocol, so it 
+// shouldn't be derived from wizVal[].
+//
 static uint8_t wizVal[32] = {
     48, 48, 48, 48, 48, 48, 48, 48,
     48, 48, 48, 48, 48, 48, 48, 48,
@@ -502,86 +551,155 @@ static uint8_t wizVal[32] = {
     48, 48, 48, 48, 48, 48, 48, 48
 };
 
+// LedWiz flash speed.  This is a value from 1 to 7 giving the pulse
+// rate for lights in blinking states.
+static uint8_t wizSpeed = 2;
+
+// Current LedWiz flash cycle counter.
+static uint8_t wizFlashCounter = 0;
+
+// Get the current brightness level for an LedWiz output.
 static float wizState(int idx)
 {
-    if (wizOn[idx]) 
+    // if the output was last set with an extended protocol message,
+    // use the value set there, ignoring the output's LedWiz state
+    if (wizVal[idx] == 255)
+        return outLevel[idx];
+    
+    // if it's off, show at zero intensity
+    if (!wizOn[idx])
+        return 0;
+
+    // check the state
+    uint8_t val = wizVal[idx];
+    if (val <= 48)
     {
-        // on - map profile brightness state to PWM level
-        uint8_t val = wizVal[idx];
-        if (val <= 48)
-        {
-            // PWM brightness/intensity level.  Rescale from the LedWiz
-            // 0..48 integer range to our internal PwmOut 0..1 float range.
-            // Note that on the actual LedWiz, level 48 is actually about
-            // 98% on - contrary to the LedWiz documentation, level 49 is 
-            // the true 100% level.  (In the documentation, level 49 is
-            // simply not a valid setting.)  Even so, we treat level 48 as
-            // 100% on to match the documentation.  This won't be perfectly
-            // ocmpatible with the actual LedWiz, but it makes for such a
-            // small difference in brightness (if the output device is an
-            // LED, say) that no one should notice.  It seems better to
-            // err in this direction, because while the difference in
-            // brightness when attached to an LED won't be noticeable, the
-            // difference in duty cycle when attached to something like a
-            // contactor *can* be noticeable - anything less than 100%
-            // can cause a contactor or relay to chatter.  There's almost
-            // never a situation where you'd want values other than 0% and
-            // 100% for a contactor or relay, so treating level 48 as 100%
-            // makes us work properly with software that's expecting the
-            // documented LedWiz behavior and therefore uses level 48 to
-            // turn a contactor or relay fully on.
-            return val/48.0;
-        }
-        else if (val == 49)
-        {
-            // 49 is undefined in the LedWiz documentation, but actually
-            // means 100% on.  The documentation says that levels 1-48 are
-            // the full PWM range, but empirically it appears that the real
-            // range implemented in the firmware is 1-49.  Some software on
-            // the PC side (notably DOF) is aware of this and uses level 49
-            // to mean "100% on".  To ensure compatibility with existing 
-            // PC-side software, we need to recognize level 49.
-            return 1.0;
-        }
-        else if (val >= 129 && val <= 132)
-        {
-            // Values of 129-132 select different flashing modes.  We don't
-            // support any of these.  Instead, simply treat them as fully on.  
-            // Note that DOF doesn't ever use modes 129-132, as it implements 
-            // all flashing modes itself on the host side, so this limitation 
-            // won't have any effect on DOF users.  You can observe it using 
-            // LedBlinky, though.
-            return 1.0;
-        }
-        else
-        {
-            // Other values are undefined in the LedWiz documentation.  Hosts
-            // *should* never send undefined values, since whatever behavior an
-            // LedWiz unit exhibits in response is accidental and could change
-            // in a future version.  We'll treat all undefined values as equivalent 
-            // to 48 (fully on).
-            // 
-            // NB: the 49 and 129-132 cases are broken out above for the sake
-            // of documentation.  We end up using 1.0 as the return value for
-            // everything outside of the defined 0-48 range, so we could collapse
-            // this whole thing to a single 'else' branch, but I wanted to call 
-            // out the specific reasons for handling the settings above as we do.
-            return 1.0;
-        }
+        // PWM brightness/intensity level.  Rescale from the LedWiz
+        // 0..48 integer range to our internal PwmOut 0..1 float range.
+        // Note that on the actual LedWiz, level 48 is actually about
+        // 98% on - contrary to the LedWiz documentation, level 49 is 
+        // the true 100% level.  (In the documentation, level 49 is
+        // simply not a valid setting.)  Even so, we treat level 48 as
+        // 100% on to match the documentation.  This won't be perfectly
+        // ocmpatible with the actual LedWiz, but it makes for such a
+        // small difference in brightness (if the output device is an
+        // LED, say) that no one should notice.  It seems better to
+        // err in this direction, because while the difference in
+        // brightness when attached to an LED won't be noticeable, the
+        // difference in duty cycle when attached to something like a
+        // contactor *can* be noticeable - anything less than 100%
+        // can cause a contactor or relay to chatter.  There's almost
+        // never a situation where you'd want values other than 0% and
+        // 100% for a contactor or relay, so treating level 48 as 100%
+        // makes us work properly with software that's expecting the
+        // documented LedWiz behavior and therefore uses level 48 to
+        // turn a contactor or relay fully on.
+        return val/48.0;
     }
-    else 
+    else if (val == 49)
     {
-        // off - show at 0 intensity
-        return 0.0;
+        // 49 is undefined in the LedWiz documentation, but actually
+        // means 100% on.  The documentation says that levels 1-48 are
+        // the full PWM range, but empirically it appears that the real
+        // range implemented in the firmware is 1-49.  Some software on
+        // the PC side (notably DOF) is aware of this and uses level 49
+        // to mean "100% on".  To ensure compatibility with existing 
+        // PC-side software, we need to recognize level 49.
+        return 1.0;
+    }
+    else if (val == 129)
+    {
+        //   129 = ramp up / ramp down
+        if (wizFlashCounter < 128)
+            return wizFlashCounter/127.0;
+        else
+            return (255 - wizFlashCounter)/127.0;
+    }
+    else if (val == 130)
+    {
+        //   130 = flash on / off
+        return (wizFlashCounter < 128 ? 1.0 : 0.0);
+    }
+    else if (val == 131)
+    {
+        //   131 = on / ramp down
+        return (255 - wizFlashCounter)/255.0;
+    }
+    else if (val == 132)
+    {
+        //   132 = ramp up / on
+        return wizFlashCounter/255.0;
+    }
+    else
+    {
+        // Other values are undefined in the LedWiz documentation.  Hosts
+        // *should* never send undefined values, since whatever behavior an
+        // LedWiz unit exhibits in response is accidental and could change
+        // in a future version.  We'll treat all undefined values as equivalent 
+        // to 48 (fully on).
+        return 1.0;
     }
 }
 
+// LedWiz flash timer pulse.  This fires periodically to update 
+// LedWiz flashing outputs.  At the slowest pulse speed set via
+// the SBA command, each waveform cycle has 256 steps, so we
+// choose the pulse time base so that the slowest cycle completes
+// in 2 seconds.  This seems to roughly match the real LedWiz
+// behavior.  We run the pulse timer at the same rate regardless
+// of the pulse speed; at higher pulse speeds, we simply use
+// larger steps through the cycle on each interrupt.  Running
+// every 1/127 of a second = 8ms seems to be a pretty light load.
+Timeout wizPulseTimer;
+#define WIZ_PULSE_TIME_BASE  (1.0/127.0)
+static void wizPulse()
+{
+    // increase the counter by the speed increment, and wrap at 256
+    wizFlashCounter += wizSpeed;
+    wizFlashCounter &= 0xff;
+    
+    // if we have any flashing lights, update them
+    int ena = false;
+    for (int i = 0 ; i < 32 ; ++i)
+    {
+        if (wizOn[i])
+        {
+            uint8_t s = wizVal[i];
+            if (s >= 129 && s <= 132)
+            {
+                lwPin[i]->set(wizState(i));
+                ena = true;
+            }
+        }
+    }    
+
+    // Set up the next timer pulse only if we found anything flashing.
+    // To minimize overhead from this feature, we only enable the interrupt
+    // when we need it.  This eliminates any performance penalty to other
+    // features when the host software doesn't care about the flashing 
+    // modes.  For example, DOF never uses these modes, so there's no 
+    // need for them when running Visual Pinball.
+    if (ena)
+        wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
+}
+
+// Update the physical outputs connected to the LedWiz ports.  This is 
+// called after any update from an LedWiz protocol message.
 static void updateWizOuts()
 {
+    // update each output
+    int pulse = false;
     for (int i = 0 ; i < 32 ; ++i)
+    {
+        pulse |= (wizVal[i] >= 129 && wizVal[i] <= 132);
         lwPin[i]->set(wizState(i));
+    }
+    
+    // if any outputs are set to flashing mode, and the pulse timer
+    // isn't running, turn it on
+    if (pulse)
+        wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
 }
-
 
 // ---------------------------------------------------------------------------
 //
@@ -907,7 +1025,7 @@ public:
              printf("%f %f %d %d %f\r\n", vx, vy, x, y, dt);
 #endif
      }    
-    
+         
 private:
     // adjust a raw acceleration figure to a usb report value
     int rawToReport(float v)
@@ -1243,6 +1361,11 @@ int main(void)
     bool reportPix = false;
 #endif
 
+#ifdef ENABLE_TLC5940
+    // start the TLC5940 clock
+    tlc5940.start();
+#endif
+
     // create our plunger sensor object
     PlungerSensor plungerSensor;
 
@@ -1368,7 +1491,7 @@ int main(void)
                 if (data[0] == 64) 
                 {
                     // LWZ-SBA - first four bytes are bit-packed on/off flags
-                    // for the outputs; 5th byte is the pulse speed (0-7)
+                    // for the outputs; 5th byte is the pulse speed (1-7)
                     //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
                     //       data[1], data[2], data[3], data[4], data[5]);
     
@@ -1381,6 +1504,13 @@ int main(void)
                         }
                         wizOn[i] = ((data[ri] & bit) != 0);
                     }
+                    
+                    // set the flash speed - enforce the value range 1-7
+                    wizSpeed = data[5];
+                    if (wizSpeed < 1)
+                        wizSpeed = 1;
+                    else if (wizSpeed > 7)
+                        wizSpeed = 7;
         
                     // update the physical outputs
                     updateWizOuts();
