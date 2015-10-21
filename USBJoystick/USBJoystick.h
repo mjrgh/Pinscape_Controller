@@ -124,6 +124,14 @@ class USBJoystick: public USBHID {
          * @param pix pixel array
          */
          bool updateExposure(int &idx, int npix, const uint16_t *pix);
+         
+         /**
+         * Write a configuration report.
+         *
+         * @param numOutputs the number of configured output channels
+         * @param unitNo the device unit number
+         */
+         bool reportConfig(int numOutputs, int unitNo);
  
          /**
          * Write a state of the mouse

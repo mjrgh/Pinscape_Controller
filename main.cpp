@@ -143,10 +143,24 @@
 //    The software can control a set of daisy-chained TLC5940 chips, which provide
 //    16 PWM outputs per chip.  Two of these chips give you the full complement
 //    of 32 output ports of an actual LedWiz, and four give you 64 ports, which
-//    should be plenty for nearly any virtual pinball project.
+//    should be plenty for nearly any virtual pinball project.  A private, extended
+//    version of the LedWiz protocol lets the host control the extra outputs, up to
+//    128 outputs per KL25Z (8 TLC5940s).  To take advantage of the extra outputs
+//    on the PC side, you need software that knows about the protocol extensions,
+//    which means you need the latest version of DirectOutput Framework (DOF).  VP
+//    uses DOF for its output, so VP will be able to use the added ports without any
+//    extra work on your part.  Older software (e.g., Future Pinball) that doesn't
+//    use DOF will still be able to use the LedWiz-compatible protocol, so it'll be
+//    able to control your first 32 ports (numbered 1-32 in the LedWiz scheme), but
+//    older software won't be able to address higher-numbered ports.  That shouldn't
+//    be a problem because older software wouldn't know what to do with the extra
+//    devices anyway - FP, for example, is limited to a pre-defined set of outputs.
+//    As long as you put the most common devices on the first 32 outputs, and use
+//    higher numbered ports for the less common devices that older software can't
+//    use anyway, you'll get maximum functionality out of software new and old.
 //
-//
-// The on-board LED on the KL25Z flashes to indicate the current device status:
+// STATUS LIGHTS:  The on-board LED on the KL25Z flashes to indicate the current 
+// device status.  The flash patterns are:
 //
 //    two short red flashes = the device is powered but hasn't successfully
 //        connected to the host via USB (either it's not physically connected
@@ -169,14 +183,14 @@
 //
 //    alternating blue/green = everything's working
 //
-// Software configuration: you can change option settings by sending special
+// Software configuration: you can some change option settings by sending special
 // USB commands from the PC.  I've provided a Windows program for this purpose;
 // refer to the documentation for details.  For reference, here's the format
 // of the USB command for option changes:
 //
 //    length of report = 8 bytes
 //    byte 0 = 65 (0x41)
-//    byte 1 = 1 (0x01)
+//    byte 1 = 1  (0x01)
 //    byte 2 = new LedWiz unit number, 0x01 to 0x0f
 //    byte 3 = feature enable bit mask:
 //             0x01 = enable CCD (default = on)
@@ -188,14 +202,14 @@
 //
 //    length = 8 bytes
 //    byte 0 = 65 (0x41)
-//    byte 1 = 2 (0x02)
+//    byte 1 = 2  (0x02)
 //
 // Exposure reports: the host can request a report of the full set of pixel
 // values for the next frame by sending this special packet:
 //
 //    length = 8 bytes
 //    byte 0 = 65 (0x41)
-//    byte 1 = 3 (0x03)
+//    byte 1 = 3  (0x03)
 //
 // We'll respond with a series of special reports giving the exposure status.
 // Each report has the following structure:
@@ -215,7 +229,33 @@
 // descriptor, which would have broken LedWiz compatibility.  Given that
 // constraint, we have to re-use the joystick report type, making for
 // this somewhat kludgey approach.
- 
+//
+// Configuration query: the host can request a full report of our hardware
+// configuration with this message.
+//
+//    length = 8 bytes
+//    byte 0 = 65 (0x41)
+//    byte 1 = 4  (0x04)
+//
+// We'll response with one report containing the configuration status:
+//
+//    bytes 0:1 = 0x8800.  This has the bit pattern 10001 in the high
+//                5 bits, which distinguishes it from regular joystick
+//                reports and from exposure status reports.
+//    bytes 2:3 = number of outputs
+//    remaining bytes = reserved for future use; set to 0 in current version
+//
+// Turn off all outputs: this message tells the device to turn off all
+// outputs and restore power-up LedWiz defaults.  This sets outputs #1-32
+// to profile 48 (full brightness) and switch state Off, sets all extended
+// outputs (#33 and above) to brightness 0, and sets the LedWiz flash rate
+// to 2.
+//
+//    length = 8 bytes
+//    byte 0 = 65 (0x41)
+//    byte 1 = 5  (0x05)
+
+
 #include "mbed.h"
 #include "math.h"
 #include "USBJoystick.h"
@@ -225,7 +265,6 @@
 #include "crc32.h"
 #include "TLC5940.h"
 
-// our local configuration file
 #define DECL_EXTERNS
 #include "config.h"
 
@@ -243,35 +282,27 @@ inline float square(float x) { return x*x; }
 inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
 
 
-// ---------------------------------------------------------------------------
-// USB device vendor ID, product ID, and version.  
+// --------------------------------------------------------------------------
+// 
+// USB product version number
 //
-// We use the vendor ID for the LedWiz, so that the PC-side software can
-// identify us as capable of performing LedWiz commands.  The LedWiz uses
-// a product ID value from 0xF0 to 0xFF; the last four bits identify the
-// unit number (e.g., product ID 0xF7 means unit #7).  This allows multiple
-// LedWiz units to be installed in a single PC; the software on the PC side
-// uses the unit number to route commands to the devices attached to each
-// unit.  On the real LedWiz, the unit number must be set in the firmware
-// at the factory; it's not configurable by the end user.  Most LedWiz's
-// ship with the unit number set to 0, but the vendor will set different
-// unit numbers if requested at the time of purchase.  So if you have a
-// single LedWiz already installed in your cabinet, and you didn't ask for
-// a non-default unit number, your existing LedWiz will be unit 0.
-//
-// Note that the USB_PRODUCT_ID value set here omits the unit number.  We
-// take the unit number from the saved configuration.  We provide a
-// configuration command that can be sent via the USB connection to change
-// the unit number, so that users can select the unit number without having
-// to install a different version of the software.  We'll combine the base
-// product ID here with the unit number to get the actual product ID that
-// we send to the USB controller.
-const uint16_t USB_VENDOR_ID = 0xFAFA;
-const uint16_t USB_PRODUCT_ID = 0x00F0;
-const uint16_t USB_VERSION_NO = 0x0006;
+const uint16_t USB_VERSION_NO = 0x0007;
 
 
+//
+// Build the full USB product ID.  If we're using the LedWiz compatible
+// vendor ID, the full product ID is the combination of the LedWiz base
+// product ID (0x00F0) and the 0-based unit number (0-15).  If we're not
+// trying to be LedWiz compatible, we just use the exact product ID
+// specified in config.h.
+#define MAKE_USB_PRODUCT_ID(vid, pidbase, unit) \
+    ((vid) == 0xFAFA && (pidbase) == 0x00F0 ? (pidbase) | (unit) : (pidbase))
+
+
+// --------------------------------------------------------------------------
+//
 // Joystick axis report range - we report from -JOYMAX to +JOYMAX
+//
 #define JOYMAX 4096
 
 // --------------------------------------------------------------------------
@@ -357,16 +388,6 @@ DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
 // for 32 outputs).  Every port in this mode has full PWM support.
 //
 
-// Figure the number of outputs.  If we're in the default LedWiz mode,
-// we have a fixed set of 32 outputs.  If we're in TLC5940 enhanced mode,
-// we have 16 outputs per chip.  To simplify the LedWiz compatibility code,
-// always use a minimum of 32 outputs even if we have fewer than two of the
-// TLC5940 chips.
-#if !defined(ENABLE_TLC5940) || (TLC_NCHIPS) < 2
-# define NUM_OUTPUTS   32
-#else
-# define NUM_OUTPUTS   ((TLC5940_NCHIPS)*16)
-#endif
 
 // Current starting output index for "PBA" messages from the PC (using
 // the LedWiz USB protocol).  Each PBA message implicitly uses the
@@ -385,10 +406,27 @@ public:
     virtual void set(float val) = 0;
 };
 
+// LwOut class for unmapped ports.  The LedWiz protocol is hardwired
+// for 32 ports, but we might not want to assign all 32 software ports
+// to physical output pins - the KL25Z has a limited number of GPIO
+// ports, so we might not have enough available GPIOs to fill out the
+// full LedWiz complement after assigning GPIOs for other functions.
+// This class is used to populate the LedWiz mapping array for ports
+// that aren't connected to physical outputs; it simply ignores value 
+// changes.
+class LwUnusedOut: public LwOut
+{
+public:
+    LwUnusedOut() { }
+    virtual void set(float val) { }
+};
 
-#ifdef ENABLE_TLC5940
 
-// The TLC5940 interface object.
+#if TLC5940_NCHIPS
+//
+// The TLC5940 interface object.  Set this up with the port assignments
+// set in config.h.
+//
 TLC5940 tlc5940(TLC5940_SCLK, TLC5940_SIN, TLC5940_GSCLK, TLC5940_BLANK,
     TLC5940_XLAT, TLC5940_NCHIPS);
 
@@ -410,7 +448,31 @@ public:
     float prv;
 };
 
-#else // ENABLE_TLC5940
+// Inverted voltage version of TLC5940 class (Active Low - logical "on"
+// is represented by 0V on output)
+class Lw5940OutInv: public Lw5940Out
+{
+public:
+    Lw5940OutInv(int idx) : Lw5940Out(idx) { }
+    virtual void set(float val) { Lw5940Out::set(1.0 - val); }
+};
+
+#else
+// No TLC5940 chips are attached, so we shouldn't encounter any ports
+// in the map marked for TLC5940 outputs.  If we do, treat them as unused.
+class Lw5940Out: public LwUnusedOut
+{
+public:
+    Lw5940Out(int idx) { }
+};
+
+class Lw5940OutInv: public Lw5940Out
+{
+public:
+    Lw5940OutInv(int idx) : Lw5940Out(idx) { }
+};
+
+#endif // TLC5940_NCHIPS
 
 // 
 // Default LedWiz mode - using on-board GPIO ports.  In this mode, we
@@ -434,6 +496,16 @@ public:
     float prv;
 };
 
+// Inverted voltage PWM-capable GPIO port.  This is the Active Low
+// version of the port - logical "on" is represnted by 0V on the
+// GPIO pin.
+class LwPwmOutInv: public LwPwmOut
+{
+public:
+    LwPwmOutInv(PinName pin) : LwPwmOut(pin) { }
+    virtual void set(float val) { LwPwmOut::set(1.0 - val); }
+};
+
 // LwOut class for a Digital-Only (Non-PWM) GPIO port
 class LwDigOut: public LwOut
 {
@@ -448,21 +520,12 @@ public:
     float prv;
 };
 
-#endif // ENABLE_TLC5940
-
-// LwOut class for unmapped ports.  The LedWiz protocol is hardwired
-// for 32 ports, but we might not want to assign all 32 software ports
-// to physical output pins - the KL25Z has a limited number of GPIO
-// ports, so we might not have enough available GPIOs to fill out the
-// full LedWiz complement after assigning GPIOs for other functions.
-// This class is used to populate the LedWiz mapping array for ports
-// that aren't connected to physical outputs; it simply ignores value 
-// changes.
-class LwUnusedOut: public LwOut
+// Inverted voltage digital out
+class LwDigOutInv: public LwDigOut
 {
 public:
-    LwUnusedOut() { }
-    virtual void set(float val) { }
+    LwDigOutInv(PinName pin) : LwDigOut(pin) { }
+    virtual void set(float val) { LwDigOut::set(1.0 - val); }
 };
 
 // Array of output physical pin assignments.  This array is indexed
@@ -472,47 +535,126 @@ public:
 // physical GPIO pin for the port specified in the ledWizPortMap[] 
 // array in config.h.  If we're using TLC5940 chips for the outputs,
 // we map each logical port to the corresponding TLC5940 output.
-static LwOut *lwPin[NUM_OUTPUTS];
-
-// initialize the output pin array
-void initLwOut()
-{
-    for (int i = 0 ; i < countof(lwPin) ; ++i)
-    {
-#ifdef ENABLE_TLC5940
-        // Set up a TLC5940 output.  If the output is within range of
-        // the connected number of chips (16 outputs per chip), assign it
-        // to the current index, otherwise leave it unattached.
-        if (i < (TLC5940_NCHIPS)*16)
-            lwPin[i] = new Lw5940Out(i);
-        else
-            lwPin[i] = new LwUnusedOut();
-
-#else // ENABLE_TLC5940
-        // Set up the GPIO pin.  If the pin is not connected ("NC" in the
-        // pin map), set up a dummy "unused" output for it.  If it's a
-        // real pin, set up a PWM-capable or Digital-Only output handler
-        // object, according to the pin type in the map.
-        PinName p = (i < countof(ledWizPortMap) ? ledWizPortMap[i].pin : NC);
-        if (p == NC)
-            lwPin[i] = new LwUnusedOut();
-        else if (ledWizPortMap[i].isPWM)
-            lwPin[i] = new LwPwmOut(p);
-        else
-            lwPin[i] = new LwDigOut(p);
-            
-#endif // ENABLE_TLC5940
-
-    }
-}
+static int numOutputs;
+static LwOut **lwPin;
 
 // Current absolute brightness level for an output.  This is a float
 // value from 0.0 for fully off to 1.0 for fully on.  This is the final
 // derived value for the port.  For outputs set by LedWiz messages, 
-// this is derived from te LedWiz state, and is updated on each pulse 
+// this is derived from the LedWiz state, and is updated on each pulse 
 // timer interrupt for lights in flashing states.  For outputs set by 
 // extended protocol messages, this is simply the brightness last set.
-static float outLevel[NUM_OUTPUTS];
+static float *outLevel;
+
+// initialize the output pin array
+void initLwOut()
+{
+    // Figure out how many outputs we have.  We always have at least
+    // 32 outputs, since that's the number fixed by the original LedWiz
+    // protocol.  If we're using TLC5940 chips, we use our own custom
+    // extended protocol that allows for many more ports.  In this case,
+    // we have 16 outputs per TLC5940, plus any assigned to GPIO pins.
+    
+    // start with 16 ports per TLC5940
+    numOutputs = TLC5940_NCHIPS * 16;
+    
+    // add outputs assigned to GPIO pins in the LedWiz-to-pin mapping
+    int i;
+    for (i = 0 ; i < countof(ledWizPortMap) ; ++i)
+    {
+        if (ledWizPortMap[i].pin != NC)
+            ++numOutputs;
+    }
+    
+    // always set up at least 32 outputs, so that we don't have to
+    // check bounds on commands from the basic LedWiz protocol
+    if (numOutputs < 32)
+        numOutputs = 32;
+        
+    // allocate the pin array
+    lwPin = new LwOut*[numOutputs];    
+    
+    // allocate the current brightness array
+    outLevel = new float[numOutputs];
+    
+    // allocate a temporary array to keep track of which physical 
+    // TLC5940 ports we've assigned so far
+    char *tlcasi = new char[TLC5940_NCHIPS*16+1];
+    memset(tlcasi, 0, TLC5940_NCHIPS*16);
+
+    // assign all pins from the port map in config.h
+    for (i = 0 ; i < countof(ledWizPortMap) ; ++i)
+    {
+        // Figure out which type of pin to assign to this port:
+        //
+        // - If it has a valid GPIO pin (other than "NC"), create a PWM
+        //   or Digital output pin according to the port type.
+        //
+        // - If the pin has a TLC5940 port number, set up a TLC5940 port.
+        //
+        // - Otherwise, the pin is unconnected, so set up an unused out.
+        //
+        PinName p = ledWizPortMap[i].pin;
+        int flags = ledWizPortMap[i].flags;
+        int tlcPortNum = ledWizPortMap[i].tlcPortNum;
+        int isPwm = flags & PORT_IS_PWM;
+        int activeLow = flags & PORT_ACTIVE_LOW;
+        if (p != NC)
+        {
+            // This output is a GPIO - set it up as PWM or Digital, and 
+            // active high or low, as marked
+            if (isPwm)
+                lwPin[i] = activeLow ? new LwPwmOutInv(p) : new LwPwmOut(p);
+            else
+                lwPin[i] = activeLow ? new LwDigOutInv(p) : new LwDigOut(p);
+        }
+        else if (tlcPortNum != 0)
+        {
+            // It's a TLC5940 port.  Note that the port numbering in the map
+            // starts at 1, but internally we number the ports starting at 0,
+            // so subtract one to get the correct numbering.
+            lwPin[i] = activeLow ? new Lw5940OutInv(tlcPortNum-1) : new Lw5940Out(tlcPortNum-1);
+            
+            // mark this port as used, so that we don't reassign it when we
+            // fill out the remaining unassigned ports
+            tlcasi[tlcPortNum-1] = 1;
+        }
+        else
+        {
+            // it's not a GPIO or TLC5940 port -> it's not connected
+            lwPin[i] = new LwUnusedOut();
+        }
+        lwPin[i]->set(0);
+    }
+    
+    // find the next unassigned tlc port
+    int tlcnxt;
+    for (tlcnxt = 0 ; tlcnxt < TLC5940_NCHIPS*16 && tlcasi[tlcnxt] ; ++tlcnxt) ;
+    
+    // assign any remaining pins
+    for ( ; i < numOutputs ; ++i)
+    {
+        // If we have any more unassigned TLC5940 outputs, assign this LedWiz
+        // port to the next available TLC5940 output.  Otherwise make it
+        // unconnected.
+        if (tlcnxt < TLC5940_NCHIPS*16)
+        {
+            // we have a TLC5940 output available - assign it
+            lwPin[i] = new Lw5940Out(tlcnxt);
+            
+            // find the next unassigned TLC5940 output, for the next port
+            for (++tlcnxt ; tlcnxt < TLC5940_NCHIPS*16 && tlcasi[tlcnxt] ; ++tlcnxt) ;
+        }
+        else
+        {
+            // no more ports available - set up this port as unconnected
+            lwPin[i] = new LwUnusedOut();
+        }
+    }
+    
+    // done with the temporary TLC5940 port assignment list
+    delete [] tlcasi;
+}
 
 // LedWiz output states.
 //
@@ -1252,6 +1394,263 @@ struct NVM
     } d;
 };
 
+// ---------------------------------------------------------------------------
+//
+// Simple binary (on/off) input debouncer.  Requires an input to be stable 
+// for a given interval before allowing an update.
+//
+class Debouncer
+{
+public:
+    Debouncer(bool initVal, float tmin)
+    {
+        t.start();
+        this->stable = this->prv = initVal;
+        this->tmin = tmin;
+    }
+    
+    // Get the current stable value
+    bool val() const { return stable; }
+
+    // Apply a new sample.  This tells us the new raw reading from the
+    // input device.
+    void sampleIn(bool val)
+    {
+        // If the new raw reading is different from the previous
+        // raw reading, we've detected an edge - start the clock
+        // on the sample reader.
+        if (val != prv)
+        {
+            // we have an edge - reset the sample clock
+            t.reset();
+            
+            // this is now the previous raw sample for nxt time
+            prv = val;
+        }
+        else if (val != stable)
+        {
+            // The new raw sample is the same as the last raw sample,
+            // and different from the stable value.  This means that
+            // the sample value has been the same for the time currently
+            // indicated by our timer.  If enough time has elapsed to
+            // consider the value stable, apply the new value.
+            if (t.read() > tmin)
+                stable = val;
+        }
+    }
+    
+private:
+    // current stable value
+    bool stable;
+
+    // last raw sample value
+    bool prv;
+    
+    // elapsed time since last raw input change
+    Timer t;
+    
+    // Minimum time interval for stability, in seconds.  Input readings 
+    // must be stable for this long before the stable value is updated.
+    float tmin;
+};
+
+
+// ---------------------------------------------------------------------------
+//
+// Turn off all outputs and restore everything to the default LedWiz
+// state.  This sets outputs #1-32 to LedWiz profile value 48 (full
+// brightness) and switch state Off, sets all extended outputs (#33
+// and above) to zero brightness, and sets the LedWiz flash rate to 2.
+// This effectively restores the power-on conditions.
+//
+void allOutputsOff()
+{
+    // reset all LedWiz outputs to OFF/48
+    for (int i = 0 ; i < 32 ; ++i)
+    {
+        outLevel[i] = 0;
+        wizOn[i] = 0;
+        wizVal[i] = 48;
+        lwPin[i]->set(0);
+    }
+    
+    // reset all extended outputs (ports >32) to full off (brightness 0)
+    for (int i = 32 ; i < numOutputs ; ++i)
+    {
+        outLevel[i] = 0;
+        lwPin[i]->set(0);
+    }
+    
+    // restore default LedWiz flash rate
+    wizSpeed = 2;
+}
+
+// ---------------------------------------------------------------------------
+//
+// TV ON timer.  If this feature is enabled, we toggle a TV power switch
+// relay (connected to a GPIO pin) to turn on the cab's TV monitors shortly
+// after the system is powered.  This is useful for TVs that don't remember
+// their power state and don't turn back on automatically after being
+// unplugged and plugged in again.  This feature requires external
+// circuitry, which is built in to the expansion board and can also be
+// built separately - see the Build Guide for the circuit plan.
+//
+// Theory of operation: to use this feature, the cabinet must have a 
+// secondary PC-style power supply (PSU2) for the feedback devices, and
+// this secondary supply must be plugged in to the same power strip or 
+// switched outlet that controls power to the TVs.  This lets us use PSU2
+// as a proxy for the TV power state - when PSU2 is on, the TV outlet is 
+// powered, and when PSU2 is off, the TV outlet is off.  We use a little 
+// latch circuit powered by PSU2 to monitor the status.  The latch has a 
+// current state, ON or OFF, that we can read via a GPIO input pin, and 
+// we can set the state to ON by pulsing a separate GPIO output pin.  As 
+// long as PSU2 is powered off, the latch stays in the OFF state, even if 
+// we try to set it by pulsing the SET pin.  When PSU2 is turned on after 
+// being off, the latch starts receiving power but stays in the OFF state, 
+// since this is the initial condition when the power first comes on.  So 
+// if our latch state pin is reading OFF, we know that PSU2 is either off 
+// now or *was* off some time since we last checked.  We use a timer to 
+// check the state periodically.  Each time we see the state is OFF, we 
+// try pulsing the SET pin.  If the state still reads as OFF, we know 
+// that PSU2 is currently off; if the state changes to ON, though, we 
+// know that PSU2 has gone from OFF to ON some time between now and the 
+// previous check.  When we see this condition, we start a countdown
+// timer, and pulse the TV switch relay when the countdown ends.
+//
+// This scheme might seem a little convoluted, but it neatly handles
+// all of the different cases that can occur:
+//
+// - Most cabinets systems are set up with "soft" PC power switches, 
+//   so that the PC goes into "Soft Off" mode (ACPI state S5, in Windows
+//   parlance) when the user turns off the cabinet.  In this state, the
+//   motherboard supplies power to USB devices, so the KL25Z continues
+//   running without interruption.  The latch system lets us monitor
+//   the power state even when we're never rebooted, since the latch
+//   will turn off when PSU2 is off regardless of what the KL25Z is doing.
+//
+// - Some cabinet builders might prefer to use "hard" power switches,
+//   cutting all power to the cabinet, including the PC motherboard (and
+//   thus the KL25Z) every time the machine is turned off.  This also
+//   applies to the "soft" switch case above when the cabinet is unplugged,
+//   a power outage occurs, etc.  In these cases, the KL25Z will do a cold
+//   boot when the PC is turned on.  We don't know whether the KL25Z
+//   will power up before or after PSU2, so it's not good enough to 
+//   observe the *current* state of PSU2 when we first check - if PSU2
+//   were to come on first, checking the current state alone would fool
+//   us into thinking that no action is required, because we would never
+//   have known that PSU2 was ever off.  The latch handles this case by
+//   letting us see that PSU2 *was* off before we checked.
+//
+// - If the KL25Z is rebooted while the main system is running, or the 
+//   KL25Z is unplugged and plugged back in, we will correctly leave the 
+//   TVs as they are.  The latch state is independent of the KL25Z's 
+//   power or software state, so it's won't affect the latch state when
+//   the KL25Z is unplugged or rebooted; when we boot, we'll see that 
+//   the latch is already on and that we don't have to turn on the TVs.
+//   This is important because TV ON buttons are usually on/off toggles,
+//   so we don't want to push the button on a TV that's already on.
+//   
+//
+#ifdef ENABLE_TV_TIMER
+
+// Current PSU2 state:
+//   1 -> default: latch was on at last check, or we haven't checked yet
+//   2 -> latch was off at last check, SET pulsed high
+//   3 -> SET pulsed low, ready to check status
+//   4 -> TV timer countdown in progress
+//   5 -> TV relay on
+//   
+int psu2_state = 1;
+DigitalIn psu2_status_sense(PSU2_STATUS_SENSE);
+DigitalOut psu2_status_set(PSU2_STATUS_SET);
+DigitalOut tv_relay(TV_RELAY_PIN);
+Timer tv_timer;
+void TVTimerInt()
+{
+    // Check our internal state
+    switch (psu2_state)
+    {
+    case 1:
+        // Default state.  This means that the latch was on last
+        // time we checked or that this is the first check.  In
+        // either case, if the latch is off, switch to state 2 and
+        // try pulsing the latch.  Next time we check, if the latch
+        // stuck, it means that PSU2 is now on after being off.
+        if (!psu2_status_sense)
+        {
+            // switch to OFF state
+            psu2_state = 2;
+            
+            // try setting the latch
+            psu2_status_set = 1;
+        }
+        break;
+        
+    case 2:
+        // PSU2 was off last time we checked, and we tried setting
+        // the latch.  Drop the SET signal and go to CHECK state.
+        psu2_status_set = 0;
+        psu2_state = 3;
+        break;
+        
+    case 3:
+        // CHECK state: we pulsed SET, and we're now ready to see
+        // if that stuck.  If the latch is now on, PSU2 has transitioned
+        // from OFF to ON, so start the TV countdown.  If the latch is
+        // off, our SET command didn't stick, so PSU2 is still off.
+        if (psu2_status_sense)
+        {
+            // The latch stuck, so PSU2 has transitioned from OFF
+            // to ON.  Start the TV countdown timer.
+            tv_timer.reset();
+            tv_timer.start();
+            psu2_state = 4;
+        }
+        else
+        {
+            // The latch didn't stick, so PSU2 was still off at
+            // our last check.  Try pulsing it again in case PSU2
+            // was turned on since the last check.
+            psu2_status_set = 1;
+            psu2_state = 2;
+        }
+        break;
+        
+    case 4:
+        // TV timer countdown in progress.  If we've reached the
+        // delay time, pulse the relay.
+        if (tv_timer.read() >= TV_DELAY_TIME)
+        {
+            // turn on the relay for one timer interval
+            tv_relay = 1;
+            psu2_state = 5;
+        }
+        break;
+        
+    case 5:
+        // TV timer relay on.  We pulse this for one interval, so
+        // it's now time to turn it off and return to the default state.
+        tv_relay = 0;
+        psu2_state = 1;
+        break;
+    }
+}
+
+Ticker tv_ticker;
+void startTVTimer()
+{
+    // Set up our time routine to run every 1/4 second.  
+    tv_ticker.attach(&TVTimerInt, 0.25);
+}
+
+
+#else // ENABLE_TV_TIMER
+//
+// TV timer not used - just provide a dummy startup function
+void startTVTimer() { }
+//
+#endif // ENABLE_TV_TIMER
+
 
 // ---------------------------------------------------------------------------
 //
@@ -1269,12 +1668,31 @@ int main(void)
     ledG = 1;
     ledB = 1;
     
+    // start the TV timer, if applicable
+    startTVTimer();
+    
+    // we're not connected/awake yet
+    bool connected = false;
+    time_t connectChangeTime = time(0);
+    
+#if TLC5940_NCHIPS
+    // start the TLC5940 clock
+    for (int i = 0 ; i < numOutputs ; ++i) lwPin[i]->set(1.0);
+    tlc5940.start();
+    
+    // enable power to the TLC5940 opto/LED outputs
+# ifdef TLC5940_PWRENA
+    DigitalOut tlcPwrEna(TLC5940_PWRENA);
+    tlcPwrEna = 1;
+# endif
+#endif
+
     // initialize the LedWiz ports
     initLwOut();
     
     // initialize the button input ports
     initButtons();
-    
+
     // we don't need a reset yet
     bool needReset = false;
     
@@ -1314,7 +1732,7 @@ int main(void)
     // number from the saved configuration.
     MyUSBJoystick js(
         USB_VENDOR_ID, 
-        USB_PRODUCT_ID | cfg.d.ledWizUnitNo,
+        MAKE_USB_PRODUCT_ID(USB_VENDOR_ID, USB_PRODUCT_ID, cfg.d.ledWizUnitNo),
         USB_VERSION_NO);
         
     // last report timer - we use this to throttle reports, since VP
@@ -1358,11 +1776,6 @@ int main(void)
     
     // flag: send a pixel dump after the next read
     bool reportPix = false;
-#endif
-
-#ifdef ENABLE_TLC5940
-    // start the TLC5940 clock
-    tlc5940.start();
 #endif
 
     // create our plunger sensor object
@@ -1467,7 +1880,11 @@ int main(void)
     // Device status.  We report this on each update so that the host config
     // tool can detect our current settings.  This is a bit mask consisting
     // of these bits:
-    //    0x01  -> plunger sensor enabled
+    //    0x0001  -> plunger sensor enabled
+    //    0x8000  -> RESERVED - must always be zero
+    //
+    // Note that the high bit (0x8000) must always be 0, since we use that
+    // to distinguish special request reply packets.
     uint16_t statusFlags = (cfg.d.plungerEnabled ? 0x01 : 0x00);
     
     // we're all set up - now just loop, processing sensor reports and 
@@ -1486,6 +1903,24 @@ int main(void)
             // all Led-Wiz reports are 8 bytes exactly
             if (report.length == 8)
             {
+                // LedWiz commands come in two varieties:  SBA and PBA.  An
+                // SBA is marked by the first byte having value 64 (0x40).  In
+                // the real LedWiz protocol, any other value in the first byte
+                // means it's a PBA message.  However, *valid* PBA messages
+                // always have a first byte (and in fact all 8 bytes) in the
+                // range 0-49 or 129-132.  Anything else is invalid.  We take
+                // advantage of this to implement private protocol extensions.
+                // So our full protocol is as follows:
+                //
+                // first byte =
+                //   0-48     -> LWZ-PBA
+                //   64       -> LWZ SBA 
+                //   65       -> private control message; second byte specifies subtype
+                //   129-132  -> LWZ-PBA
+                //   200-219  -> extended bank brightness set for outputs N to N+6, where
+                //               N is (first byte - 200)*7
+                //   other    -> reserved for future use
+                //
                 uint8_t *data = report.data;
                 if (data[0] == 64) 
                 {
@@ -1497,11 +1932,27 @@ int main(void)
                     // update all on/off states
                     for (int i = 0, bit = 1, ri = 1 ; i < 32 ; ++i, bit <<= 1)
                     {
+                        // figure the on/off state bit for this output
                         if (bit == 0x100) {
                             bit = 1;
                             ++ri;
                         }
+                        
+                        // set the on/off state
                         wizOn[i] = ((data[ri] & bit) != 0);
+                        
+                        // If the wizVal setting is 255, it means that this
+                        // output was last set to a brightness value with the
+                        // extended protocol.  Return it to LedWiz control by
+                        // rescaling the brightness setting to the LedWiz range
+                        // and updating wizVal with the result.  If it's any
+                        // other value, it was previously set by a PBA message,
+                        // so simply retain the last setting - in the normal
+                        // LedWiz protocol, the "profile" (brightness) and on/off
+                        // states are independent, so an SBA just turns an output
+                        // on or off but retains its last brightness level.
+                        if (wizVal[i] == 255)
+                            wizVal[i] = (uint8_t)round(outLevel[i]*48);
                     }
                     
                     // set the flash speed - enforce the value range 1-7
@@ -1571,21 +2022,88 @@ int main(void)
                         ledB = 0;
                         ledG = 1;
                     }
+                    else if (data[1] == 4)
+                    {
+                        // 4 = hardware configuration query
+                        // (No parameters)
+                        wait_ms(1);
+                        js.reportConfig(numOutputs, cfg.d.ledWizUnitNo);
+                    }
+                    else if (data[1] == 5)
+                    {
+                        // 5 = all outputs off, reset to LedWiz defaults
+                        allOutputsOff();
+                    }
 #endif // ENABLE_JOYSTICK
+                }
+                else if (data[0] >= 200 && data[0] < 220)
+                {
+                    // Extended protocol - banked brightness update.  
+                    // data[0]-200 gives us the bank of 7 outputs we're setting:
+                    // 200 is outputs 0-6, 201 is outputs 7-13, 202 is 14-20, etc.
+                    // The remaining bytes are brightness levels, 0-255, for the
+                    // seven outputs in the selected bank.  The LedWiz flashing 
+                    // modes aren't accessible in this message type; we can only 
+                    // set a fixed brightness, but in exchange we get 8-bit 
+                    // resolution rather than the paltry 0-48 scale that the real
+                    // LedWiz uses.  There's no separate on/off status for outputs
+                    // adjusted with this message type, either, as there would be
+                    // for a PBA message - setting a non-zero value immediately
+                    // turns the output, overriding the last SBA setting.
+                    //
+                    // For outputs 0-31, this overrides any previous PBA/SBA
+                    // settings for the port.  Any subsequent PBA/SBA message will
+                    // in turn override the setting made here.  It's simple - the
+                    // most recent message of either type takes precedence.  For
+                    // outputs above the LedWiz range, PBA/SBA messages can't
+                    // address those ports anyway.
+                    int i0 = (data[0] - 200)*7;
+                    int i1 = i0 + 7 < numOutputs ? i0 + 7 : numOutputs; 
+                    for (int i = i0 ; i < i1 ; ++i)
+                    {
+                        // set the brightness level for the output
+                        float b = data[i-i0+1]/255.0;
+                        outLevel[i] = b;
+                        
+                        // if it's in the basic LedWiz output set, set the LedWiz
+                        // profile value to 255, which means "use outLevel"
+                        if (i < 32) 
+                            wizVal[i] = 255;
+                            
+                        // set the output
+                        lwPin[i]->set(b);
+                    }
                 }
                 else 
                 {
-                    // LWZ-PBA - full state dump; each byte is one output
-                    // in the current bank.  pbaIdx keeps track of the bank;
-                    // this is incremented implicitly by each PBA message.
+                    // Everything else is LWZ-PBA.  This is a full "profile"
+                    // dump from the host for one bank of 8 outputs.  Each
+                    // byte sets one output in the current bank.  The current
+                    // bank is implied; the bank starts at 0 and is reset to 0
+                    // by any LWZ-SBA message, and is incremented to the next
+                    // bank by each LWZ-PBA message.  Our variable pbaIdx keeps
+                    // track of our notion of the current bank.  There's no direct
+                    // way for the host to select the bank; it just has to count
+                    // on us staying in sync.  In practice, the host will always
+                    // send a full set of 4 PBA messages in a row to set all 32
+                    // outputs.
+                    //
+                    // Note that a PBA implicitly overrides our extended profile
+                    // messages (message prefix 200-219), because this sets the
+                    // wizVal[] entry for each output, and that takes precedence
+                    // over the extended protocol settings.
+                    //
                     //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
                     //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
     
-                    // update all output profile settings
+                    // Update all output profile settings
                     for (int i = 0 ; i < 8 ; ++i)
                         wizVal[pbaIdx + i] = data[i];
     
-                    // update the physical LED state if this is the last bank                    
+                    // Update the physical LED state if this is the last bank.
+                    // Note that hosts always send a full set of four PBA
+                    // messages, so there's no need to do a physical update
+                    // until we've received the last bank's PBA message.
                     if (pbaIdx == 24)
                     {
                         updateWizOuts();
@@ -2112,10 +2630,28 @@ int main(void)
             printf("%d,%d\r\n", x, y);
 #endif
 
+        // check for connection status changes
+        int newConnected = js.isConnected() && !js.isSuspended();
+        if (newConnected != connected)
+        {
+            // give it a few seconds to stabilize
+            time_t tc = time(0);
+            if (tc - connectChangeTime > 3)
+            {
+                // note the new status
+                connected = newConnected;
+                connectChangeTime = tc;
+                
+                // if we're no longer connected, turn off all outputs
+                if (!connected)
+                    allOutputsOff();
+            }
+        }
+
         // provide a visual status indication on the on-board LED
         if (calBtnState < 2 && hbTimer.read_ms() > 1000) 
         {
-            if (js.isSuspended() || !js.isConnected())
+            if (!newConnected)
             {
                 // suspended - turn off the LED
                 ledR = 1;

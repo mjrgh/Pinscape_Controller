@@ -94,18 +94,43 @@ bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
     return send(&report);
 }
 
-bool USBJoystick::move(int16_t x, int16_t y) {
+bool USBJoystick::reportConfig(int numOutputs, int unitNo)
+{
+    HID_REPORT report;
+
+    // initially fill the report with zeros
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate that it's a config report.
+    uint16_t s = 0x8800;
+    put(0, s);
+    
+    // write the number of configured outputs
+    put(2, numOutputs);
+    
+    // write the unit number
+    put(4, unitNo);
+    
+    // send the report
+    report.length = reportLen;
+    return send(&report);
+}
+
+bool USBJoystick::move(int16_t x, int16_t y) 
+{
      _x = x;
      _y = y;
      return update();
 }
 
-bool USBJoystick::setZ(int16_t z) {
+bool USBJoystick::setZ(int16_t z) 
+{
     _z = z;
     return update();
 }
  
-bool USBJoystick::buttons(uint32_t buttons) {
+bool USBJoystick::buttons(uint32_t buttons) 
+{
      _buttonsLo = (uint16_t)(buttons & 0xffff);
      _buttonsHi = (uint16_t)((buttons >> 16) & 0xffff);
      return update();

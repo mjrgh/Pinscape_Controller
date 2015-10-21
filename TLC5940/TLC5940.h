@@ -20,6 +20,50 @@
 #ifndef TLC5940_H
 #define TLC5940_H
 
+// Should we do the grayscale update within the blanking interval?
+// If this is set to 1, we'll send grayscale data during the blanking
+// interval; if 0, we'll send grayscale during the PWM cycle.
+// Mode 0 is the *intended* way of using these chips, but mode 1
+// produces a more stable signal in my test setup.
+//
+// In my breadboard testing, using the standard data-during-PWM
+// mode causes some amount of signal instability with multiple
+// daisy-chained TLC5940's.  It appears that there's some signal
+// interference (maybe RF or electrical ringing in the wires) that
+// can make the bit data and/or clock prone to noise that causes
+// random bits to propagate down the daisy chain.  This happens
+// frequently enough in my breadboard setup to be visible as
+// regular flicker.  Careful wiring, short wire runs, and decoupling
+// capacitors noticeably improve it, but I haven't been able to 
+// eliminate it entirely in my test setup.  Using the data-during-
+// blanking mode, however, *does* eliminate it entirely.
+//
+// It clearly should be possible to eliminate the signal problems
+// in a well-designed PCB layout, but for the time being, I'm
+// making data-during-blanking the default, since it provides
+// such a noticeable improvement in my test setup, and the cost
+// is minimal.  The cost is that it lengthens the blanking interval
+// slightly.  With four chips and the SPI clock at 28MHz, the 
+// full data update takes 27us; with the PWM clock at 500kHz, the 
+// grayscale cycle is 8192us.  This means that the 27us data send 
+// keeps the BLANK asserted for an additional 0.3% of the cycle 
+// time, which in term reduces output brightness by the same amount.
+// This brightness reduction isn't noticeable on its own, but it
+// can be seen as a flicker on data cycles if we send data on
+// some blanking cycles but not on others.  To eliminate the
+// flicker, the code sends a data update on *every* cycle when
+// using this mode to ensure that the 0.3% brightness reduction
+// is uniform across time.
+//
+// When using this code with TLC5940 chips on a PCB, I recommend
+// doing a test: set this to 0, run the board, turn on all outputs
+// (connected to LEDs), and observe the results.  If you don't
+// see any randomness or flicker in a minute or two of observation,
+// you're getting a good clean signal throughout the daisy chain
+// and don't need the workaround.  If you do see any instability, 
+// set this back to 1.
+#define DATA_UPDATE_INSIDE_BLANKING  1
+
 #include "mbed.h"
 #include "FastPWM.h"
 #include "SimpleDMA.h"
@@ -27,10 +71,16 @@
 /**
   * SPI speed used by the mbed to communicate with the TLC5940
   * The TLC5940 supports up to 30Mhz.  It's best to keep this as
-  * high as the microcontroller will allow, since a higher SPI 
-  * speed yields a faster grayscale data update.  However, if
-  * you have problems with unreliable signal transmission to the
-  * TLC5940s, reducing this speed might help.
+  * high as possible, since a higher SPI speed yields a faster 
+  * grayscale data update.  However, I've seen some slight
+  * instability in the signal in my breadboard setup using the
+  * full 30MHz, so I've reduced this slightly, which seems to
+  * yield a solid signal.  The limit will vary according to how
+  * clean the signal path is to the chips; you can probably crank
+  * this up to full speed if you have a well-designed PCB, good
+  * decoupling capacitors near the 5940 VCC/GND pins, and short
+  * wires between the KL25Z and the PCB.  A short, clean path to
+  * KL25Z ground seems especially important.
   *
   * The SPI clock must be fast enough that the data transmission
   * time for a full update is comfortably less than the blanking 
@@ -49,7 +99,7 @@
   * isn't a factor.  E.g., at SPI=30MHz and GSCLK=500kHz, 
   * t(blank) is 8192us and t(refresh) is 25us.
   */
-#define SPI_SPEED 3000000
+#define SPI_SPEED 2800000
 
 /**
   * The rate at which the GSCLK pin is pulsed.   This also controls 
@@ -116,15 +166,19 @@ public:
           gsclk(GSCLK),
           blank(BLANK),
           xlat(XLAT),
-          nchips(nchips),
-          newGSData(true)
+          nchips(nchips)
     {
-        // Set initial output pin states - XLAT off, BLANK on (BLANK turns off
-        // all of the outputs while we're setting up)
+        // set XLAT to initially off
         xlat = 0;
+        
+        // Assert BLANK while starting up, to keep the outputs turned off until
+        // everything is stable.  This helps prevent spurious flashes during startup.
+        // (That's not particularly important for lights, but it matters more for
+        // tactile devices.  It's a bit alarming to fire a replay knocker on every
+        // power-on, for example.)
         blank = 1;
         
-        // allocate the grayscale buffer
+        // allocate the grayscale buffer, and set all outputs to fully off
         gs = new unsigned short[nchips*16];
         memset(gs, 0, nchips*16*sizeof(gs[0]));
         
@@ -137,6 +191,22 @@ public:
         // format 0.
         spi.format(8, 0);
         spi.frequency(SPI_SPEED);
+        
+        // Send out a full data set to the chips, to clear out any random
+        // startup data from the registers.  Include some extra bits - there
+        // are some cases (such as after sending dot correct commands) where
+        // an extra bit per chip is required, and the initial state is 
+        // somewhat unpredictable, so send extra just to make sure we cover
+        // all bases.  This does no harm; extra bits just fall off the end of
+        // the daisy chain, and since we want all registers set to 0, we can
+        // send arbitrarily many extra 0's.
+        for (int i = 0 ; i < nchips*25 ; ++i)
+            spi.write(0);
+            
+        // do an initial XLAT to latch all of these "0" values into the
+        // grayscale registers
+        xlat = 1;
+        xlat = 0;
 
         // Allocate a DMA buffer.  The transfer on each cycle is 192 bits per
         // chip = 24 bytes per chip.
@@ -160,6 +230,10 @@ public:
 
         // Configure the GSCLK output's frequency
         gsclk.period(1.0/GSCLK_SPEED);
+        
+        // mark that we need an initial update
+        newGSData = true;
+        needXlat = false;
      }
     
     // Start the clock running
@@ -236,55 +310,43 @@ private:
     
     // Has new GS/DC data been loaded?
     volatile bool newGSData;
+    
+    // Do we need an XLAT signal on the next blanking interval?
+    volatile bool needXlat;
 
     // Function to reset the display and send the next chunks of data
     void reset()
     {
         // start the blanking cycle
         startBlank();
-
-        // If we have new GS data, send it now
-        if (true)
-        {
-            // Send the new grayscale data.
-            //
-            // Note that ideally, we'd do this during the new PWM cycle
-            // rather than during the blanking interval.  The TLC5940 is
-            // specifically designed to allow this.  However, in my testing,
-            // I found that sending new data during the PWM cycle was
-            // unreliable - it seemed to cause a fair amount of glitching,
-            // which as far as I can tell is signal noise coming from
-            // crosstalk between the grayscale clock signal and the 
-            // SPI signal.  This seems to be a common problem with
-            // daisy-chained TLC5940s.  It can in principle be solved with
-            // careful high-speed circuit design (good ground planes, 
-            // short leads, decoupling capacitors), and indeed I was able
-            // to improve stability to some extent with circuit tweaks,
-            // but I wasn't able to eliminate it entirely.  Moving the
-            // data refresh into the blanking interval, on the other 
-            // hand, seems to entirely eliminate any instability.
-            //
-            // update() will format the current grayscale data into our
-            // DMA transfer buffer and kick off the DMA transfer, then
-            // return.  At that point we can return from the interrupt,
-            // but WITHOUT ending the blanking cycle - we want to keep
-            // blanking the outputs until the DMA transfer finishes.  When
-            // the transfer is complete, the DMA controller will fire an
-            // interrupt that will trigger our dmaDone() callback, at 
-            // which point we'll finally complete the blanking cycle and
-            // start a new grayscale cycle.
+        
+#if DATA_UPDATE_INSIDE_BLANKING
+        // We're configured to send the new GS data entirely within
+        // the blanking interval.  Start the DMA transfer now, and
+        // return without ending the blanking interval.  The DMA
+        // completion interrupt handler will do that when the data
+        // update has completed.  
+        //
+        // Note that we do the data update/ unconditionally in the 
+        // send-during-blanking case, whether or not we have new GS 
+        // data.  This is because the update causes a 0.3% reduction 
+        // in brightness because of the elongated BLANK interval.
+        // That would be visible as a flicker on each update if we
+        // did updates on some cycles and not others.  By doing an
+        // update on every cycle, we make the brightness reduction
+        // uniform across time, which makes it less perceptible.
+        update();
+        
+#else // DATA_UPDATE_INSIDE_BLANKING
+        
+        // end the blanking interval
+        endBlank();
+        
+        // if we have pending grayscale data, start sending it
+        if (newGSData)
             update();
 
-            // the chips are now in sync with our data, so we have no more
-            // pending update
-            newGSData = false;
-        }
-        else
-        {
-            // no new grayscale data - just end the blanking cycle without
-            // a new XLAT
-            endBlank(false);
-        }
+#endif // DATA_UPDATE_INSIDE_BLANKING
     }
 
     void startBlank()
@@ -294,13 +356,16 @@ private:
         blank = 1;        
     }
             
-    void endBlank(bool needxlat)
+    void endBlank()
     {
-        if (needxlat)
+        // if we've sent new grayscale data since the last blanking
+        // interval, latch it by asserting XLAT
+        if (needXlat)
         {
             // latch the new data while we're still blanked
             xlat = 1;
             xlat = 0;
+            needXlat = false;
         }
 
         // end the blanking interval and restart the grayscale clock
@@ -350,6 +415,9 @@ private:
         
         // Start the DMA transfer
         sdma.start(nchips*24);
+        
+        // we've now cleared the new GS data
+        newGSData = false;
     }
 
     // Interrupt handler for DMA completion.  The DMA controller calls this
@@ -358,8 +426,15 @@ private:
     // grayscale cycle.    
     void dmaDone()
     {
-        // when the DMA transfer is finished, start the next grayscale cycle
-        endBlank(true);
+        // mark that we need to assert XLAT to latch the new
+        // grayscale data during the next blanking interval
+        needXlat = true;
+        
+#if DATA_UPDATE_INSIDE_BLANKING
+        // we're doing the gs update within the blanking cycle, so end
+        // the blanking cycle now that the transfer has completed
+        endBlank();
+#endif
     }
 
 };
