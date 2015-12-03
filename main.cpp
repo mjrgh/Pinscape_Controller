@@ -264,6 +264,7 @@
 #include "FreescaleIAP.h"
 #include "crc32.h"
 #include "TLC5940.h"
+#include "74HC595.h"
 
 #define DECL_EXTERNS
 #include "config.h"
@@ -421,6 +422,19 @@ public:
     virtual void set(float val) { }
 };
 
+// Active Low out.  For any output marked as active low, we layer this
+// on top of the physical pin interface.  This simply inverts the value of
+// the output value, so that 1.0 means fully off and 0.0 means fully on.
+class LwInvertedOut: public LwOut
+{
+public:
+    LwInvertedOut(LwOut *o) : out(o) { }
+    virtual void set(float val) { out->set(1.0 - val); }
+    
+private:
+    LwOut *out;
+};
+
 
 #if TLC5940_NCHIPS
 //
@@ -442,19 +456,10 @@ public:
     virtual void set(float val)
     {
         if (val != prv)
-           tlc5940.set(idx, (int)(val * 4095));
+           tlc5940.set(idx, (int)((prv = val) * 4095));
     }
     int idx;
     float prv;
-};
-
-// Inverted voltage version of TLC5940 class (Active Low - logical "on"
-// is represented by 0V on output)
-class Lw5940OutInv: public Lw5940Out
-{
-public:
-    Lw5940OutInv(int idx) : Lw5940Out(idx) { }
-    virtual void set(float val) { Lw5940Out::set(1.0 - val); }
 };
 
 #else
@@ -466,13 +471,58 @@ public:
     Lw5940Out(int idx) { }
 };
 
-class Lw5940OutInv: public Lw5940Out
+// dummy tlc5940 interface
+class Dummy5940
 {
 public:
-    Lw5940OutInv(int idx) : Lw5940Out(idx) { }
+    void start() { }
 };
+Dummy5940 tlc5940;
 
 #endif // TLC5940_NCHIPS
+
+#if HC595_NCHIPS
+// 74HC595 interface object.  Set this up with the port assignments in
+// config.h.
+HC595 hc595(HC595_NCHIPS, HC595_SIN, HC595_SCLK, HC595_LATCH, HC595_ENA);
+
+// LwOut class for 74HC595 outputs.  These are simple digial outs.
+// The 'idx' value in the constructor is the output index in the
+// daisy-chained 74HC595 array.  0 is output #0 on the first chip,
+// 1 is #1 on the first chip, 7 is #7 on the first chip, 8 is
+// #0 on the second chip, etc.
+class Lw595Out: public LwOut
+{
+public:
+    Lw595Out(int idx) : idx(idx) { prv = -1; }
+    virtual void set(float val)
+    {
+        if (val != prv)
+           hc595.set(idx, (prv = val) == 0.0 ? 0 : 1);
+    }
+    int idx;
+    float prv;
+};
+
+#else // HC595_NCHIPS
+// No 74HC595 chips are attached, so we shouldn't encounter any ports
+// in the map marked for these outputs.  If we do, treat them as unused.
+class Lw595Out: public LwUnusedOut
+{
+public:
+    Lw595Out(int idx) { }
+};
+
+// dummy placeholder class
+class DummyHC595 
+{
+public:
+    void init() { }
+    void update() { }
+};
+DummyHC595 hc595;
+
+#endif // HC595_NCHIPS
 
 // 
 // Default LedWiz mode - using on-board GPIO ports.  In this mode, we
@@ -496,16 +546,6 @@ public:
     float prv;
 };
 
-// Inverted voltage PWM-capable GPIO port.  This is the Active Low
-// version of the port - logical "on" is represnted by 0V on the
-// GPIO pin.
-class LwPwmOutInv: public LwPwmOut
-{
-public:
-    LwPwmOutInv(PinName pin) : LwPwmOut(pin) { }
-    virtual void set(float val) { LwPwmOut::set(1.0 - val); }
-};
-
 // LwOut class for a Digital-Only (Non-PWM) GPIO port
 class LwDigOut: public LwOut
 {
@@ -518,14 +558,6 @@ public:
     }
     DigitalOut p;
     float prv;
-};
-
-// Inverted voltage digital out
-class LwDigOutInv: public LwDigOut
-{
-public:
-    LwDigOutInv(PinName pin) : LwDigOut(pin) { }
-    virtual void set(float val) { LwDigOut::set(1.0 - val); }
 };
 
 // Array of output physical pin assignments.  This array is indexed
@@ -551,19 +583,30 @@ void initLwOut()
 {
     // Figure out how many outputs we have.  We always have at least
     // 32 outputs, since that's the number fixed by the original LedWiz
-    // protocol.  If we're using TLC5940 chips, we use our own custom
-    // extended protocol that allows for many more ports.  In this case,
-    // we have 16 outputs per TLC5940, plus any assigned to GPIO pins.
+    // protocol.  If we're using TLC5940 chips, each chip provides 16
+    // outputs.  Likewise, each 74HC595 provides 8 outputs.
     
-    // start with 16 ports per TLC5940
-    numOutputs = TLC5940_NCHIPS * 16;
+    // start with 16 ports per TLC5940 and 8 per 74HC595
+    numOutputs = TLC5940_NCHIPS*16 + HC595_NCHIPS*8;
     
-    // add outputs assigned to GPIO pins in the LedWiz-to-pin mapping
+    // add outputs explicitly assigned to GPIO pins or not connected
     int i;
     for (i = 0 ; i < countof(ledWizPortMap) ; ++i)
     {
-        if (ledWizPortMap[i].pin != NC)
+        switch (ledWizPortMap[i].typ)
+        {
+        case DIG_GPIO:
+        case PWM_GPIO:
+        case NO_PORT:
+            // count an explicitly GPIO port
             ++numOutputs;
+            break;
+            
+        default:
+            // DON'T count TLC5940 or 74HC595 ports, as we've already
+            // counted all of these above
+            break;
+        }
     }
     
     // always set up at least 32 outputs, so that we don't have to
@@ -582,68 +625,78 @@ void initLwOut()
     char *tlcasi = new char[TLC5940_NCHIPS*16+1];
     memset(tlcasi, 0, TLC5940_NCHIPS*16);
 
-    // assign all pins from the port map in config.h
+    // likewise for the 74HC595 ports
+    char *hcasi = new char[HC595_NCHIPS*8+1];
+    memset(hcasi, 0, HC595_NCHIPS*8);
+
+    // assign all pins from the explicit port map in config.h
     for (i = 0 ; i < countof(ledWizPortMap) ; ++i)
     {
-        // Figure out which type of pin to assign to this port:
-        //
-        // - If it has a valid GPIO pin (other than "NC"), create a PWM
-        //   or Digital output pin according to the port type.
-        //
-        // - If the pin has a TLC5940 port number, set up a TLC5940 port.
-        //
-        // - Otherwise, the pin is unconnected, so set up an unused out.
-        //
-        PinName p = ledWizPortMap[i].pin;
+        int pin = ledWizPortMap[i].pin;
+        LWPortType typ = ledWizPortMap[i].typ;
         int flags = ledWizPortMap[i].flags;
-        int tlcPortNum = ledWizPortMap[i].tlcPortNum;
-        int isPwm = flags & PORT_IS_PWM;
         int activeLow = flags & PORT_ACTIVE_LOW;
-        if (p != NC)
+        switch (typ)
         {
-            // This output is a GPIO - set it up as PWM or Digital, and 
-            // active high or low, as marked
-            if (isPwm)
-                lwPin[i] = activeLow ? new LwPwmOutInv(p) : new LwPwmOut(p);
-            else
-                lwPin[i] = activeLow ? new LwDigOutInv(p) : new LwDigOut(p);
-        }
-        else if (tlcPortNum != 0)
-        {
-            // It's a TLC5940 port.  Note that the port numbering in the map
-            // starts at 1, but internally we number the ports starting at 0,
-            // so subtract one to get the correct numbering.
-            lwPin[i] = activeLow ? new Lw5940OutInv(tlcPortNum-1) : new Lw5940Out(tlcPortNum-1);
+        case DIG_GPIO:
+            lwPin[i] = new LwDigOut((PinName)pin);
+            break;
+        
+        case PWM_GPIO:
+            // PWM GPIO port
+            lwPin[i] = new LwPwmOut((PinName)pin);
+            break;
+        
+        case TLC_PORT:
+            // TLC5940 port (note that the nominal pin in the map is 1-based, so we
+            // have to decrement it to get the real pin index)
+            lwPin[i] = new Lw5940Out(pin-1);
+            tlcasi[pin-1] = 1;
+            break;
+        
+        case HC595_PORT:
+            // 74HC595 port (the pin in the map is 1-based, so decrement it to get the 
+            // real pin index)
+            lwPin[i] = new Lw595Out(pin-1);
+            hcasi[pin-1] = 1;
+            break;
             
-            // mark this port as used, so that we don't reassign it when we
-            // fill out the remaining unassigned ports
-            tlcasi[tlcPortNum-1] = 1;
-        }
-        else
-        {
-            // it's not a GPIO or TLC5940 port -> it's not connected
+        default:
             lwPin[i] = new LwUnusedOut();
+            break;
         }
+        
+        // if it's Active Low, layer an inverter
+        if (activeLow)
+            lwPin[i] = new LwInvertedOut(lwPin[i]);
+
+        // turn it off initially      
         lwPin[i]->set(0);
     }
     
-    // find the next unassigned tlc port
-    int tlcnxt;
+    // If we haven't assigned all of the LedWiz ports to physical pins,
+    // fill out the unassigned LedWiz ports with any unassigned TLC5940
+    // pins, then with any unassigned 74HC595 ports.
+    int tlcnxt, hcnxt;
     for (tlcnxt = 0 ; tlcnxt < TLC5940_NCHIPS*16 && tlcasi[tlcnxt] ; ++tlcnxt) ;
-    
-    // assign any remaining pins
+    for (hcnxt = 0 ; hcnxt < HC595_NCHIPS*8 && hcasi[hcnxt] ; ++hcnxt) ;
     for ( ; i < numOutputs ; ++i)
     {
         // If we have any more unassigned TLC5940 outputs, assign this LedWiz
-        // port to the next available TLC5940 output.  Otherwise make it
-        // unconnected.
+        // port to the next available TLC5940 output, or the next 74HC595 output
+        // if we're out of TLC5940 outputs.  Leave it unassigned if there are
+        // no more unassigned ports of any type.
         if (tlcnxt < TLC5940_NCHIPS*16)
         {
-            // we have a TLC5940 output available - assign it
+            // assign this available TLC5940 pin, and find the next unused one
             lwPin[i] = new Lw5940Out(tlcnxt);
-            
-            // find the next unassigned TLC5940 output, for the next port
             for (++tlcnxt ; tlcnxt < TLC5940_NCHIPS*16 && tlcasi[tlcnxt] ; ++tlcnxt) ;
+        }
+        else if (hcnxt < HC595_NCHIPS*8)
+        {
+            // assign this available 74HC595 pin, and find the next unused one
+            lwPin[i] = new Lw595Out(hcnxt);
+            for (++hcnxt ; hcnxt < HC595_NCHIPS*8 && hcasi[hcnxt] ; ++hcnxt) ;
         }
         else
         {
@@ -652,8 +705,9 @@ void initLwOut()
         }
     }
     
-    // done with the temporary TLC5940 port assignment list
+    // done with the temporary TLC5940 and 74HC595 port assignment lists
     delete [] tlcasi;
+    delete [] hcasi;
 }
 
 // LedWiz output states.
@@ -840,8 +894,11 @@ static void updateWizOuts()
     // isn't running, turn it on
     if (pulse)
         wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
+        
+    // flush changes to 74HC595 chips, if attached
+    hc595.update();
 }
-
+        
 // ---------------------------------------------------------------------------
 //
 // Button input
@@ -1321,7 +1378,9 @@ struct NVM
     // has been properly initialized
     uint32_t checksum;
 
-    // signature value
+    // signature and version, to verify that we saved the config
+    // data to flash on a past run (as opposed to uninitialized
+    // data from a firmware update)
     static const uint32_t SIGNATURE = 0x4D4A522A;
     static const uint16_t VERSION = 0x0003;
     
@@ -1339,8 +1398,10 @@ struct NVM
     void save(FreescaleIAP &iap, int addr)
     {
         // update the checksum and structure size
-        checksum = CRC32(&d, sizeof(d));
+        d.sig = SIGNATURE;
+        d.vsn = VERSION;
         d.sz = sizeof(NVM);
+        checksum = CRC32(&d, sizeof(d));
         
         // erase the sector
         iap.erase_sector(addr);
@@ -1483,6 +1544,9 @@ void allOutputsOff()
     
     // restore default LedWiz flash rate
     wizSpeed = 2;
+    
+    // flush changes to hc595, if applicable
+    hc595.update();
 }
 
 // ---------------------------------------------------------------------------
@@ -1674,24 +1738,19 @@ int main(void)
     // we're not connected/awake yet
     bool connected = false;
     time_t connectChangeTime = time(0);
-    
-#if TLC5940_NCHIPS
-    // start the TLC5940 clock
-    for (int i = 0 ; i < numOutputs ; ++i) lwPin[i]->set(1.0);
-    tlc5940.start();
-    
-    // enable power to the TLC5940 opto/LED outputs
-# ifdef TLC5940_PWRENA
-    DigitalOut tlcPwrEna(TLC5940_PWRENA);
-    tlcPwrEna = 1;
-# endif
-#endif
 
     // initialize the LedWiz ports
     initLwOut();
     
     // initialize the button input ports
     initButtons();
+
+    // start the TLC5940 clock, if present
+    tlc5940.start();
+
+    // enable the 74HC595 chips, if present
+    hc595.init();
+    hc595.update();
 
     // we don't need a reset yet
     bool needReset = false;
@@ -1707,19 +1766,14 @@ int main(void)
     NVM *flash = (NVM *)flash_addr;
     NVM cfg;
     
-    // check for valid flash
-    bool flash_valid = flash->valid();
-                      
     // if the flash is valid, load it; otherwise initialize to defaults
-    if (flash_valid) {
+    if (flash->valid()) {
         memcpy(&cfg, flash, sizeof(cfg));
         printf("Flash restored: plunger cal=%d, min=%d, zero=%d, max=%d\r\n", 
             cfg.d.plungerCal, cfg.d.plungerMin, cfg.d.plungerZero, cfg.d.plungerMax);
     }
     else {
         printf("Factory reset\r\n");
-        cfg.d.sig = cfg.SIGNATURE;
-        cfg.d.vsn = cfg.VERSION;
         cfg.d.plungerCal = 0;
         cfg.d.plungerMin = 0;        // assume we can go all the way forward...
         cfg.d.plungerMax = npix;     // ...and all the way back
@@ -1964,6 +2018,7 @@ int main(void)
         
                     // update the physical outputs
                     updateWizOuts();
+                    hc595.update();
                     
                     // reset the PBA counter
                     pbaIdx = 0;
@@ -2073,6 +2128,9 @@ int main(void)
                         // set the output
                         lwPin[i]->set(b);
                     }
+                    
+                    // update 74HC595 outputs, if attached
+                    hc595.update();
                 }
                 else 
                 {
@@ -2107,6 +2165,7 @@ int main(void)
                     if (pbaIdx == 24)
                     {
                         updateWizOuts();
+                        hc595.update();
                         pbaIdx = 0;
                     }
                     else
@@ -2170,9 +2229,6 @@ int main(void)
                 // save the updated configuration
                 cfg.d.plungerCal = 1;
                 cfg.save(iap, flash_addr);
-                
-                // the flash state is now valid
-                flash_valid = true;
             }
             else if (calBtnState != 3)
             {

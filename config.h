@@ -425,9 +425,10 @@ const float LaunchBallPushDistance = .08;
 
 // Number of TLC5940 chips you're using.  For a full LedWiz-compatible
 // setup, you need two of these chips, for 32 outputs.  The software
-// will handle up to 8.  The expansion board uses 4 of these chips; if
-// you're not using the expansion board, we assume you're not using
-// any of them.
+// will handle up to 8.  
+// If you're using the expansion board, the main KL25Z interface board
+// has 2 chips and the MOSFET board has 2 more, for a total of 4.  If
+// you add extra daisy-chained MOSFET boards, add 2 more per board.
 #ifdef EXPANSION_BOARD
 # define TLC5940_NCHIPS  4
 #else
@@ -440,25 +441,41 @@ const float LaunchBallPushDistance = .08;
 // outputs, respectively, which effectively limits them to the default
 // selections, and that the GSCLK pin must be PWM-capable.  These defaults
 // all match the expansion board wiring.
-#define TLC5940_SIN    PTC6    // Must connect to SPI0 MOSI -> PTC6 or PTD2
-#define TLC5940_SCLK   PTC5    // Must connect to SPI0 SCLK -> PTC5 or PTD1; however, PTD1 isn't
-                               //   recommended because it's hard-wired to the on-board blue LED
-#define TLC5940_XLAT   PTC10   // Any GPIO pin can be used
-#define TLC5940_BLANK  PTC7    // Any GPIO pin can be used
-#define TLC5940_GSCLK  PTA1    // Must be a PWM-capable pin
+#define TLC5940_SIN    PTC6    // Serial data - Must connect to SPI0 MOSI -> PTC6 or PTD2
+#define TLC5940_SCLK   PTC5    // Serial clock - Must connect to SPI0 SCLK -> PTC5 or PTD1,
+                               //  but don't use PTD1 because it's hard-wired to the on-board 
+                               //  blue LED
+#define TLC5940_XLAT   PTC10   // XLAT (latch) signal - Any GPIO pin can be used
+#define TLC5940_BLANK  PTC7    // BLANK signal - Any GPIO pin can be used
+#define TLC5940_GSCLK  PTA1    // Grayscale clock - Must be a PWM-capable pin
 
-// TLC5940 output power enable pin.  This is a GPIO pin that controls
-// a high-side transistor switch that controls power to the optos and
-// LEDs connected to the TLC5940 outputs.  This is a precaution against
-// powering the chip's output pins before Vcc is powered.  Vcc comes
-// from the KL25Z, so when our program is running, we know for certain
-// that Vcc is up.  This means that we can simply enable this pin any
-// time after entering our main().  Un-comment this line if using this
-// circuit.
-// #define TLC5940_PWRENA PTC11   // Any GPIO pin can be used
-#ifdef EXPANSION_BOARD
-# define TLC5940_PWRENA PTC11
-#endif
+
+// --------------------------------------------------------------------------
+//
+// 74HC595 digital output setup - "Chime Board" module
+//
+// The 74HC595 is an 8-output serial-to-parallel shift register IC.  This lets
+// us add extra digital outputs (on/off only, not PWM), 8 at a time, similar
+// to the way the TLC5940 lets us add extra PWM outputs.  The 74HC595 requires
+// four control signals, so one chip gives us 8 outputs using only 4 GPIOs.
+// The chips can be daisy-chained, so by adding multiple chips, we can add 
+// any number of new outputs, still using only 4 GPIO pins for the whole chain.
+//
+// The TLC5940 is more useful for general-purpose outputs because of its PWM
+// capabilities, but digital-only outputs are better for some special cases.
+//
+// The Expansion Board "Chime" module uses these chips to add timer-protected
+// outputs.  The timer triggers are edge-sensitive, so we want simple on/off
+// signals to control them; a PWM signal wouldn't work properly because it's
+// constantly switching on and off even when nominally 100% on.
+//
+
+#define HC595_NCHIPS   0       // Number of chips == number of Chime boards connected
+#define HC595_SIN      PTA5    // Serial data - use any GPIO pin
+#define HC595_SCLK     PTA4    // Serial clock - use any GPIO pin
+#define HC595_LATCH    PTA12   // Latch signal - use any GPIO pin
+#define HC595_ENA      PTD4    // Enable signal - use any GPIO pin
+
 
 #endif // CONFIG_H - end of include-once section (code below this point can be multiply included)
 
@@ -488,14 +505,15 @@ const float LaunchBallPushDistance = .08;
 // "NC" entries below to the reallocated pin name.  The limit is 32
 // buttons total.
 //
-// (If you're using TLC5940 chips to control outputs, ALL of the
-// LedWiz mapped ports can be reassigned as keys, except, of course,
-// those taken over for the 5940 interface.)
+// (If you're using TLC5940 chips to control outputs, many of the
+// GPIO pins that are mapped to LedWiz outputs in the default
+// mapping can be reassigned as keys, since the TLC5940 outputs
+// take over for the GPIO pins.  The exceptions are the pins that
+// are reassigned to control the TLC5940 chips.)
 //
 // Note: PTD1 (pin J2-12) should NOT be assigned as a button input,
 // as this pin is physically connected on the KL25Z to the on-board
-// indicator LED's blue segment.  This precludes any other use of
-// the pin.
+// indicator LED's blue segment.
 PinName buttonMap[] = {
     PTC2,      // J10 pin 10, joystick button 1
     PTB3,      // J10 pin 8,  joystick button 2
@@ -503,7 +521,11 @@ PinName buttonMap[] = {
     PTB1,      // J10 pin 4,  joystick button 4
     
     PTE30,     // J10 pin 11, joystick button 5
+#ifdef EXPANSION_BOARD
+    PTC11,     // J1 pin 15,  joystick button 6
+#else
     PTE22,     // J10 pin 5,  joystick button 6
+#endif
     
     PTE5,      // J9 pin 15,  joystick button 7
     PTE4,      // J9 pin 13,  joystick button 8
@@ -635,7 +657,7 @@ PinName buttonMap[] = {
 //
 // Note: Don't assign PTD1 (pin J2-12) as an LedWiz output.  That pin
 // is hard-wired on the KL25Z to the on-board indicator LED's blue segment,  
-// which pretty much precludes any other use of the pin.
+// which pretty precludes other uses of the pin.
 //
 // ACTIVE-LOW PORTS:  By default, when a logical port is turned on in
 // the software, we set the physical GPIO voltage to "high" (3.3V), and
@@ -648,21 +670,33 @@ PinName buttonMap[] = {
 // affected port.
 //
 // TLC5940 PORTS:  To assign an LedWiz output port number to a particular
-// output on a TLC5940, set tlcPortNum to the non-zero port number,
-// starting at 1 for the first output on the first chip, 16 for the
-// last output on the first chip, 17 for the first output on the second
-// chip, and so on.  TLC ports are inherently PWM-capable only, so it's 
-// not necessary to set the PORT_IS_PWM flag for those.
+// output on a TLC5940, set the port type to TLC_PORT and set the 'pin'
+// value to the index of the output port in the daisy chain.  The first
+// chip in the daisy chain has ports 1-16, the second has ports 17-32, 
+// and so on.
+//
+// 74HC595 PORTS:  To assign an LedWiz output port to a 74HC595 port,
+// set the port type to HC595_PORT and set 'pin' to the index of the port
+// in the daisy chain.  The first chip has ports 1-8, the second has 
+// 9-16, etc.
 //
 
-// ledWizPortMap 'flags' bits - combine these with '|'
-const int PORT_IS_PWM     = 0x0001;  // this port is PWM-capable
-const int PORT_ACTIVE_LOW = 0x0002;  // use LOW voltage (0V) when port is ON
+// ledWizPortMap 'typ' values
+enum LWPortType {
+    NO_PORT    = -1,  // Not connected
+    DIG_GPIO   = 0,   // DigitalOut I/O pin (not PWM capable)
+    PWM_GPIO   = 1,   // AnalogOut I/O pin (PWM capable)
+    TLC_PORT   = 2,   // TLC5940 output port
+    HC595_PORT = 3    // 74HC595 output port
+};
+
+// flags - combine with '|'
+const int PORT_ACTIVE_LOW = 0x0001;  // use LOW voltage (0V) when port is ON
 
 struct {
-    PinName pin;        // the GPIO pin assigned to this output; NC if not connected or a TLC5940 port
+    int pin;            // Pin name/index - PinName for GPIO, pin index for TLC5940 or 74HC595
+    LWPortType typ;     // type of pin
     int flags;          // flags - a combination of PORT_xxx flag bits (see above)
-    int tlcPortNum;     // for TLC5940 ports, the TLC output number (1 to number of chips*16); otherwise 0
 } ledWizPortMap[] = {
     
 #if TLC5940_NCHIPS == 0
@@ -683,39 +717,39 @@ struct {
     // We commented each PWM pin with its hardware channel number to help you keep
     // track of available channels if you do need to rearrange any of these pins.
 
-    { PTA1,  PORT_IS_PWM },      // pin J1-2,  LW port 1  (PWM capable - TPM 2.0 = channel 9)
-    { PTA2,  PORT_IS_PWM },      // pin J1-4,  LW port 2  (PWM capable - TPM 2.1 = channel 10)
-    { PTD4,  PORT_IS_PWM },      // pin J1-6,  LW port 3  (PWM capable - TPM 0.4 = channel 5)
-    { PTA12, PORT_IS_PWM },      // pin J1-8,  LW port 4  (PWM capable - TPM 1.0 = channel 7)
-    { PTA4,  PORT_IS_PWM },      // pin J1-10, LW port 5  (PWM capable - TPM 0.1 = channel 2)
-    { PTA5,  PORT_IS_PWM },      // pin J1-12, LW port 6  (PWM capable - TPM 0.2 = channel 3)
-    { PTA13, PORT_IS_PWM },      // pin J2-2,  LW port 7  (PWM capable - TPM 1.1 = channel 13)
-    { PTD5,  PORT_IS_PWM },      // pin J2-4,  LW port 8  (PWM capable - TPM 0.5 = channel 6)
-    { PTD0,  PORT_IS_PWM },      // pin J2-6,  LW port 9  (PWM capable - TPM 0.0 = channel 1)
-    { PTD3,  PORT_IS_PWM },      // pin J2-10, LW port 10 (PWM capable - TPM 0.3 = channel 4)
-    { PTD2,  0 },                // pin J2-8,  LW port 11
-    { PTC8,  0 },                // pin J1-14, LW port 12
-    { PTC9,  0 },                // pin J1-16, LW port 13
-    { PTC7,  0 },                // pin J1-1,  LW port 14
-    { PTC0,  0 },                // pin J1-3,  LW port 15
-    { PTC3,  0 },                // pin J1-5,  LW port 16
-    { PTC4,  0 },                // pin J1-7,  LW port 17
-    { PTC5,  0 },                // pin J1-9,  LW port 18
-    { PTC6,  0 },                // pin J1-11, LW port 19
-    { PTC10, 0 },                // pin J1-13, LW port 20
-    { PTC11, 0 },                // pin J1-15, LW port 21
-    { PTE0,  0 },                // pin J2-18, LW port 22
-    { NC,    0 },                // Not connected,  LW port 23
-    { NC,    0 },                // Not connected,  LW port 24
-    { NC,    0 },                // Not connected,  LW port 25
-    { NC,    0 },                // Not connected,  LW port 26
-    { NC,    0 },                // Not connected,  LW port 27
-    { NC,    0 },                // Not connected,  LW port 28
-    { NC,    0 },                // Not connected,  LW port 29
-    { NC,    0 },                // Not connected,  LW port 30
-    { NC,    0 },                // Not connected,  LW port 31
-    { NC,    0 }                 // Not connected,  LW port 32
-    
+    { PTA1,  PWM_GPIO },      // pin J1-2,  LW port 1  (PWM capable - TPM 2.0 = channel 9)
+    { PTA2,  PWM_GPIO },      // pin J1-4,  LW port 2  (PWM capable - TPM 2.1 = channel 10)
+    { PTD4,  PWM_GPIO },      // pin J1-6,  LW port 3  (PWM capable - TPM 0.4 = channel 5)
+    { PTA12, PWM_GPIO },      // pin J1-8,  LW port 4  (PWM capable - TPM 1.0 = channel 7)
+    { PTA4,  PWM_GPIO },      // pin J1-10, LW port 5  (PWM capable - TPM 0.1 = channel 2)
+    { PTA5,  PWM_GPIO },      // pin J1-12, LW port 6  (PWM capable - TPM 0.2 = channel 3)
+    { PTA13, PWM_GPIO },      // pin J2-2,  LW port 7  (PWM capable - TPM 1.1 = channel 13)
+    { PTD5,  PWM_GPIO },      // pin J2-4,  LW port 8  (PWM capable - TPM 0.5 = channel 6)
+    { PTD0,  PWM_GPIO },      // pin J2-6,  LW port 9  (PWM capable - TPM 0.0 = channel 1)
+    { PTD3,  PWM_GPIO },      // pin J2-10, LW port 10 (PWM capable - TPM 0.3 = channel 4)
+    { PTD2,  DIG_GPIO },      // pin J2-8,  LW port 11
+    { PTC8,  DIG_GPIO },      // pin J1-14, LW port 12
+    { PTC9,  DIG_GPIO },      // pin J1-16, LW port 13
+    { PTC7,  DIG_GPIO },      // pin J1-1,  LW port 14
+    { PTC0,  DIG_GPIO },      // pin J1-3,  LW port 15
+    { PTC3,  DIG_GPIO },      // pin J1-5,  LW port 16
+    { PTC4,  DIG_GPIO },      // pin J1-7,  LW port 17
+    { PTC5,  DIG_GPIO },      // pin J1-9,  LW port 18
+    { PTC6,  DIG_GPIO },      // pin J1-11, LW port 19
+    { PTC10, DIG_GPIO },      // pin J1-13, LW port 20
+    { PTC11, DIG_GPIO },      // pin J1-15, LW port 21
+    { PTE0,  DIG_GPIO },      // pin J2-18, LW port 22
+    { NC,    NO_PORT  },      // Not connected,  LW port 23
+    { NC,    NO_PORT  },      // Not connected,  LW port 24
+    { NC,    NO_PORT  },      // Not connected,  LW port 25
+    { NC,    NO_PORT  },      // Not connected,  LW port 26
+    { NC,    NO_PORT  },      // Not connected,  LW port 27
+    { NC,    NO_PORT  },      // Not connected,  LW port 28
+    { NC,    NO_PORT  },      // Not connected,  LW port 29
+    { NC,    NO_PORT  },      // Not connected,  LW port 30
+    { NC,    NO_PORT  },      // Not connected,  LW port 31
+    { NC,    NO_PORT  }       // Not connected,  LW port 32
+
 #elif defined(EXPANSION_BOARD)
 
     // *** EXPANSION BOARD MODE ***
@@ -733,80 +767,100 @@ struct {
     // damaged, so they don't require such elaborate precautions.)
     //
     // The specific device assignments in the last column are just 
-    // recommendations - you can assign any port to any device with 
+    // recommendations.  You can assign any port to any device with 
     // compatible power needs.  The "General Purpose" ports are good to
-    // at least 5A, so you can use these for virtually anything.  The
-    // "Button light" ports are good to about 1.5A, so these are most
-    // suitable for smaller loads like lamps, flashers, LEDs, etc.  The
-    // flipper and magnasave ports will only provide 20mA, so these are
-    // only usable for small LEDs.
+    // at least 5A, so you can use these for virtually anything; put
+    // your heavy-duty devices, such as solenoids and motors, on these
+    // outputs.  You can also put lighter loads like lamps and LEDs
+    // on these if you have ports left over after connecting all of
+    // your high-power devices.  The "Flasher" and "Button light" ports 
+    // are good to about 1.5A, so they work for medium loads like lamps, 
+    // flashers, high-power LEDs, etc.  The flipper and magnasave ports 
+    // only provide 20mA; use these only for small LEDs.
+    //
+    // The TLC5940 outputs on the expansion board are hard-wired to
+    // specific output drivers - that's what determines the power
+    // limits described above.  You can rearrange the ports in the
+    // list below to change the LedWiz port numbering to any order 
+    // you prefer, but the association between a TLC5940 port number 
+    // and the output circuit type can't be changed in the software.
+    // That's a function of how the TLC5940 port is physically wired 
+    // on the board.  Likewise, the PTC8 output is hard-wired to the 
+    // knocker time limiter.
+    //   TLC ports 1-20 and 44-47 = Darlington outputs, 1.5A max
+    //   TLC ports 21-44 = MOSFET outputs (limit depends on MOSFET chosen)
+    //   TLC ports 49-64 = direct outputs, limited to 20mA
 
     // The first 32 ports are LedWiz-compatible, so they're universally
     // accessible, even to older non-DOF software.  Attach the most common
     // devices to these ports.
-    { NC,     0,    1 },         // TLC port 1,  LW output 1  - Flasher 1 R
-    { NC,     0,    2 },         // TLC port 2,  LW output 2  - Flasher 1 G
-    { NC,     0,    3 },         // TLC port 3,  LW output 3  - Flasher 1 B
-    { NC,     0,    4 },         // TLC port 4,  LW output 4  - Flasher 2 R
-    { NC,     0,    5 },         // TLC port 5,  LW output 5  - Flasher 2 G
-    { NC,     0,    6 },         // TLC port 6,  LW output 6  - Flasher 2 B
-    { NC,     0,    7 },         // TLC port 7,  LW output 7  - Flasher 3 R
-    { NC,     0,    8 },         // TLC port 8,  LW output 8  - Flasher 3 G
-    { NC,     0,    9 },         // TLC port 9,  LW output 9  - Flasher 3 B
-    { NC,     0,    10 },        // TLC port 10, LW output 10 - Flasher 4 R
-    { NC,     0,    11 },        // TLC port 11, LW output 11 - Flasher 4 G
-    { NC,     0,    12 },        // TLC port 12, LW output 12 - Flasher 4 B
-    { NC,     0,    13 },        // TLC port 13, LW output 13 - Flasher 5 R
-    { NC,     0,    14 },        // TLC port 14, LW output 14 - Flasher 5 G
-    { NC,     0,    15 },        // TLC port 15, LW output 15 - Flasher 5 B
-    { NC,     0,    16 },        // TLC port 16, LW output 16 - Strobe/Button light
-    { NC,     0,    17 },        // TLC port 17, LW output 17 - Button light 1
-    { NC,     0,    18 },        // TLC port 18, LW output 18 - Button light 2
-    { NC,     0,    19 },        // TLC port 19, LW output 19 - Button light 3
-    { NC,     0,    20 },        // TLC port 20, LW output 20 - Button light 4
-    { PTC8,   0,    0 },         // PTC8,        LW output 21 - Replay Knocker
-    { NC,     0,    21 },        // TLC port 21, LW output 22 - Contactor 1/General purpose
-    { NC,     0,    22 },        // TLC port 22, LW output 23 - Contactor 2/General purpose
-    { NC,     0,    23 },        // TLC port 23, LW output 24 - Contactor 3/General purpose
-    { NC,     0,    24 },        // TLC port 24, LW output 25 - Contactor 4/General purpose
-    { NC,     0,    25 },        // TLC port 25, LW output 26 - Contactor 5/General purpose
-    { NC,     0,    26 },        // TLC port 26, LW output 27 - Contactor 6/General purpose
-    { NC,     0,    27 },        // TLC port 27, LW output 28 - Contactor 7/General purpose
-    { NC,     0,    28 },        // TLC port 28, LW output 29 - Contactor 8/General purpose
-    { NC,     0,    29 },        // TLC port 29, LW output 30 - Contactor 9/General purpose
-    { NC,     0,    30 },        // TLC port 30, LW output 31 - Contactor 10/General purpose
-    { NC,     0,    31 },        // TLC port 31, LW output 32 - Shaker Motor/General purpose
+    { 1, TLC_PORT },         // TLC port 1,  LW output 1  - Flasher 1 R
+    { 2, TLC_PORT },         // TLC port 2,  LW output 2  - Flasher 1 G
+    { 3, TLC_PORT },         // TLC port 3,  LW output 3  - Flasher 1 B
+    { 4, TLC_PORT },         // TLC port 4,  LW output 4  - Flasher 2 R
+    { 5, TLC_PORT },         // TLC port 5,  LW output 5  - Flasher 2 G
+    { 6, TLC_PORT },         // TLC port 6,  LW output 6  - Flasher 2 B
+    { 7, TLC_PORT },         // TLC port 7,  LW output 7  - Flasher 3 R
+    { 8, TLC_PORT },         // TLC port 8,  LW output 8  - Flasher 3 G
+    { 9, TLC_PORT },         // TLC port 9,  LW output 9  - Flasher 3 B
+    { 10, TLC_PORT },        // TLC port 10, LW output 10 - Flasher 4 R
+    { 11, TLC_PORT },        // TLC port 11, LW output 11 - Flasher 4 G
+    { 12, TLC_PORT },        // TLC port 12, LW output 12 - Flasher 4 B
+    { 13, TLC_PORT },        // TLC port 13, LW output 13 - Flasher 5 R
+    { 14, TLC_PORT },        // TLC port 14, LW output 14 - Flasher 5 G
+    { 15, TLC_PORT },        // TLC port 15, LW output 15 - Flasher 5 B
+    { 16, TLC_PORT },        // TLC port 16, LW output 16 - Strobe/Button light
+    { 17, TLC_PORT },        // TLC port 17, LW output 17 - Button light 1
+    { 18, TLC_PORT },        // TLC port 18, LW output 18 - Button light 2
+    { 19, TLC_PORT },        // TLC port 19, LW output 19 - Button light 3
+    { 20, TLC_PORT },        // TLC port 20, LW output 20 - Button light 4
+    { PTC8, DIG_GPIO },      // PTC8,        LW output 21 - Replay Knocker
+    { 21, TLC_PORT },        // TLC port 21, LW output 22 - Contactor 1/General purpose
+    { 22, TLC_PORT },        // TLC port 22, LW output 23 - Contactor 2/General purpose
+    { 23, TLC_PORT },        // TLC port 23, LW output 24 - Contactor 3/General purpose
+    { 24, TLC_PORT },        // TLC port 24, LW output 25 - Contactor 4/General purpose
+    { 25, TLC_PORT },        // TLC port 25, LW output 26 - Contactor 5/General purpose
+    { 26, TLC_PORT },        // TLC port 26, LW output 27 - Contactor 6/General purpose
+    { 27, TLC_PORT },        // TLC port 27, LW output 28 - Contactor 7/General purpose
+    { 28, TLC_PORT },        // TLC port 28, LW output 29 - Contactor 8/General purpose
+    { 29, TLC_PORT },        // TLC port 29, LW output 30 - Contactor 9/General purpose
+    { 30, TLC_PORT },        // TLC port 30, LW output 31 - Contactor 10/General purpose
+    { 31, TLC_PORT },        // TLC port 31, LW output 32 - Shaker Motor/General purpose
     
     // Ports 33+ are accessible only to DOF-based software.  Older LedWiz-only
     // software on the can't access these.  Attach less common devices to these ports.
-    { NC,     0,    32 },        // TLC port 32, LW output 33 - Gear Motor/General purpose
-    { NC,     0,    33 },        // TLC port 33, LW output 34 - Fan/General purpose
-    { NC,     0,    34 },        // TLC port 34, LW output 35 - Beacon/General purpose
-    { NC,     0,    35 },        // TLC port 35, LW output 36 - Undercab RGB R/General purpose
-    { NC,     0,    36 },        // TLC port 36, LW output 37 - Undercab RGB G/General purpose
-    { NC,     0,    37 },        // TLC port 37, LW output 38 - Undercab RGB B/General purpose
-    { NC,     0,    38 },        // TLC port 38, LW output 39 - Bell/General purpose
-    { NC,     0,    39 },        // TLC port 39, LW output 40 - Chime 1/General purpose
-    { NC,     0,    40 },        // TLC port 40, LW output 41 - Chime 2/General purpose
-    { NC,     0,    41 },        // TLC port 41, LW output 42 - Chime 3/General purpose
-    { NC,     0,    42 },        // TLC port 42, LW output 43 - General purpose
-    { NC,     0,    43 },        // TLC port 43, LW output 44 - General purpose
-    { NC,     0,    44 },        // TLC port 44, LW output 45 - Button light 5
-    { NC,     0,    45 },        // TLC port 45, LW output 46 - Button light 6
-    { NC,     0,    46 },        // TLC port 46, LW output 47 - Button light 7
-    { NC,     0,    47 },        // TLC port 47, LW output 48 - Button light 8
-    { NC,     0,    49 },        // TLC port 49, LW output 49 - Flipper button RGB left R
-    { NC,     0,    50 },        // TLC port 50, LW output 50 - Flipper button RGB left G
-    { NC,     0,    51 },        // TLC port 51, LW output 51 - Flipper button RGB left B
-    { NC,     0,    52 },        // TLC port 52, LW output 52 - Flipper button RGB right R
-    { NC,     0,    53 },        // TLC port 53, LW output 53 - Flipper button RGB right G
-    { NC,     0,    54 },        // TLC port 54, LW output 54 - Flipper button RGB right B
-    { NC,     0,    55 },        // TLC port 55, LW output 55 - MagnaSave button RGB left R
-    { NC,     0,    56 },        // TLC port 56, LW output 56 - MagnaSave button RGB left G
-    { NC,     0,    57 },        // TLC port 57, LW output 57 - MagnaSave button RGB left B
-    { NC,     0,    58 },        // TLC port 58, LW output 58 - MagnaSave button RGB right R
-    { NC,     0,    59 },        // TLC port 59, LW output 59 - MagnaSave button RGB right G
-    { NC,     0,    60 }         // TLC port 60, LW output 60 - MagnaSave button RGB right B
+    { 32, TLC_PORT },        // TLC port 32, LW output 33 - Gear Motor/General purpose
+    { 33, TLC_PORT },        // TLC port 33, LW output 34 - Fan/General purpose
+    { 34, TLC_PORT },        // TLC port 34, LW output 35 - Beacon/General purpose
+    { 35, TLC_PORT },        // TLC port 35, LW output 36 - Undercab RGB R/General purpose
+    { 36, TLC_PORT },        // TLC port 36, LW output 37 - Undercab RGB G/General purpose
+    { 37, TLC_PORT },        // TLC port 37, LW output 38 - Undercab RGB B/General purpose
+    { 38, TLC_PORT },        // TLC port 38, LW output 39 - Bell/General purpose
+    { 39, TLC_PORT },        // TLC port 39, LW output 40 - Chime 1/General purpose
+    { 40, TLC_PORT },        // TLC port 40, LW output 41 - Chime 2/General purpose
+    { 41, TLC_PORT },        // TLC port 41, LW output 42 - Chime 3/General purpose
+    { 42, TLC_PORT },        // TLC port 42, LW output 43 - General purpose
+    { 43, TLC_PORT },        // TLC port 43, LW output 44 - General purpose
+    { 44, TLC_PORT },        // TLC port 44, LW output 45 - Button light 5
+    { 45, TLC_PORT },        // TLC port 45, LW output 46 - Button light 6
+    { 46, TLC_PORT },        // TLC port 46, LW output 47 - Button light 7
+    { 47, TLC_PORT },        // TLC port 47, LW output 48 - Button light 8
+    { 49, TLC_PORT },        // TLC port 49, LW output 49 - Flipper button RGB left R
+    { 50, TLC_PORT },        // TLC port 50, LW output 50 - Flipper button RGB left G
+    { 51, TLC_PORT },        // TLC port 51, LW output 51 - Flipper button RGB left B
+    { 52, TLC_PORT },        // TLC port 52, LW output 52 - Flipper button RGB right R
+    { 53, TLC_PORT },        // TLC port 53, LW output 53 - Flipper button RGB right G
+    { 54, TLC_PORT },        // TLC port 54, LW output 54 - Flipper button RGB right B
+    { 55, TLC_PORT },        // TLC port 55, LW output 55 - MagnaSave button RGB left R
+    { 56, TLC_PORT },        // TLC port 56, LW output 56 - MagnaSave button RGB left G
+    { 57, TLC_PORT },        // TLC port 57, LW output 57 - MagnaSave button RGB left B
+    { 58, TLC_PORT },        // TLC port 58, LW output 58 - MagnaSave button RGB right R
+    { 59, TLC_PORT },        // TLC port 59, LW output 59 - MagnaSave button RGB right G
+    { 60, TLC_PORT },        // TLC port 60, LW output 60 - MagnaSave button RGB right B
+    { 61, TLC_PORT },        // TLC port 61, LW output 61 - Extra RGB LED R
+    { 62, TLC_PORT },        // TLC port 62, LW output 62 - Extra RGB LED G
+    { 63, TLC_PORT },        // TLC port 63, LW output 63 - Extra RGB LED B
+    { 64, TLC_PORT }         // TLC port 64, LW output 64 - Extra single LED
     
 #else
 
@@ -838,16 +892,17 @@ struct {
     // in this set.  This leaves the following ports from the basic mode output
     // set available for other users: PTA13, PTD0, PTD2, PTD3, PTD5, PTE0.
     
-    { PTC8,  0 },                // pin J1-14, LW port 1
-    { PTC9,  0 },                // pin J1-16, LW port 2
-    { PTC0,  0 },                // pin J1-3,  LW port 3
-    { PTC3,  0 },                // pin J1-5,  LW port 4
-    { PTC4,  0 },                // pin J1-7,  LW port 5
-    { PTA2,  PORT_IS_PWM },      // pin J1-4,  LW port 6   (PWM capable - TPM 2.1 = channel 10)
-    { PTD4,  PORT_IS_PWM },      // pin J1-6,  LW port 7   (PWM capable - TPM 0.4 = channel 5)
-    { PTA12, PORT_IS_PWM },      // pin J1-8,  LW port 8   (PWM capable - TPM 1.0 = channel 7)
-    { PTA4,  PORT_IS_PWM },      // pin J1-10, LW port 9   (PWM capable - TPM 0.1 = channel 2)
-    { PTA5,  PORT_IS_PWM }       // pin J1-12, LW port 10  (PWM capable - TPM 0.2 = channel 3)
+    { PTC8,  DIG_GPIO },      // pin J1-14, LW port 1
+    { PTC9,  DIG_GPIO },      // pin J1-16, LW port 2
+    { PTC0,  DIG_GPIO },      // pin J1-3,  LW port 3
+    { PTC3,  DIG_GPIO },      // pin J1-5,  LW port 4
+    { PTC4,  DIG_GPIO },      // pin J1-7,  LW port 5
+    { PTC11, DIG_GPIO },      // pin J1-15, LW port 6
+    { PTA2,  PWM_GPIO },      // pin J1-4,  LW port 7   (PWM capable - TPM 2.1 = channel 10)
+    { PTD4,  PWM_GPIO },      // pin J1-6,  LW port 8   (PWM capable - TPM 0.4 = channel 5)
+    { PTA12, PWM_GPIO },      // pin J1-8,  LW port 9   (PWM capable - TPM 1.0 = channel 7)
+    { PTA4,  PWM_GPIO },      // pin J1-10, LW port 10  (PWM capable - TPM 0.1 = channel 2)
+    { PTA5,  PWM_GPIO }       // pin J1-12, LW port 11  (PWM capable - TPM 0.2 = channel 3)
 
     // TLC5940 ports start here!
     // First chip port 0 ->   LW port 12
