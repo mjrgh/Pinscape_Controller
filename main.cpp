@@ -830,16 +830,20 @@ struct
     uint8_t data;       // key state byte for USB reports
 } mediaState = { false, 0 };
 
-// read the button input state
-void readButtons(Config &cfg)
+// read the button input state; returns true if there are any button
+// state changes to report, false if not
+bool readButtons(Config &cfg)
 {
+    // no changes detected yet
+    bool changes = false;
+    
     // start with an empty list of USB key codes
     uint8_t modkeys = 0;
     uint8_t keys[7] = { 0, 0, 0, 0, 0, 0, 0 };
     int nkeys = 0;
     
     // clear the joystick buttons
-    jsButtons = 0;
+    uint32_t newjs = 0;
     
     // start with no media keys pressed
     uint8_t mediakeys = 0;
@@ -890,7 +894,7 @@ void readButtons(Config &cfg)
             if (bs->pressed)
             {
                 // OR in the joystick button bit, mod key bits, and media key bits
-                jsButtons |= bs->js;
+                newjs |= bs->js;
                 modkeys |= bs->keymod;
                 mediakeys |= bs->mediakey;
                 
@@ -900,6 +904,13 @@ void readButtons(Config &cfg)
             }
         }
     }
+
+    // check for joystick button changes
+    if (jsButtons != newjs)
+    {
+        changes = true;
+        jsButtons = newjs;
+    }
     
     // Check for changes to the keyboard keys
     if (kbState.data[0] != modkeys
@@ -908,6 +919,7 @@ void readButtons(Config &cfg)
     {
         // we have changes - set the change flag and store the new key data
         kbState.changed = true;
+        changes = true;
         kbState.data[0] = modkeys;
         if (nkeys <= 6) {
             // 6 or fewer simultaneous keys - report the key codes
@@ -926,7 +938,11 @@ void readButtons(Config &cfg)
     {
         mediaState.changed = true;
         mediaState.data = mediakeys;
+        changes = true;
     }
+    
+    // return the change indicator
+    return changes;
 }
 
 // ---------------------------------------------------------------------------
@@ -2802,7 +2818,7 @@ int main(void)
         }
 
         // update the buttons
-        readButtons(cfg);
+        bool buttonsChanged = readButtons(cfg);
 
         // If it's been long enough since our last USB status report,
         // send the new report.  We throttle the report rate because
@@ -2810,7 +2826,8 @@ int main(void)
         // VP only wants to sync with the real world in 10ms intervals,
         // so reporting more frequently creates I/O overhead without 
         // doing anything to improve the simulation.
-        if (cfg.joystickEnabled && reportTimer.read_ms() > 15)
+        if (cfg.joystickEnabled 
+            && (reportTimer.read_ms() > 15 || buttonsChanged))
         {
             // read the accelerometer
             int xa, ya;
