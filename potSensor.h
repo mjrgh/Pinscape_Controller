@@ -5,30 +5,29 @@
 
 #include "FastAnalogIn.h"
 
-// The potentiometer doesn't have pixels, but we still need an
-// integer range for normalizing our digitized voltage level values.
-// The number here is fairly arbitrary; the higher it is, the finer
-// the digitized steps.  A 40" 1080p HDTV has about 55 pixels per inch
-// on its physical display, so if the on-screen plunger is displayed
-// at roughly the true physical size, it's about 3" on screen or about
-// 165 pixels.  So the minimum quantization size here should be about
-// the same.  For the pot sensor, this is just a scaling factor, 
-// so higher values don't cost us anything (unlike the CCD, where the
-// read time is proportional to the number of pixels we sample).
-const int npix = 4096;
-
-class PlungerSensor
+class PlungerSensorPot: public PlungerSensor
 {
 public:
-    PlungerSensor() : pot(POT_PIN)
+    PlungerSensorPot(PinName ao) : pot(ao)
     {
     }
     
-    void init() 
+    virtual void init() 
     {
+        // The potentiometer doesn't have pixels, but we still need an
+        // integer range for normalizing our digitized voltage level values.
+        // The number here is fairly arbitrary; the higher it is, the finer
+        // the digitized steps.  A 40" 1080p HDTV has about 55 pixels per inch
+        // on its physical display, so if the on-screen plunger is displayed
+        // at roughly the true physical size, it's about 3" on screen or about
+        // 165 pixels.  So the minimum quantization size here should be about
+        // the same.  For the pot sensor, this is just a scaling factor, 
+        // so higher values don't cost us anything (unlike the CCD, where the
+        // read time is proportional to the number of pixels we sample).
+        npix = 4096;
     }
     
-    bool highResScan(int &pos)
+    virtual bool highResScan(int &pos)
     {
         // Take a few readings and use the average, to reduce the effect
         // of analog voltage fluctuations.  The voltage range on the ADC
@@ -43,20 +42,17 @@ public:
         return true;
     }
     
-    int lowResScan()
+    virtual bool lowResScan(int &pos)
     {
         // Use an average of several readings.  Note that even though this
         // is nominally a "low res" scan, we can still afford to take an
         // average.  The point of the low res interface is speed, and since
         // we only have one analog value to read, we can afford to take
         // several samples here even in the low res case.
-        return int((pot.read() + pot.read() + pot.read())/3.0 * npix);
+        pos = int((pot.read() + pot.read() + pot.read())/3.0 * npix);
+        return true;
     }
         
-    void sendExposureReport(USBJoystick &) 
-    { 
-    }
-    
 private:
     AnalogIn pot;
 };

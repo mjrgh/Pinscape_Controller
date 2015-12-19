@@ -7,9 +7,11 @@
 #define USBJOYSTICK_H
  
 #include "USBHID.h"
- 
-#define REPORT_ID_JOYSTICK  4
- 
+
+// keyboard interface report IDs 
+const uint8_t REPORT_ID_KB = 1;
+const uint8_t REPORT_ID_MEDIA = 2;
+
 /* Common usage */
 enum JOY_BUTTON {
      JOY_B0 = 0x0001,
@@ -90,15 +92,32 @@ class USBJoystick: public USBHID {
          * @param product_id Your product_id (default: 0x0002)
          * @param product_release Your product_release (default: 0x0001)
          */
-         USBJoystick(uint16_t vendor_id = 0x1234, uint16_t product_id = 0x0100, uint16_t product_release = 0x0001, int waitForConnect = true): 
-             USBHID(16, 64, vendor_id, product_id, product_release, false)
-             { 
-                 _init();
-                 connect(waitForConnect);
-             };
+         USBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release, 
+             int waitForConnect, bool enableJoystick, bool useKB)
+             : USBHID(16, 64, vendor_id, product_id, product_release, false)
+         { 
+             _init();
+             this->useKB = useKB;
+             this->enableJoystick = enableJoystick;
+             connect(waitForConnect);
+         };
          
          /**
-         * Write a state of the mouse
+          * Send a keyboard report.  The argument gives the key state, in the standard
+          * 6KRO USB keyboard report format: byte 0 is the modifier key bit mask, byte 1
+          * is reserved (must be 0), and bytes 2-6 are the currently pressed keys, as
+          * USB key codes.
+          */
+         bool kbUpdate(uint8_t data[8]);
+         
+         /**
+          * Send a media key update.  The argument gives the bit mask of media keys
+          * currently pressed.  See the HID report descriptor for the order of bits.
+          */
+         bool mediaUpdate(uint8_t data);
+         
+         /**
+         * Update the joystick status
          *
          * @param x x-axis position
          * @param y y-axis position
@@ -131,10 +150,10 @@ class USBJoystick: public USBHID {
          * @param numOutputs the number of configured output channels
          * @param unitNo the device unit number
          */
-         bool reportConfig(int numOutputs, int unitNo);
+         bool reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax);
  
          /**
-         * Write a state of the mouse
+         * Send a joystick report to the host
          *
          * @returns true if there is no error, false otherwise
          */
@@ -163,20 +182,25 @@ class USBJoystick: public USBHID {
          * @returns true if there is no error, false otherwise
          */
          bool buttons(uint32_t buttons);
-         
-         /*
-         * To define the report descriptor. Warning: this method has to store the length of the report descriptor in reportLength.
-         *
-         * @returns pointer to the report descriptor
-         */
-         virtual uint8_t * reportDesc();
+
+         /* USB descriptor overrides */
+         virtual uint8_t * configurationDesc();
+         virtual uint8_t * reportDescN(int n);
  
          /* USB descriptor string overrides */
          virtual uint8_t *stringImanufacturerDesc();
          virtual uint8_t *stringIserialDesc();
          virtual uint8_t *stringIproductDesc();
+         
+         /* callback overrides */
+         virtual bool USBCallback_setConfiguration(uint8_t configuration);
+         virtual bool USBCallback_setInterface(uint16_t interface, uint8_t alternate)
+            { return interface == 0 || interface == 1; }
+         virtual bool EP4_OUT_callback();
  
      private:
+         bool enableJoystick;
+         bool useKB;
          int16_t _x;                       
          int16_t _y;     
          int16_t _z;

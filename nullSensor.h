@@ -3,16 +3,19 @@
 // This file defines a class that provides the plunger sensor interface
 // that the main program expects, but with no physical sensor underneath.
 
-const int npix = JOYMAX;
+#ifndef NULLSENSOR_H
+#define NULLSENSOR_H
 
-class PlungerSensor
+#include "plunger.h"
+
+class PlungerSensorNull: public PlungerSensor
 {
 public:
-    PlungerSensor() { }
+    PlungerSensorNull() { }
     
-    void init() { }
-    int lowResScan() { return 0; }
-    bool highResScan(int &pos) { return false; }
-    void sendExposureReport(USBJoystick &) { }
+    virtual void init() { }
+    virtual bool lowResScan(int &pos) { return false; }
+    virtual bool highResScan(int &pos) { return false; }
 };
 
+#endif /* NULLSENSOR_H */

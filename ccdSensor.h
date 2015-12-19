@@ -1,24 +1,40 @@
 // CCD plunger sensor
 //
-// This file implements our generic plunger sensor interface for the 
-// TAOS TSL1410R CCD array sensor.
+// This class implements our generic plunger sensor interface for the 
+// TAOS TSL1410R and TSL1412R linear sensor arrays.  Physically, these
+// sensors are installed with their image window running parallel to
+// the plunger rod, spanning the travel range of the plunger tip.
+// A light source is positioned on the opposite side of the rod, so
+// that the rod casts a shadow on the sensor.  We sense the position
+// by looking for the edge of the shadow.
+//
+// These sensors can take an image quickly, but it takes a significant
+// amount of time to transfer the image data from the sensor to the 
+// microcontroller, since each pixel's analog voltage level must be
+// sampled serially.  It takes about 20us to sample a pixel accurately.
+// The TSL1410R has 1280 pixels, and the 1412R has 1536.  Sampling 
+// every pixel would thus take about 25ms or 30ms respectively.
+// This is too slow for a responsive feel in the UI, and much too
+// slow to track the plunger release motion in real time.  To improve
+// on the read speed, we only sample a subset of pixels for each
+// reading - for higher speed at the expense of spatial resolution.
+// The sensor's native resolution is much higher than we need, so
+// this is a perfectly equitable trade.
 
+#include "plunger.h"
 
-
-// Number of pixels we read from the CCD on each frame.  Use the
-// sample size from config.h.
-const int npix = CCD_NPIXELS_SAMPLED;
 
 // PlungerSensor interface implementation for the CCD
-class PlungerSensor
+class PlungerSensorCCD: public PlungerSensor
 {
 public:
-    PlungerSensor() : ccd(CCD_SO_PIN)
+    PlungerSensorCCD(int nPix, PinName si, PinName clock, PinName ao1, PinName ao2) 
+        : ccd(nPix, si, clock, ao1, ao2)
     {
     }
     
     // initialize
-    void init()
+    virtual void init()
     {
         // flush any random power-on values from the CCD's integration
         // capacitors, and start the first integration cycle
@@ -26,9 +42,8 @@ public:
     }
     
     // Perform a low-res scan of the sensor.  
-    int lowResScan()
+    virtual bool lowResScan(int &pos)
     {
-
         // read the pixels at low resolution
         const int nlpix = 32;
         uint16_t pix[nlpix];
@@ -53,17 +68,17 @@ public:
             {
                 // got it - normalize it to normal 'npix' resolution and
                 // return the result
-                return n*npix/nlpix;
+                pos = n*npix/nlpix;
+                return true;
             }
         }
         
-        // didn't find a shadow - assume the whole array is in shadow (so
-        // the edge is at the zero pixel point)
-        return 0;
+        // didn't find a shadow - return failure
+        return false;
     }
 
     // Perform a high-res scan of the sensor.
-    bool highResScan(int &pos)
+    virtual bool highResScan(int &pos)
     {
         // read the array
         ccd.read(pix, npix);
@@ -127,7 +142,7 @@ public:
     }
     
     // send an exposure report to the joystick interface
-    void sendExposureReport(USBJoystick &js)
+    virtual void sendExposureReport(USBJoystick &js)
     {
         // send reports for all pixels
         int idx = 0;
@@ -147,10 +162,44 @@ public:
         ccd.read(pix, npix);
     }
     
-private:
+protected:
     // pixel buffer
-    uint16_t pix[npix];
+    uint16_t *pix;
     
     // the low-level interface to the CCD hardware
-    TSL1410R<CCD_SI_PIN, CCD_CLOCK_PIN> ccd;
+    TSL1410R ccd;
 };
+
+
+// TSL1410R sensor 
+class PlungerSensorTSL1410R: public PlungerSensorCCD
+{
+public:
+    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao1, PinName ao2) 
+        : PlungerSensorCCD(1280, si, clock, ao1, ao2)
+    {
+        // This sensor is 1x1280 pixels at 400dpi.  Sample every 8th
+        // pixel -> 160 pixels at 50dpi == 0.5mm spatial resolution.
+        npix = 160;
+        pix = pixbuf;
+    }
+    
+    uint16_t pixbuf[160];
+};
+
+// TSL1412R
+class PlungerSensorTSL1412R: public PlungerSensorCCD
+{
+public:
+    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao1, PinName ao2)
+        : PlungerSensorCCD(1536, si, clock, ao1, ao2)
+    {
+        // This sensor is 1x1536 pixels at 400dpi.  Sample every 8th
+        // pixel -> 192 pixels at 50dpi == 0.5mm spatial resolution.
+        npix = 192;
+        pix = pixbuf;
+    }
+    
+    uint16_t pixbuf[192];
+};
+

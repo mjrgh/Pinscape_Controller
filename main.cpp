@@ -1,4 +1,4 @@
-/* Copyright 2014 M J Roberts, MIT License
+/* Copyright 2014, 2015 M J Roberts, MIT License
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 * and associated documentation files (the "Software"), to deal in the Software without
@@ -17,64 +17,43 @@
 */
 
 //
-// Pinscape Controller
+// The Pinscape Controller
+// A comprehensive input/output controller for virtual pinball machines
 //
-// "Pinscape" is the name of my custom-built virtual pinball cabinet, so I call this
-// software the Pinscape Controller.  I wrote it to handle several tasks that I needed
-// for my cabinet.  It runs on a Freescale KL25Z microcontroller, which is a small and 
-// inexpensive device that attaches to the cabinet PC via a USB cable, and can attach
-// via custom wiring to sensors, buttons, and other devices in the cabinet.
+// This project implements an I/O controller designed for use in custom-built virtual
+// pinball cabinets.  It can handle nearly all of the functions involved in connecting 
+// pinball simulation software on a Windows PC with devices in the cabinet, including
+// input devices such as buttons and sensors, and output devices that generate visual
+// or mechanical feedback during play, like lights, solenoids, and shaker motors.
+// You can use one, some, or all of the functions, in any combination.  You can select
+// options and configure the controller using a setup tool that runs on Windows.
 //
-// I designed the software and hardware in this project especially for my own
-// cabinet, but it uses standard interfaces in Windows and Visual Pinball, so it should
-// work in any VP-based cabinet, as long as you're using the usual VP software suite.  
-// I've tried to document the hardware in enough detail for anyone else to duplicate 
-// the entire project, and the full software is open source.
+// The main functions are:
 //
-// The Freescale board appears to the host PC as a standard USB joystick.  This works 
-// with the built-in Windows joystick device drivers, so there's no need to install any
-// new drivers or other software on the PC.  Windows should recognize the Freescale
-// as a joystick when you plug it into the USB port, and Windows shouldn't ask you to 
-// install any drivers.  If you bring up the Windows control panel for USB Game 
-// Controllers, this device will appear as "Pinscape Controller".  *Don't* do any 
-// calibration with the Windows control panel or third-part calibration tools.  The 
-// software calibrates the accelerometer portion automatically, and has its own special
-// calibration procedure for the plunger sensor, if you're using that (see below).
-//
-// This software provides a whole bunch of separate features.  You can use any of these 
-// features individually or all together.  If you're not using a particular feature, you
-// can simply omit the extra wiring and/or hardware for that feature.  You can use
-// the nudging feature by itself without any extra hardware attached, since the
-// accelerometer is built in to the KL25Z board.
-//
-//  - Nudge sensing via the KL25Z's on-board accelerometer.  Nudging the cabinet
+//  - Nudge sensing, via the KL25Z's on-board accelerometer.  Nudging the cabinet
 //    causes small accelerations that the accelerometer can detect; these are sent to
-//    Visual Pinball via the joystick interface so that VP can simulate the effect
-//    of the real physical nudges on its simulated ball.  VP has native handling for
-//    this type of input, so all you have to do is set some preferences in VP to tell 
-//    it that an accelerometer is attached.
+//    Visual Pinball (or other pinball emulator software) on the PC via the joystick
+//    interface, using the X and Y axes.  VP and most other PC pinball emulators have 
+//    native handling for this type of nudge input, so all you have to do is set some 
+//    preferences in VP to let it know that an accelerometer is attached.
 //
-//  - Plunger position sensing via an attached TAOS TSL 1410R CCD linear array sensor.  
-//    To use this feature, you need to buy the TAOS device (it's not built in to the
-//    KL25Z, obviously), wire it to the KL25Z (5 wire connections between the two
-//    devices are required), and mount the TAOS sensor in your cabinet so that it's
-//    positioned properly to capture images of the physical plunger shooter rod.
+//  - Plunger position sensing, via a number of sensor options.  To use this feature,
+//    you need to choose a sensor and set it up, connect the sensor electrically to 
+//    the KL25Z, and configure the Pinscape software on the KL25Z to let it know how 
+//    the sensor is hooked up.  The Pinscape software monitors the sensor and sends
+//    readings to Visual Pinball via the joystick Z axis.  VP and other PC software
+//    has native support for this type of input as well; as with the nudge setup,
+//    you just have to set some options in VP to activate the plunger.
 //
-//    The physical mounting and wiring details are desribed in the project 
-//    documentation.  
+//    The Pinscape software supports optical sensors (the TAOS TSL1410R and TSL1412R 
+//    linear sensor arrays) as well as slide potentiometers.  The specific equipment
+//    that's supported, along with physical mounting and wiring details, can be found
+//    in the Build Guide.
 //
-//    If the CCD is attached, the software constantly captures images from the CCD
-//    and analyzes them to determine how far back the plunger is pulled.  It reports
-//    this to Visual Pinball via the joystick interface.  This allows VP to make the
-//    simulated on-screen plunger track the motion of the physical plunger in real
-//    time.  As with the nudge data, VP has native handling for the plunger input, 
-//    so you just need to set the VP preferences to tell it that an analog plunger 
-//    device is attached.  One caveat, though: although VP itself has built-in 
-//    support for an analog plunger, not all existing tables take advantage of it.  
-//    Many existing tables have their own custom plunger scripting that doesn't
-//    cooperate with the VP plunger input.  All tables *can* be made to work with
-//    the plunger, and in most cases it only requires some simple script editing,
-//    but in some cases it requires some more extensive surgery.
+//    Note that while VP has its own built-in support for plunger devices like this
+//    one, many existing VP tables will ignore it, because they use custom scripting 
+//    that's only designed for keyboard plunger input.  The Build Guide has advice on
+//    adjusting tables to add plunger support when necessary.
 //
 //    For best results, the plunger sensor should be calibrated.  The calibration
 //    is stored in non-volatile memory on board the KL25Z, so it's only necessary
@@ -103,11 +82,7 @@
 //    for input - you just have to assign a VP function to each button using VP's
 //    keyboard options dialog.  To wire a button physically, connect one terminal of
 //    the button switch to the KL25Z ground, and connect the other terminal to the
-//    the GPIO port you wish to assign to the button.  See the buttonMap[] array
-//    below for the available GPIO ports and their assigned joystick button numbers.
-//    If you're not using a GPIO port, you can just leave it unconnected - the digital
-//    inputs have built-in pull-up resistors, so an unconnected port is the same as
-//    an open switch (an "off" state for the button).
+//    the GPIO port you wish to assign to the button.
 //
 //  - LedWiz emulation.  The KL25Z can appear to the PC as an LedWiz device, and will
 //    accept and process LedWiz commands from the host.  The software can turn digital
@@ -159,6 +134,8 @@
 //    higher numbered ports for the less common devices that older software can't
 //    use anyway, you'll get maximum functionality out of software new and old.
 //
+//
+//
 // STATUS LIGHTS:  The on-board LED on the KL25Z flashes to indicate the current 
 // device status.  The flash patterns are:
 //
@@ -169,10 +146,6 @@
 //
 //    short red flash = the host computer is in sleep/suspend mode
 //
-//    long red/green = the LedWiz unti number has been changed, so a reset
-//        is needed.  You can simply unplug the device and plug it back in,
-//        or presss and hold the reset button on the device for a few seconds.
-//
 //    long yellow/green = everything's working, but the plunger hasn't
 //        been calibrated; follow the calibration procedure described above.
 //        This flash mode won't appear if the CCD has been disabled.  Note
@@ -181,79 +154,12 @@
 //        in config.h or use the  Windows config tool to disable the CCD 
 //        software features.
 //
-//    alternating blue/green = everything's working
+//    alternating blue/green = everything's working, and the plunger has
+//        been calibrated
 //
-// Software configuration: you can some change option settings by sending special
-// USB commands from the PC.  I've provided a Windows program for this purpose;
-// refer to the documentation for details.  For reference, here's the format
-// of the USB command for option changes:
 //
-//    length of report = 8 bytes
-//    byte 0 = 65 (0x41)
-//    byte 1 = 1  (0x01)
-//    byte 2 = new LedWiz unit number, 0x01 to 0x0f
-//    byte 3 = feature enable bit mask:
-//             0x01 = enable CCD (default = on)
-//
-// Plunger calibration mode: the host can activate plunger calibration mode
-// by sending this packet.  This has the same effect as pressing and holding
-// the plunger calibration button for two seconds, to allow activating this
-// mode without attaching a physical button.
-//
-//    length = 8 bytes
-//    byte 0 = 65 (0x41)
-//    byte 1 = 2  (0x02)
-//
-// Exposure reports: the host can request a report of the full set of pixel
-// values for the next frame by sending this special packet:
-//
-//    length = 8 bytes
-//    byte 0 = 65 (0x41)
-//    byte 1 = 3  (0x03)
-//
-// We'll respond with a series of special reports giving the exposure status.
-// Each report has the following structure:
-//
-//    bytes 0:1 = 11-bit index, with high 5 bits set to 10000.  For 
-//                example, 0x04 0x80 indicates index 4.  This is the 
-//                starting pixel number in the report.  The first report 
-//                will be 0x00 0x80 to indicate pixel #0.  
-//    bytes 2:3 = 16-bit unsigned int brightness level of pixel at index
-//    bytes 4:5 = brightness of pixel at index+1
-//    etc for the rest of the packet
-//
-// This still has the form of a joystick packet at the USB level, but
-// can be differentiated by the host via the status bits.  It would have
-// been cleaner to use a different Report ID at the USB level, but this
-// would have necessitated a different container structure in the report
-// descriptor, which would have broken LedWiz compatibility.  Given that
-// constraint, we have to re-use the joystick report type, making for
-// this somewhat kludgey approach.
-//
-// Configuration query: the host can request a full report of our hardware
-// configuration with this message.
-//
-//    length = 8 bytes
-//    byte 0 = 65 (0x41)
-//    byte 1 = 4  (0x04)
-//
-// We'll response with one report containing the configuration status:
-//
-//    bytes 0:1 = 0x8800.  This has the bit pattern 10001 in the high
-//                5 bits, which distinguishes it from regular joystick
-//                reports and from exposure status reports.
-//    bytes 2:3 = number of outputs
-//    remaining bytes = reserved for future use; set to 0 in current version
-//
-// Turn off all outputs: this message tells the device to turn off all
-// outputs and restore power-up LedWiz defaults.  This sets outputs #1-32
-// to profile 48 (full brightness) and switch state Off, sets all extended
-// outputs (#33 and above) to brightness 0, and sets the LedWiz flash rate
-// to 2.
-//
-//    length = 8 bytes
-//    byte 0 = 65 (0x41)
-//    byte 1 = 5  (0x05)
+// USB PROTOCOL:  please refer to USBProtocol.h for details on the USB
+// message protocol.
 
 
 #include "mbed.h"
@@ -265,6 +171,11 @@
 #include "crc32.h"
 #include "TLC5940.h"
 #include "74HC595.h"
+#include "nvm.h"
+#include "plunger.h"
+#include "ccdSensor.h"
+#include "potSensor.h"
+#include "nullSensor.h"
 
 #define DECL_EXTERNS
 #include "config.h"
@@ -287,18 +198,7 @@ inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
 // 
 // USB product version number
 //
-const uint16_t USB_VERSION_NO = 0x0007;
-
-
-//
-// Build the full USB product ID.  If we're using the LedWiz compatible
-// vendor ID, the full product ID is the combination of the LedWiz base
-// product ID (0x00F0) and the 0-based unit number (0-15).  If we're not
-// trying to be LedWiz compatible, we just use the exact product ID
-// specified in config.h.
-#define MAKE_USB_PRODUCT_ID(vid, pidbase, unit) \
-    ((vid) == 0xFAFA && (pidbase) == 0x00F0 ? (pidbase) | (unit) : (pidbase))
-
+const uint16_t USB_VERSION_NO = 0x0008;
 
 // --------------------------------------------------------------------------
 //
@@ -306,52 +206,6 @@ const uint16_t USB_VERSION_NO = 0x0007;
 //
 #define JOYMAX 4096
 
-// --------------------------------------------------------------------------
-//
-// Set up mappings for the joystick X and Y reports based on the mounting
-// orientation of the KL25Z in the cabinet.  Visual Pinball and other 
-// pinball software effectively use video coordinates to define the axes:
-// positive X is to the right of the table, negative Y to the left, positive
-// Y toward the front of the table, negative Y toward the back.  The KL25Z
-// accelerometer is mounted on the board with positive Y toward the USB
-// ports and positive X toward the right side of the board with the USB
-// ports pointing up.  It's a simple matter to remap the KL25Z coordinate
-// system to match VP's coordinate system for mounting orientations at
-// 90-degree increments...
-//
-#if defined(ORIENTATION_PORTS_AT_FRONT)
-# define JOY_X(x, y)   (y)
-# define JOY_Y(x, y)   (x)
-#elif defined(ORIENTATION_PORTS_AT_LEFT)
-# define JOY_X(x, y)   (-(x))
-# define JOY_Y(x, y)   (y)
-#elif defined(ORIENTATION_PORTS_AT_RIGHT)
-# define JOY_X(x, y)   (x)
-# define JOY_Y(x, y)   (-(y))
-#elif defined(ORIENTATION_PORTS_AT_REAR)
-# define JOY_X(x, y)   (-(y))
-# define JOY_Y(x, y)   (-(x))
-#else
-# error Please define one of the ORIENTATION_PORTS_AT_xxx macros to establish the accelerometer orientation in your cabinet
-#endif
-
-
-
-// --------------------------------------------------------------------------
-//
-// Define a symbol to tell us whether any sort of plunger sensor code
-// is enabled in this build.  Note that this doesn't tell us that a
-// plunger device is actually attached or *currently* enabled; it just
-// tells us whether or not the code for plunger sensing is enabled in 
-// the software build.  This lets us leave out some unnecessary code
-// on installations where no physical plunger is attached.
-//
-const int PLUNGER_CODE_ENABLED =
-#if defined(ENABLE_CCD_SENSOR) || defined(ENABLE_POT_SENSOR)
-    1;
-#else
-    0;
-#endif
 
 // ---------------------------------------------------------------------------
 //
@@ -365,6 +219,47 @@ const int PLUNGER_CODE_ENABLED =
 // SPI capability.)
 //
 DigitalOut ledR(LED1), ledG(LED2), ledB(LED3);
+
+
+// ---------------------------------------------------------------------------
+//
+// Wire protocol value translations.  These translate byte values from
+// the USB protocol to local native format.
+//
+
+// unsigned 16-bit integer 
+inline uint16_t wireUI16(const uint8_t *b)
+{
+    return b[0] | ((uint16_t)b[1] << 8);
+}
+
+inline int16_t wireI16(const uint8_t *b)
+{
+    return (int16_t)wireUI16(b);
+}
+
+inline uint32_t wireUI32(const uint8_t *b)
+{
+    return b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+
+inline int32_t wireI32(const uint8_t *b)
+{
+    return (int32_t)wireUI32(b);
+}
+
+inline PinName wirePinName(int c)
+{
+    static const PinName p[] =  {
+        NC,    PTA1,  PTA2,  PTA4,  PTA5,  PTA12, PTA13, PTA16, PTA17, PTB0,   // 0-9
+        PTB1,  PTB2,  PTB3,  PTB8,  PTB9,  PTB10, PTB11, PTC0,  PTC1,  PTC2,   // 10-19
+        PTC3,  PTC4,  PTC5,  PTC6,  PTC7,  PTC8,  PTC9,  PTC10, PTC11, PTC12,  // 20-29
+        PTC13, PTC16, PTC17, PTD0,  PTD1,  PTD2,  PTD3,  PTD4,  PTD5,  PTD6,   // 30-39
+        PTD7,  PTE0,  PTE1,  PTE2,  PTE3,  PTE4,  PTE5,  PTE20, PTE21, PTE22,  // 40-49 
+        PTE23, PTE29, PTE30, PTE31                                             // 50-53
+    };
+    return (c < countof(p) ? p[c] : NC);
+}
 
 
 // ---------------------------------------------------------------------------
@@ -407,18 +302,15 @@ public:
     virtual void set(float val) = 0;
 };
 
-// LwOut class for unmapped ports.  The LedWiz protocol is hardwired
-// for 32 ports, but we might not want to assign all 32 software ports
-// to physical output pins - the KL25Z has a limited number of GPIO
-// ports, so we might not have enough available GPIOs to fill out the
-// full LedWiz complement after assigning GPIOs for other functions.
-// This class is used to populate the LedWiz mapping array for ports
-// that aren't connected to physical outputs; it simply ignores value 
-// changes.
-class LwUnusedOut: public LwOut
+// LwOut class for virtual ports.  This type of port is visible to
+// the host software, but isn't connected to any physical output.
+// This can be used for special software-only ports like the ZB
+// Launch Ball output, or simply for placeholders in the LedWiz port
+// numbering.
+class LwVirtualOut: public LwOut
 {
 public:
-    LwUnusedOut() { }
+    LwVirtualOut() { }
     virtual void set(float val) { }
 };
 
@@ -436,13 +328,19 @@ private:
 };
 
 
-#if TLC5940_NCHIPS
 //
-// The TLC5940 interface object.  Set this up with the port assignments
-// set in config.h.
+// The TLC5940 interface object.  We'll set this up with the port 
+// assignments set in config.h.
 //
-TLC5940 tlc5940(TLC5940_SCLK, TLC5940_SIN, TLC5940_GSCLK, TLC5940_BLANK,
-    TLC5940_XLAT, TLC5940_NCHIPS);
+TLC5940 *tlc5940 = 0;
+void init_tlc5940(Config &cfg)
+{
+    if (cfg.tlc5940.nchips != 0)
+    {
+        tlc5940 = new TLC5940(cfg.tlc5940.sclk, cfg.tlc5940.sin, cfg.tlc5940.gsclk,
+            cfg.tlc5940.blank, cfg.tlc5940.xlat, cfg.tlc5940.nchips);
+    }
+}
 
 // LwOut class for TLC5940 outputs.  These are fully PWM capable.
 // The 'idx' value in the constructor is the output index in the
@@ -456,35 +354,27 @@ public:
     virtual void set(float val)
     {
         if (val != prv)
-           tlc5940.set(idx, (int)((prv = val) * 4095));
+           tlc5940->set(idx, (int)((prv = val) * 4095));
     }
     int idx;
     float prv;
 };
 
-#else
-// No TLC5940 chips are attached, so we shouldn't encounter any ports
-// in the map marked for TLC5940 outputs.  If we do, treat them as unused.
-class Lw5940Out: public LwUnusedOut
-{
-public:
-    Lw5940Out(int idx) { }
-};
 
-// dummy tlc5940 interface
-class Dummy5940
-{
-public:
-    void start() { }
-};
-Dummy5940 tlc5940;
-
-#endif // TLC5940_NCHIPS
-
-#if HC595_NCHIPS
 // 74HC595 interface object.  Set this up with the port assignments in
 // config.h.
-HC595 hc595(HC595_NCHIPS, HC595_SIN, HC595_SCLK, HC595_LATCH, HC595_ENA);
+HC595 *hc595 = 0;
+
+// initialize the 74HC595 interface
+void init_hc595(Config &cfg)
+{
+    if (cfg.hc595.nchips != 0)
+    {
+        hc595 = new HC595(cfg.hc595.nchips, cfg.hc595.sin, cfg.hc595.sclk, cfg.hc595.latch, cfg.hc595.ena);
+        hc595->init();
+        hc595->update();
+    }
+}
 
 // LwOut class for 74HC595 outputs.  These are simple digial outs.
 // The 'idx' value in the constructor is the output index in the
@@ -498,31 +388,12 @@ public:
     virtual void set(float val)
     {
         if (val != prv)
-           hc595.set(idx, (prv = val) == 0.0 ? 0 : 1);
+           hc595->set(idx, (prv = val) == 0.0 ? 0 : 1);
     }
     int idx;
     float prv;
 };
 
-#else // HC595_NCHIPS
-// No 74HC595 chips are attached, so we shouldn't encounter any ports
-// in the map marked for these outputs.  If we do, treat them as unused.
-class Lw595Out: public LwUnusedOut
-{
-public:
-    Lw595Out(int idx) { }
-};
-
-// dummy placeholder class
-class DummyHC595 
-{
-public:
-    void init() { }
-    void update() { }
-};
-DummyHC595 hc595;
-
-#endif // HC595_NCHIPS
 
 // 
 // Default LedWiz mode - using on-board GPIO ports.  In this mode, we
@@ -562,13 +433,22 @@ public:
 
 // Array of output physical pin assignments.  This array is indexed
 // by LedWiz logical port number - lwPin[n] is the maping for LedWiz
-// port n (0-based).  If we're using GPIO ports to implement outputs,
-// we initialize the array at start-up to map each logical port to the 
-// physical GPIO pin for the port specified in the ledWizPortMap[] 
-// array in config.h.  If we're using TLC5940 chips for the outputs,
-// we map each logical port to the corresponding TLC5940 output.
+// port n (0-based).  
+//
+// Each pin is handled by an interface object for the physical output 
+// type for the port, as set in the configuration.  The interface 
+// objects handle the specifics of addressing the different hardware
+// types (GPIO PWM ports, GPIO digital ports, TLC5940 ports, and
+// 74HC595 ports).
 static int numOutputs;
 static LwOut **lwPin;
+
+// Number of LedWiz emulation outputs.  This is the number of ports
+// accessible through the standard (non-extended) LedWiz protocol
+// messages.  The protocol has a fixed set of 32 outputs, but we
+// might have fewer actual outputs.  This is therefore set to the
+// lower of 32 or the actual number of outputs.
+static int numLwOutputs;
 
 // Current absolute brightness level for an output.  This is a float
 // value from 0.0 for fully off to 1.0 for fully on.  This is the final
@@ -579,90 +459,67 @@ static LwOut **lwPin;
 static float *outLevel;
 
 // initialize the output pin array
-void initLwOut()
+void initLwOut(Config &cfg)
 {
-    // Figure out how many outputs we have.  We always have at least
-    // 32 outputs, since that's the number fixed by the original LedWiz
-    // protocol.  If we're using TLC5940 chips, each chip provides 16
-    // outputs.  Likewise, each 74HC595 provides 8 outputs.
-    
-    // start with 16 ports per TLC5940 and 8 per 74HC595
-    numOutputs = TLC5940_NCHIPS*16 + HC595_NCHIPS*8;
-    
-    // add outputs explicitly assigned to GPIO pins or not connected
+    // Count the outputs.  The first disabled output determines the
+    // total number of ports.
+    numOutputs = MAX_OUT_PORTS;
     int i;
-    for (i = 0 ; i < countof(ledWizPortMap) ; ++i)
+    for (i = 0 ; i < MAX_OUT_PORTS ; ++i)
     {
-        switch (ledWizPortMap[i].typ)
+        if (cfg.outPort[i].typ == PortTypeDisabled)
         {
-        case DIG_GPIO:
-        case PWM_GPIO:
-        case NO_PORT:
-            // count an explicitly GPIO port
-            ++numOutputs;
-            break;
-            
-        default:
-            // DON'T count TLC5940 or 74HC595 ports, as we've already
-            // counted all of these above
+            numOutputs = i;
             break;
         }
     }
     
-    // always set up at least 32 outputs, so that we don't have to
-    // check bounds on commands from the basic LedWiz protocol
-    if (numOutputs < 32)
-        numOutputs = 32;
-        
+    // the real LedWiz protocol can access at most 32 ports, or the
+    // actual number of outputs, whichever is lower
+    numLwOutputs = (numOutputs < 32 ? numOutputs : 32);
+    
     // allocate the pin array
     lwPin = new LwOut*[numOutputs];    
     
-    // allocate the current brightness array
-    outLevel = new float[numOutputs];
+    // Allocate the current brightness array.
+    outLevel = new float[numOutputs < 32 ? 32 : numOutputs];
     
-    // allocate a temporary array to keep track of which physical 
-    // TLC5940 ports we've assigned so far
-    char *tlcasi = new char[TLC5940_NCHIPS*16+1];
-    memset(tlcasi, 0, TLC5940_NCHIPS*16);
-
-    // likewise for the 74HC595 ports
-    char *hcasi = new char[HC595_NCHIPS*8+1];
-    memset(hcasi, 0, HC595_NCHIPS*8);
-
-    // assign all pins from the explicit port map in config.h
-    for (i = 0 ; i < countof(ledWizPortMap) ; ++i)
+    // create the pin interface object for each port
+    for (i = 0 ; i < numOutputs ; ++i)
     {
-        int pin = ledWizPortMap[i].pin;
-        LWPortType typ = ledWizPortMap[i].typ;
-        int flags = ledWizPortMap[i].flags;
-        int activeLow = flags & PORT_ACTIVE_LOW;
+        // get this item's values
+        int typ = cfg.outPort[i].typ;
+        int pin = cfg.outPort[i].pin;
+        int flags = cfg.outPort[i].flags;
+        int activeLow = flags & PortFlagActiveLow;
+
+        // create the pin interface object according to the port type        
         switch (typ)
         {
-        case DIG_GPIO:
-            lwPin[i] = new LwDigOut((PinName)pin);
-            break;
-        
-        case PWM_GPIO:
+        case PortTypeGPIOPWM:
             // PWM GPIO port
-            lwPin[i] = new LwPwmOut((PinName)pin);
+            lwPin[i] = new LwPwmOut(wirePinName(pin));
             break;
         
-        case TLC_PORT:
-            // TLC5940 port (note that the nominal pin in the map is 1-based, so we
-            // have to decrement it to get the real pin index)
-            lwPin[i] = new Lw5940Out(pin-1);
-            tlcasi[pin-1] = 1;
+        case PortTypeGPIODig:
+            // Digital GPIO port
+            lwPin[i] = new LwDigOut(wirePinName(pin));
             break;
         
-        case HC595_PORT:
-            // 74HC595 port (the pin in the map is 1-based, so decrement it to get the 
-            // real pin index)
-            lwPin[i] = new Lw595Out(pin-1);
-            hcasi[pin-1] = 1;
+        case PortTypeTLC5940:
+            // TLC5940 port
+            lwPin[i] = new Lw5940Out(pin);
             break;
-            
+        
+        case PortType74HC595:
+            // 74HC595 port
+            lwPin[i] = new Lw595Out(pin);
+            break;
+
+        case PortTypeVirtual:
         default:
-            lwPin[i] = new LwUnusedOut();
+            // virtual or unknown
+            lwPin[i] = new LwVirtualOut();
             break;
         }
         
@@ -673,41 +530,6 @@ void initLwOut()
         // turn it off initially      
         lwPin[i]->set(0);
     }
-    
-    // If we haven't assigned all of the LedWiz ports to physical pins,
-    // fill out the unassigned LedWiz ports with any unassigned TLC5940
-    // pins, then with any unassigned 74HC595 ports.
-    int tlcnxt, hcnxt;
-    for (tlcnxt = 0 ; tlcnxt < TLC5940_NCHIPS*16 && tlcasi[tlcnxt] ; ++tlcnxt) ;
-    for (hcnxt = 0 ; hcnxt < HC595_NCHIPS*8 && hcasi[hcnxt] ; ++hcnxt) ;
-    for ( ; i < numOutputs ; ++i)
-    {
-        // If we have any more unassigned TLC5940 outputs, assign this LedWiz
-        // port to the next available TLC5940 output, or the next 74HC595 output
-        // if we're out of TLC5940 outputs.  Leave it unassigned if there are
-        // no more unassigned ports of any type.
-        if (tlcnxt < TLC5940_NCHIPS*16)
-        {
-            // assign this available TLC5940 pin, and find the next unused one
-            lwPin[i] = new Lw5940Out(tlcnxt);
-            for (++tlcnxt ; tlcnxt < TLC5940_NCHIPS*16 && tlcasi[tlcnxt] ; ++tlcnxt) ;
-        }
-        else if (hcnxt < HC595_NCHIPS*8)
-        {
-            // assign this available 74HC595 pin, and find the next unused one
-            lwPin[i] = new Lw595Out(hcnxt);
-            for (++hcnxt ; hcnxt < HC595_NCHIPS*8 && hcasi[hcnxt] ; ++hcnxt) ;
-        }
-        else
-        {
-            // no more ports available - set up this port as unconnected
-            lwPin[i] = new LwUnusedOut();
-        }
-    }
-    
-    // done with the temporary TLC5940 and 74HC595 port assignment lists
-    delete [] tlcasi;
-    delete [] hcasi;
 }
 
 // LedWiz output states.
@@ -855,7 +677,7 @@ static void wizPulse()
     
     // if we have any flashing lights, update them
     int ena = false;
-    for (int i = 0 ; i < 32 ; ++i)
+    for (int i = 0 ; i < numLwOutputs ; ++i)
     {
         if (wizOn[i])
         {
@@ -884,7 +706,7 @@ static void updateWizOuts()
 {
     // update each output
     int pulse = false;
-    for (int i = 0 ; i < 32 ; ++i)
+    for (int i = 0 ; i < numLwOutputs ; ++i)
     {
         pulse |= (wizVal[i] >= 129 && wizVal[i] <= 132);
         lwPin[i]->set(wizState(i));
@@ -896,7 +718,8 @@ static void updateWizOuts()
         wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
         
     // flush changes to 74HC595 chips, if attached
-    hc595.update();
+    if (hc595 != 0)
+        hc595->update();
 }
         
 // ---------------------------------------------------------------------------
@@ -904,12 +727,14 @@ static void updateWizOuts()
 // Button input
 //
 
-// button input map array
-DigitalIn *buttonDigIn[32];
-
 // button state
 struct ButtonState
 {
+    ButtonState() : di(NULL), pressed(0), t(0), js(0), keymod(0), keycode(0) { }
+    
+    // DigitalIn for the button
+    DigitalIn *di;
+
     // current on/off state
     int pressed;
     
@@ -917,49 +742,120 @@ struct ButtonState
     // state transition occurs, we set this to a debounce
     // period.  Future state transitions will be ignored
     // until the debounce time elapses.
-    int t;
-} buttonState[32];
+    float t;
+    
+    // joystick button mask for the button, if mapped as a joystick button
+    uint32_t js;
+    
+    // keyboard modifier bits and scan code for the button, if mapped as a keyboard key
+    uint8_t keymod;
+    uint8_t keycode;
+    
+    // media control key code
+    uint8_t mediakey;
+    
+
+} buttonState[MAX_BUTTONS];
 
 // timer for button reports
 static Timer buttonTimer;
 
 // initialize the button inputs
-void initButtons()
+void initButtons(Config &cfg, bool &kbKeys)
 {
+    // presume we'll find no keyboard keys
+    kbKeys = false;
+    
     // create the digital inputs
-    for (int i = 0 ; i < countof(buttonDigIn) ; ++i)
+    ButtonState *bs = buttonState;
+    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
     {
-        if (i < countof(buttonMap) && buttonMap[i] != NC)
-            buttonDigIn[i] = new DigitalIn(buttonMap[i]);
-        else
-            buttonDigIn[i] = 0;
+        PinName pin = wirePinName(cfg.button[i].pin);
+        if (pin != NC)
+        {
+            // set up the GPIO input pin for this button
+            bs->di = new DigitalIn(pin);
+            
+            // note if it's a keyboard key of some kind (including media keys)
+            uint8_t val = cfg.button[i].val;
+            switch (cfg.button[i].typ)
+            {
+            case BtnTypeJoystick:
+                // joystick button - get the button bit mask
+                bs->js = 1 << val;
+                break;
+                
+            case BtnTypeKey:
+                // regular keyboard key - note the scan code
+                bs->keycode = val;
+                kbKeys = true;
+                break;
+                
+            case BtnTypeModKey:
+                // keyboard mod key - note the modifier mask
+                bs->keymod = val;
+                kbKeys = true;
+                break;
+                
+            case BtnTypeMedia:
+                // media key - note the code
+                bs->mediakey = val;
+                kbKeys = true;
+                break;
+            }
+        }
     }
     
     // start the button timer
+    buttonTimer.reset();
     buttonTimer.start();
 }
 
+// Button data
+uint32_t jsButtons = 0;
+
+// Keyboard state
+struct
+{
+    bool changed;       // flag: changed since last report sent
+    int nkeys;          // number of active keys in the list
+    uint8_t data[8];    // key state, in USB report format: byte 0 is the modifier key mask,
+                        // byte 1 is reserved, and bytes 2-7 are the currently pressed key codes
+} kbState = { false, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
+
+// Media key state
+struct
+{
+    bool changed;       // flag: changed since last report sent
+    uint8_t data;       // key state byte for USB reports
+} mediaState = { false, 0 };
 
 // read the button input state
-uint32_t readButtons()
+void readButtons(Config &cfg)
 {
-    // start with all buttons off
-    uint32_t buttons = 0;
+    // start with an empty list of USB key codes
+    uint8_t modkeys = 0;
+    uint8_t keys[7] = { 0, 0, 0, 0, 0, 0, 0 };
+    int nkeys = 0;
     
+    // clear the joystick buttons
+    jsButtons = 0;
+    
+    // start with no media keys pressed
+    uint8_t mediakeys = 0;
+
     // figure the time elapsed since the last scan
-    int dt = buttonTimer.read_ms();
+    float dt = buttonTimer.read();
     
-    // reset the timef for the next scan
+    // reset the time for the next scan
     buttonTimer.reset();
     
     // scan the button list
-    uint32_t bit = 1;
-    DigitalIn **di = buttonDigIn;
     ButtonState *bs = buttonState;
-    for (int i = 0 ; i < countof(buttonDigIn) ; ++i, ++di, ++bs, bit <<= 1)
+    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
     {
         // read this button
-        if (*di != 0)
+        if (bs->di != 0)
         {
             // deduct the elapsed time since the last update
             // from the button's remaining sticky time
@@ -976,7 +872,7 @@ uint32_t readButtons()
             if (bs->t == 0)
             {
                 // get the new physical state
-                int pressed = !(*di)->read();
+                int pressed = !bs->di->read();
                 
                 // update the button's logical state if this is a change
                 if (pressed != bs->pressed)
@@ -986,18 +882,51 @@ uint32_t readButtons()
                     
                     // start a new sticky period for debouncing this
                     // state change
-                    bs->t = 25;
+                    bs->t = 0.005;
                 }
             }
-            
-            // if it's pressed, OR its bit into the state
+
+            // if it's pressed, add it to the appropriate key state list
             if (bs->pressed)
-                buttons |= bit;
+            {
+                // OR in the joystick button bit, mod key bits, and media key bits
+                jsButtons |= bs->js;
+                modkeys |= bs->keymod;
+                mediakeys |= bs->mediakey;
+                
+                // if it has a keyboard key, add the scan code to the active list
+                if (bs->keycode != 0 && nkeys < 7)
+                    keys[nkeys++] = bs->keycode;
+            }
         }
     }
     
-    // return the new button list
-    return buttons;
+    // Check for changes to the keyboard keys
+    if (kbState.data[0] != modkeys
+        || kbState.nkeys != nkeys
+        || memcmp(keys, &kbState.data[2], 6) != 0)
+    {
+        // we have changes - set the change flag and store the new key data
+        kbState.changed = true;
+        kbState.data[0] = modkeys;
+        if (nkeys <= 6) {
+            // 6 or fewer simultaneous keys - report the key codes
+            kbState.nkeys = nkeys;
+            memcpy(&kbState.data[2], keys, 6);
+        }
+        else {
+            // more than 6 simultaneous keys - report rollover (all '1' key codes)
+            kbState.nkeys = 6;
+            memset(&kbState.data[2], 1, 6);
+        }
+    }        
+    
+    // Check for changes to media keys
+    if (mediaState.data != mediakeys)
+    {
+        mediaState.changed = true;
+        mediaState.data = mediakeys;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1008,8 +937,9 @@ uint32_t readButtons()
 class MyUSBJoystick: public USBJoystick
 {
 public:
-    MyUSBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release) 
-        : USBJoystick(vendor_id, product_id, product_release, true)
+    MyUSBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release,
+        bool waitForConnect, bool enableJoystick, bool useKB) 
+        : USBJoystick(vendor_id, product_id, product_release, waitForConnect, enableJoystick, useKB)
     {
         suspended_ = false;
     }
@@ -1347,116 +1277,6 @@ void clear_i2c()
  
 // ---------------------------------------------------------------------------
 //
-// Include the appropriate plunger sensor definition.  This will define a
-// class called PlungerSensor, with a standard interface that we use in
-// the main loop below.  This is *kind of* like a virtual class interface,
-// but it actually defines the methods statically, which is a little more
-// efficient at run-time.  There's no need for a true virtual interface
-// because we don't need to be able to change sensor types on the fly.
-//
-
-#if defined(ENABLE_CCD_SENSOR)
-#include "ccdSensor.h"
-#elif defined(ENABLE_POT_SENSOR)
-#include "potSensor.h"
-#else
-#include "nullSensor.h"
-#endif
-
-
-// ---------------------------------------------------------------------------
-//
-// Non-volatile memory (NVM)
-//
-
-// Structure defining our NVM storage layout.  We store a small
-// amount of persistent data in flash memory to retain calibration
-// data when powered off.
-struct NVM
-{
-    // checksum - we use this to determine if the flash record
-    // has been properly initialized
-    uint32_t checksum;
-
-    // signature and version, to verify that we saved the config
-    // data to flash on a past run (as opposed to uninitialized
-    // data from a firmware update)
-    static const uint32_t SIGNATURE = 0x4D4A522A;
-    static const uint16_t VERSION = 0x0003;
-    
-    // Is the data structure valid?  We test the signature and 
-    // checksum to determine if we've been properly stored.
-    int valid() const
-    {
-        return (d.sig == SIGNATURE 
-                && d.vsn == VERSION
-                && d.sz == sizeof(NVM)
-                && checksum == CRC32(&d, sizeof(d)));
-    }
-    
-    // save to non-volatile memory
-    void save(FreescaleIAP &iap, int addr)
-    {
-        // update the checksum and structure size
-        d.sig = SIGNATURE;
-        d.vsn = VERSION;
-        d.sz = sizeof(NVM);
-        checksum = CRC32(&d, sizeof(d));
-        
-        // erase the sector
-        iap.erase_sector(addr);
-
-        // save the data
-        iap.program_flash(addr, this, sizeof(*this));
-    }
-    
-    // reset calibration data for calibration mode
-    void resetPlunger()
-    {
-        // set extremes for the calibration data
-        d.plungerMax = 0;
-        d.plungerZero = npix;
-        d.plungerMin = npix;
-    }
-    
-    // stored data (excluding the checksum)
-    struct
-    {
-        // Signature, structure version, and structure size - further verification 
-        // that we have valid initialized data.  The size is a simple proxy for a
-        // structure version, as the most common type of change to the structure as
-        // the software evolves will be the addition of new elements.  We also
-        // provide an explicit version number that we can update manually if we
-        // make any changes that don't affect the structure size but would affect
-        // compatibility with a saved record (e.g., swapping two existing elements).
-        uint32_t sig;
-        uint16_t vsn;
-        int sz;
-        
-        // has the plunger been manually calibrated?
-        int plungerCal;
-        
-        // Plunger calibration min, zero, and max.  The zero point is the 
-        // rest position (aka park position), where it's in equilibrium between 
-        // the main spring and the barrel spring.  It can travel a small distance
-        // forward of the rest position, because the barrel spring can be
-        // compressed by the user pushing on the plunger or by the momentum
-        // of a release motion.  The minimum is the maximum forward point where
-        // the barrel spring can't be compressed any further.
-        int plungerMin;
-        int plungerZero;
-        int plungerMax;
-        
-        // is the plunger sensor enabled?
-        int plungerEnabled;
-        
-        // LedWiz unit number
-        uint8_t ledWizUnitNo;
-    } d;
-};
-
-// ---------------------------------------------------------------------------
-//
 // Simple binary (on/off) input debouncer.  Requires an input to be stable 
 // for a given interval before allowing an update.
 //
@@ -1527,7 +1347,7 @@ private:
 void allOutputsOff()
 {
     // reset all LedWiz outputs to OFF/48
-    for (int i = 0 ; i < 32 ; ++i)
+    for (int i = 0 ; i < numLwOutputs ; ++i)
     {
         outLevel[i] = 0;
         wizOn[i] = 0;
@@ -1546,7 +1366,8 @@ void allOutputsOff()
     wizSpeed = 2;
     
     // flush changes to hc595, if applicable
-    hc595.update();
+    if (hc595 != 0)
+        hc595->update();
 }
 
 // ---------------------------------------------------------------------------
@@ -1615,7 +1436,6 @@ void allOutputsOff()
 //   so we don't want to push the button on a TV that's already on.
 //   
 //
-#ifdef ENABLE_TV_TIMER
 
 // Current PSU2 state:
 //   1 -> default: latch was on at last check, or we haven't checked yet
@@ -1625,12 +1445,22 @@ void allOutputsOff()
 //   5 -> TV relay on
 //   
 int psu2_state = 1;
-DigitalIn psu2_status_sense(PSU2_STATUS_SENSE);
-DigitalOut psu2_status_set(PSU2_STATUS_SET);
-DigitalOut tv_relay(TV_RELAY_PIN);
-Timer tv_timer;
+
+// PSU2 power sensing circuit connections
+DigitalIn *psu2_status_sense;
+DigitalOut *psu2_status_set;
+
+// TV ON switch relay control
+DigitalOut *tv_relay;
+
+// Timer interrupt
+Ticker tv_ticker;
+float tv_delay_time;
 void TVTimerInt()
 {
+    // time since last state change
+    static Timer tv_timer;
+
     // Check our internal state
     switch (psu2_state)
     {
@@ -1640,20 +1470,20 @@ void TVTimerInt()
         // either case, if the latch is off, switch to state 2 and
         // try pulsing the latch.  Next time we check, if the latch
         // stuck, it means that PSU2 is now on after being off.
-        if (!psu2_status_sense)
+        if (!psu2_status_sense->read())
         {
             // switch to OFF state
             psu2_state = 2;
             
             // try setting the latch
-            psu2_status_set = 1;
+            psu2_status_set->write(1);
         }
         break;
         
     case 2:
         // PSU2 was off last time we checked, and we tried setting
         // the latch.  Drop the SET signal and go to CHECK state.
-        psu2_status_set = 0;
+        psu2_status_set->write(0);
         psu2_state = 3;
         break;
         
@@ -1662,7 +1492,7 @@ void TVTimerInt()
         // if that stuck.  If the latch is now on, PSU2 has transitioned
         // from OFF to ON, so start the TV countdown.  If the latch is
         // off, our SET command didn't stick, so PSU2 is still off.
-        if (psu2_status_sense)
+        if (psu2_status_sense->read())
         {
             // The latch stuck, so PSU2 has transitioned from OFF
             // to ON.  Start the TV countdown timer.
@@ -1675,7 +1505,7 @@ void TVTimerInt()
             // The latch didn't stick, so PSU2 was still off at
             // our last check.  Try pulsing it again in case PSU2
             // was turned on since the last check.
-            psu2_status_set = 1;
+            psu2_status_set->write(1);
             psu2_state = 2;
         }
         break;
@@ -1683,10 +1513,10 @@ void TVTimerInt()
     case 4:
         // TV timer countdown in progress.  If we've reached the
         // delay time, pulse the relay.
-        if (tv_timer.read() >= TV_DELAY_TIME)
+        if (tv_timer.read() >= tv_delay_time)
         {
             // turn on the relay for one timer interval
-            tv_relay = 1;
+            tv_relay->write(1);
             psu2_state = 5;
         }
         break;
@@ -1694,27 +1524,631 @@ void TVTimerInt()
     case 5:
         // TV timer relay on.  We pulse this for one interval, so
         // it's now time to turn it off and return to the default state.
-        tv_relay = 0;
+        tv_relay->write(0);
         psu2_state = 1;
         break;
     }
 }
 
-Ticker tv_ticker;
-void startTVTimer()
+// Start the TV ON checker.  If the status sense circuit is enabled in
+// the configuration, we'll set up the pin connections and start the
+// interrupt handler that periodically checks the status.  Does nothing
+// if any of the pins are configured as NC.
+void startTVTimer(Config &cfg)
 {
-    // Set up our time routine to run every 1/4 second.  
-    tv_ticker.attach(&TVTimerInt, 0.25);
+    // only start the timer if the status sense circuit pins are configured
+    if (cfg.TVON.statusPin != NC && cfg.TVON.latchPin != NC && cfg.TVON.relayPin != NC)
+    {
+        psu2_status_sense = new DigitalIn(cfg.TVON.statusPin);
+        psu2_status_set = new DigitalOut(cfg.TVON.latchPin);
+        tv_relay = new DigitalOut(cfg.TVON.relayPin);
+        tv_delay_time = cfg.TVON.delayTime;
+    
+        // Set up our time routine to run every 1/4 second.  
+        tv_ticker.attach(&TVTimerInt, 0.25);
+    }
 }
 
-
-#else // ENABLE_TV_TIMER
+// ---------------------------------------------------------------------------
 //
-// TV timer not used - just provide a dummy startup function
-void startTVTimer() { }
+// In-memory configuration data structure.  This is the live version in RAM
+// that we use to determine how things are set up.
 //
-#endif // ENABLE_TV_TIMER
+// When we save the configuration settings, we copy this structure to
+// non-volatile flash memory.  At startup, we check the flash location where
+// we might have saved settings on a previous run, and it's valid, we copy 
+// the flash data to this structure.  Firmware updates wipe the flash
+// memory area, so you have to use the PC config tool to send the settings
+// again each time the firmware is updated.
+//
+NVM nvm;
 
+// For convenience, a macro for the Config part of the NVM structure
+#define cfg (nvm.d.c)
+
+// flash memory controller interface
+FreescaleIAP iap;
+
+// figure the flash address as a pointer along with the number of sectors
+// required to store the structure
+NVM *configFlashAddr(int &addr, int &numSectors)
+{
+    // figure how many flash sectors we span, rounding up to whole sectors
+    numSectors = (sizeof(NVM) + SECTOR_SIZE - 1)/SECTOR_SIZE;
+
+    // figure the address - this is the highest flash address where the
+    // structure will fit with the start aligned on a sector boundary
+    addr = iap.flash_size() - (numSectors * SECTOR_SIZE);
+    
+    // return the address as a pointer
+    return (NVM *)addr;
+}
+
+// figure the flash address as a pointer
+NVM *configFlashAddr()
+{
+    int addr, numSectors;
+    return configFlashAddr(addr, numSectors);
+}
+
+// Load the config from flash
+void loadConfigFromFlash()
+{
+    // We want to use the KL25Z's on-board flash to store our configuration
+    // data persistently, so that we can restore it across power cycles.
+    // Unfortunatly, the mbed platform doesn't explicitly support this.
+    // mbed treats the on-board flash as a raw storage device for linker
+    // output, and assumes that the linker output is the only thing
+    // stored there.  There's no file system and no allowance for shared
+    // use for other purposes.  Fortunately, the linker ues the space in
+    // the obvious way, storing the entire linked program in a contiguous
+    // block starting at the lowest flash address.  This means that the
+    // rest of flash - from the end of the linked program to the highest
+    // flash address - is all unused free space.  Writing our data there
+    // won't conflict with anything else.  Since the linker doesn't give
+    // us any programmatic access to the total linker output size, it's
+    // safest to just store our config data at the very end of the flash
+    // region (i.e., the highest address).  As long as it's smaller than
+    // the free space, it won't collide with the linker area.
+    
+    // Figure how many sectors we need for our structure
+    NVM *flash = configFlashAddr();
+    
+    // if the flash is valid, load it; otherwise initialize to defaults
+    if (flash->valid()) 
+    {
+        // flash is valid - load it into the RAM copy of the structure
+        memcpy(&nvm, flash, sizeof(NVM));
+    }
+    else 
+    {
+        // flash is invalid - load factory settings nito RAM structure
+        cfg.setFactoryDefaults();
+    }
+}
+
+void saveConfigToFlash()
+{
+    int addr, sectors;
+    configFlashAddr(addr, sectors);
+    nvm.save(iap, addr);
+}
+
+// ---------------------------------------------------------------------------
+//
+// Plunger Sensor
+//
+
+// the plunger sensor interface object
+PlungerSensor *plungerSensor = 0;
+
+// Create the plunger sensor based on the current configuration.  If 
+// there's already a sensor object, we'll delete it.
+void createPlunger()
+{
+    // delete any existing sensor object
+    if (plungerSensor != 0)
+        delete plungerSensor;
+        
+    // create the new sensor object according to the type
+    switch (cfg.plunger.sensorType)
+    {
+    case PlungerType_TSL1410RS:
+        // pins are: SI, CLOCK, AO
+        plungerSensor = new PlungerSensorTSL1410R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], NC);
+        break;
+        
+    case PlungerType_TSL1410RP:
+        // pins are: SI, CLOCK, AO1, AO2
+        plungerSensor = new PlungerSensorTSL1410R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], cfg.plunger.sensorPin[3]);
+        break;
+        
+    case PlungerType_TSL1412RS:
+        // pins are: SI, CLOCK, AO1, AO2
+        plungerSensor = new PlungerSensorTSL1412R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], NC);
+        break;
+    
+    case PlungerType_TSL1412RP:
+        // pins are: SI, CLOCK, AO1, AO2
+        plungerSensor = new PlungerSensorTSL1412R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], cfg.plunger.sensorPin[3]);
+        break;
+    
+    case PlungerType_Pot:
+        // pins are: AO
+        plungerSensor = new PlungerSensorPot(cfg.plunger.sensorPin[0]);
+        break;
+    
+    case PlungerType_None:
+    default:
+        plungerSensor = new PlungerSensorNull();
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//
+// Reboot - resets the microcontroller
+//
+void reboot(USBJoystick &js)
+{
+    // disconnect from USB
+    js.disconnect();
+    
+    // wait a few seconds to make sure the host notices the disconnect
+    wait(5);
+    
+    // reset the device
+    NVIC_SystemReset();
+    while (true) { }
+}
+
+// ---------------------------------------------------------------------------
+//
+// Translate joystick readings from raw values to reported values, based
+// on the orientation of the controller card in the cabinet.
+//
+void accelRotate(int &x, int &y)
+{
+    int tmp;
+    switch (cfg.orientation)
+    {
+    case OrientationFront:
+        tmp = x;
+        x = y;
+        y = tmp;
+        break;
+    
+    case OrientationLeft:
+        x = -x;
+        break;
+    
+    case OrientationRight:
+        y = -y;
+        break;
+    
+    case OrientationRear:
+        tmp = -x;
+        x = -y;
+        y = tmp;
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//
+// Device status.  We report this on each update so that the host config
+// tool can detect our current settings.  This is a bit mask consisting
+// of these bits:
+//    0x0001  -> plunger sensor enabled
+//    0x8000  -> RESERVED - must always be zero
+//
+// Note that the high bit (0x8000) must always be 0, since we use that
+// to distinguish special request reply packets.
+uint16_t statusFlags;
+    
+// flag: send a pixel dump after the next read
+bool reportPix = false;
+
+
+// ---------------------------------------------------------------------------
+//
+// Calibration button state:
+//  0 = not pushed
+//  1 = pushed, not yet debounced
+//  2 = pushed, debounced, waiting for hold time
+//  3 = pushed, hold time completed - in calibration mode
+int calBtnState = 0;
+
+// calibration button debounce timer
+Timer calBtnTimer;
+
+// calibration button light state
+int calBtnLit = false;
+    
+
+// ---------------------------------------------------------------------------
+//
+// Handle a configuration variable update.  'data' is the USB message we
+// received from the host.
+//
+void configVarMsg(uint8_t *data)
+{
+    switch (data[1])
+    {
+    case 1:
+        // USB identification (Vendor ID, Product ID)
+        cfg.usbVendorID = wireUI16(data+2);
+        cfg.usbProductID = wireUI16(data+4);
+        break;
+        
+    case 2:
+        // Pinscape Controller unit number - note that data[2] contains
+        // the nominal unit number, 1-16
+        if (data[2] >= 1 && data[2] <= 16)
+            cfg.psUnitNo = data[2];
+        break;
+        
+    case 3:
+        // Enable/disable joystick
+        cfg.joystickEnabled = data[2];
+        break;
+        
+    case 4:
+        // Accelerometer orientation
+        cfg.orientation = data[2];
+        break;
+
+    case 5:
+        // Plunger sensor type
+        cfg.plunger.sensorType = data[2];
+        break;
+        
+    case 6:
+        // Set plunger pin assignments
+        cfg.plunger.sensorPin[0] = wirePinName(data[2]);
+        cfg.plunger.sensorPin[1] = wirePinName(data[3]);
+        cfg.plunger.sensorPin[2] = wirePinName(data[4]);
+        cfg.plunger.sensorPin[3] = wirePinName(data[5]);
+        break;
+        
+    case 7:
+        // Plunger calibration button and indicator light pin assignments
+        cfg.plunger.cal.btn = wirePinName(data[2]);
+        cfg.plunger.cal.led = wirePinName(data[3]);
+        break;
+        
+    case 8:
+        // ZB Launch Ball setup
+        cfg.plunger.zbLaunchBall.port = (int)(unsigned char)data[2];
+        cfg.plunger.zbLaunchBall.btn = (int)(unsigned char)data[3];
+        cfg.plunger.zbLaunchBall.pushDistance = (float)wireUI16(data+4) / 1000.0;
+        break;
+        
+    case 9:
+        // TV ON setup
+        cfg.TVON.statusPin = wirePinName(data[2]);
+        cfg.TVON.latchPin = wirePinName(data[3]);
+        cfg.TVON.relayPin = wirePinName(data[4]);
+        cfg.TVON.delayTime = (float)wireUI16(data+5) / 100.0;
+        break;
+        
+    case 10:
+        // TLC5940NT PWM controller chip setup
+        cfg.tlc5940.nchips = (int)(unsigned char)data[2];
+        cfg.tlc5940.sin = wirePinName(data[3]);
+        cfg.tlc5940.sclk = wirePinName(data[4]);
+        cfg.tlc5940.xlat = wirePinName(data[5]);
+        cfg.tlc5940.blank = wirePinName(data[6]);
+        cfg.tlc5940.gsclk = wirePinName(data[7]);
+        break;
+        
+    case 11:
+        // 74HC595 shift register chip setup
+        cfg.hc595.nchips = (int)(unsigned char)data[2];
+        cfg.hc595.sin = wirePinName(data[3]);
+        cfg.hc595.sclk = wirePinName(data[4]);
+        cfg.hc595.latch = wirePinName(data[5]);
+        cfg.hc595.ena = wirePinName(data[6]);
+        break;
+        
+    case 12:
+        // button setup
+        {
+            // get the button number
+            int idx = data[2];
+            
+            // if it's in range, set the button data
+            if (idx > 0 && idx <= MAX_BUTTONS)
+            {
+                // adjust to an array index
+                --idx;
+                
+                // set the values
+                cfg.button[idx].pin = data[3];
+                cfg.button[idx].typ = data[4];
+                cfg.button[idx].val = data[5];
+            }
+        }
+        break;
+        
+    case 13:
+        // LedWiz output port setup
+        {
+            // get the port number
+            int idx = data[2];
+            
+            // if it's in range, set the port data
+            if (idx > 0 && idx <= MAX_OUT_PORTS)
+            {
+                // adjust to an array index
+                --idx;
+                
+                // set the values
+                cfg.outPort[idx].typ = data[3];
+                cfg.outPort[idx].pin = data[4];
+                cfg.outPort[idx].flags = data[5];
+            }
+        }
+        break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//
+// Handle an input report from the USB host.  Input reports use our extended
+// LedWiz protocol.
+//
+void handleInputMsg(HID_REPORT &report, USBJoystick &js, int &z)
+{
+    // all Led-Wiz reports are exactly 8 bytes
+    if (report.length == 8)
+    {
+        // LedWiz commands come in two varieties:  SBA and PBA.  An
+        // SBA is marked by the first byte having value 64 (0x40).  In
+        // the real LedWiz protocol, any other value in the first byte
+        // means it's a PBA message.  However, *valid* PBA messages
+        // always have a first byte (and in fact all 8 bytes) in the
+        // range 0-49 or 129-132.  Anything else is invalid.  We take
+        // advantage of this to implement private protocol extensions.
+        // So our full protocol is as follows:
+        //
+        // first byte =
+        //   0-48     -> LWZ-PBA
+        //   64       -> LWZ SBA 
+        //   65       -> private control message; second byte specifies subtype
+        //   129-132  -> LWZ-PBA
+        //   200-228  -> extended bank brightness set for outputs N to N+6, where
+        //               N is (first byte - 200)*7
+        //   other    -> reserved for future use
+        //
+        uint8_t *data = report.data;
+        if (data[0] == 64) 
+        {
+            // LWZ-SBA - first four bytes are bit-packed on/off flags
+            // for the outputs; 5th byte is the pulse speed (1-7)
+            //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
+            //       data[1], data[2], data[3], data[4], data[5]);
+
+            // update all on/off states
+            for (int i = 0, bit = 1, ri = 1 ; i < numLwOutputs ; ++i, bit <<= 1)
+            {
+                // figure the on/off state bit for this output
+                if (bit == 0x100) {
+                    bit = 1;
+                    ++ri;
+                }
+                
+                // set the on/off state
+                wizOn[i] = ((data[ri] & bit) != 0);
+                
+                // If the wizVal setting is 255, it means that this
+                // output was last set to a brightness value with the
+                // extended protocol.  Return it to LedWiz control by
+                // rescaling the brightness setting to the LedWiz range
+                // and updating wizVal with the result.  If it's any
+                // other value, it was previously set by a PBA message,
+                // so simply retain the last setting - in the normal
+                // LedWiz protocol, the "profile" (brightness) and on/off
+                // states are independent, so an SBA just turns an output
+                // on or off but retains its last brightness level.
+                if (wizVal[i] == 255)
+                    wizVal[i] = (uint8_t)round(outLevel[i]*48);
+            }
+            
+            // set the flash speed - enforce the value range 1-7
+            wizSpeed = data[5];
+            if (wizSpeed < 1)
+                wizSpeed = 1;
+            else if (wizSpeed > 7)
+                wizSpeed = 7;
+
+            // update the physical outputs
+            updateWizOuts();
+            if (hc595 != 0)
+                hc595->update();
+            
+            // reset the PBA counter
+            pbaIdx = 0;
+        }
+        else if (data[0] == 65)
+        {
+            // Private control message.  This isn't an LedWiz message - it's
+            // an extension for this device.  65 is an invalid PBA setting,
+            // and isn't used for any other LedWiz message, so we appropriate
+            // it for our own private use.  The first byte specifies the 
+            // message type.
+            if (data[1] == 1)
+            {
+                // 1 = Old Set Configuration:
+                //     data[2] = LedWiz unit number (0x00 to 0x0f)
+                //     data[3] = feature enable bit mask:
+                //               0x01 = enable plunger sensor
+
+                // get the new LedWiz unit number - this is 0-15, whereas we
+                // we save the *nominal* unit number 1-16 in the config                
+                uint8_t newUnitNo = (data[2] & 0x0f) + 1;
+
+                // we'll need a reset if the LedWiz unit number is changing
+                bool needReset = (newUnitNo != cfg.psUnitNo);
+                
+                // set the configuration parameters from the message
+                cfg.psUnitNo = newUnitNo;
+                cfg.plunger.enabled = data[3] & 0x01;
+                
+                // update the status flags
+                statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
+                
+                // if the plunger is no longer enabled, use 0 for z reports
+                if (!cfg.plunger.enabled)
+                    z = 0;
+                
+                // save the configuration
+                saveConfigToFlash();
+                
+                // reboot if necessary
+                if (needReset)
+                    reboot(js);
+            }
+            else if (data[1] == 2)
+            {
+                // 2 = Calibrate plunger
+                // (No parameters)
+                
+                // enter calibration mode
+                calBtnState = 3;
+                calBtnTimer.reset();
+                cfg.plunger.cal.reset(plungerSensor->npix);
+            }
+            else if (data[1] == 3)
+            {
+                // 3 = pixel dump
+                // (No parameters)
+                reportPix = true;
+                
+                // show purple until we finish sending the report
+                ledR = 0;
+                ledB = 0;
+                ledG = 1;
+            }
+            else if (data[1] == 4)
+            {
+                // 4 = hardware configuration query
+                // (No parameters)
+                wait_ms(1);
+                js.reportConfig(
+                    numOutputs, 
+                    cfg.psUnitNo - 1,   // report 0-15 range for unit number (we store 1-16 internally)
+                    cfg.plunger.cal.zero, cfg.plunger.cal.max);
+            }
+            else if (data[1] == 5)
+            {
+                // 5 = all outputs off, reset to LedWiz defaults
+                allOutputsOff();
+            }
+            else if (data[1] == 6)
+            {
+                // 6 = Save configuration to flash.
+                saveConfigToFlash();
+                
+                // Reboot the microcontroller.  Nearly all config changes
+                // require a reset, and a reset only takes a few seconds, 
+                // so we don't bother tracking whether or not a reboot is
+                // really needed.
+                reboot(js);
+            }
+        }
+        else if (data[0] == 66)
+        {
+            // Extended protocol - Set configuration variable.
+            // The second byte of the message is the ID of the variable
+            // to update, and the remaining bytes give the new value,
+            // in a variable-dependent format.
+            configVarMsg(data);
+        }
+        else if (data[0] >= 200 && data[0] <= 228)
+        {
+            // Extended protocol - Extended output port brightness update.  
+            // data[0]-200 gives us the bank of 7 outputs we're setting:
+            // 200 is outputs 0-6, 201 is outputs 7-13, 202 is 14-20, etc.
+            // The remaining bytes are brightness levels, 0-255, for the
+            // seven outputs in the selected bank.  The LedWiz flashing 
+            // modes aren't accessible in this message type; we can only 
+            // set a fixed brightness, but in exchange we get 8-bit 
+            // resolution rather than the paltry 0-48 scale that the real
+            // LedWiz uses.  There's no separate on/off status for outputs
+            // adjusted with this message type, either, as there would be
+            // for a PBA message - setting a non-zero value immediately
+            // turns the output, overriding the last SBA setting.
+            //
+            // For outputs 0-31, this overrides any previous PBA/SBA
+            // settings for the port.  Any subsequent PBA/SBA message will
+            // in turn override the setting made here.  It's simple - the
+            // most recent message of either type takes precedence.  For
+            // outputs above the LedWiz range, PBA/SBA messages can't
+            // address those ports anyway.
+            int i0 = (data[0] - 200)*7;
+            int i1 = i0 + 7 < numOutputs ? i0 + 7 : numOutputs; 
+            for (int i = i0 ; i < i1 ; ++i)
+            {
+                // set the brightness level for the output
+                float b = data[i-i0+1]/255.0;
+                outLevel[i] = b;
+                
+                // if it's in the basic LedWiz output set, set the LedWiz
+                // profile value to 255, which means "use outLevel"
+                if (i < 32) 
+                    wizVal[i] = 255;
+                    
+                // set the output
+                lwPin[i]->set(b);
+            }
+            
+            // update 74HC595 outputs, if attached
+            if (hc595 != 0)
+                hc595->update();
+        }
+        else 
+        {
+            // Everything else is LWZ-PBA.  This is a full "profile"
+            // dump from the host for one bank of 8 outputs.  Each
+            // byte sets one output in the current bank.  The current
+            // bank is implied; the bank starts at 0 and is reset to 0
+            // by any LWZ-SBA message, and is incremented to the next
+            // bank by each LWZ-PBA message.  Our variable pbaIdx keeps
+            // track of our notion of the current bank.  There's no direct
+            // way for the host to select the bank; it just has to count
+            // on us staying in sync.  In practice, the host will always
+            // send a full set of 4 PBA messages in a row to set all 32
+            // outputs.
+            //
+            // Note that a PBA implicitly overrides our extended profile
+            // messages (message prefix 200-219), because this sets the
+            // wizVal[] entry for each output, and that takes precedence
+            // over the extended protocol settings.
+            //
+            //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
+            //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+
+            // Update all output profile settings
+            for (int i = 0 ; i < 8 ; ++i)
+                wizVal[pbaIdx + i] = data[i];
+
+            // Update the physical LED state if this is the last bank.
+            // Note that hosts always send a full set of four PBA
+            // messages, so there's no need to do a physical update
+            // until we've received the last bank's PBA message.
+            if (pbaIdx == 24)
+            {
+                updateWizOuts();
+                if (hc595 != 0)
+                    hc595->update();
+                pbaIdx = 0;
+            }
+            else
+                pbaIdx += 8;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 //
@@ -1732,83 +2166,58 @@ int main(void)
     ledG = 1;
     ledB = 1;
     
+    // clear the I2C bus for the accelerometer
+    clear_i2c();
+    
+    // load the saved configuration
+    loadConfigFromFlash();
+    
     // start the TV timer, if applicable
-    startTVTimer();
+    startTVTimer(cfg);
     
     // we're not connected/awake yet
     bool connected = false;
     time_t connectChangeTime = time(0);
 
-    // initialize the LedWiz ports
-    initLwOut();
-    
-    // initialize the button input ports
-    initButtons();
+    // create the plunger sensor interface
+    createPlunger();
 
-    // start the TLC5940 clock, if present
-    tlc5940.start();
+    // set up the TLC5940 interface and start the TLC5940 clock, if applicable
+    init_tlc5940(cfg);
 
     // enable the 74HC595 chips, if present
-    hc595.init();
-    hc595.update();
+    init_hc595(cfg);
+    
+    // initialize the LedWiz ports
+    initLwOut(cfg);
+    
+    // start the TLC5940 clock
+    if (tlc5940 != 0)
+        tlc5940->start();
+        
+    // initialize the button input ports
+    bool kbKeys = false;
+    initButtons(cfg, kbKeys);
 
-    // we don't need a reset yet
-    bool needReset = false;
-    
-    // clear the I2C bus for the accelerometer
-    clear_i2c();
-    
-    // set up a flash memory controller
-    FreescaleIAP iap;
-    
-    // use the last sector of flash for our non-volatile memory structure
-    int flash_addr = (iap.flash_size() - SECTOR_SIZE);
-    NVM *flash = (NVM *)flash_addr;
-    NVM cfg;
-    
-    // if the flash is valid, load it; otherwise initialize to defaults
-    if (flash->valid()) {
-        memcpy(&cfg, flash, sizeof(cfg));
-        printf("Flash restored: plunger cal=%d, min=%d, zero=%d, max=%d\r\n", 
-            cfg.d.plungerCal, cfg.d.plungerMin, cfg.d.plungerZero, cfg.d.plungerMax);
-    }
-    else {
-        printf("Factory reset\r\n");
-        cfg.d.plungerCal = 0;
-        cfg.d.plungerMin = 0;        // assume we can go all the way forward...
-        cfg.d.plungerMax = npix;     // ...and all the way back
-        cfg.d.plungerZero = npix/6;  // the rest position is usually around 1/2" back
-        cfg.d.ledWizUnitNo = DEFAULT_LEDWIZ_UNIT_NUMBER - 1;  // unit numbering starts from 0 internally
-        cfg.d.plungerEnabled = PLUNGER_CODE_ENABLED;
-    }
-    
     // Create the joystick USB client.  Note that we use the LedWiz unit
     // number from the saved configuration.
-    MyUSBJoystick js(
-        USB_VENDOR_ID, 
-        MAKE_USB_PRODUCT_ID(USB_VENDOR_ID, USB_PRODUCT_ID, cfg.d.ledWizUnitNo),
-        USB_VERSION_NO);
+    MyUSBJoystick js(cfg.usbVendorID, cfg.usbProductID, USB_VERSION_NO, true, cfg.joystickEnabled, kbKeys);
         
     // last report timer - we use this to throttle reports, since VP
     // doesn't want to hear from us more than about every 10ms
     Timer reportTimer;
     reportTimer.start();
+    
+    // set the initial status flags
+    statusFlags = (cfg.plunger.enabled ? 0x01 : 0x00);
 
     // initialize the calibration buttons, if present
-    DigitalIn *calBtn = (CAL_BUTTON_PIN == NC ? 0 : new DigitalIn(CAL_BUTTON_PIN));
-    DigitalOut *calBtnLed = (CAL_BUTTON_LED == NC ? 0 : new DigitalOut(CAL_BUTTON_LED));
+    DigitalIn *calBtn = (cfg.plunger.cal.btn == NC ? 0 : new DigitalIn(cfg.plunger.cal.btn));
+    DigitalOut *calBtnLed = (cfg.plunger.cal.led == NC ? 0 : new DigitalOut(cfg.plunger.cal.led));
 
-    // plunger calibration button debounce timer
-    Timer calBtnTimer;
+    // initialize the calibration button 
     calBtnTimer.start();
-    int calBtnLit = false;
-    
-    // Calibration button state:
-    //  0 = not pushed
-    //  1 = pushed, not yet debounced
-    //  2 = pushed, debounced, waiting for hold time
-    //  3 = pushed, hold time completed - in calibration mode
-    int calBtnState = 0;
+    calBtnState = 0;
     
     // set up a timer for our heartbeat indicator
     Timer hbTimer;
@@ -1823,18 +2232,10 @@ int main(void)
     // create the accelerometer object
     Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, MMA8451_INT_PIN);
     
-#ifdef ENABLE_JOYSTICK
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
     int x = 0, y = 0;
     
-    // flag: send a pixel dump after the next read
-    bool reportPix = false;
-#endif
-
-    // create our plunger sensor object
-    PlungerSensor plungerSensor;
-
     // last plunger report position, in 'npix' normalized pixel units
     int pos = 0;
     
@@ -1868,6 +2269,9 @@ int main(void)
     //   5 = pressed and holding (plunger has been pressed forward beyond 
     //       the park position from state 0)
     int lbState = 0;
+    
+    // button bit for ZB launch ball button
+    const uint32_t lbButtonBit = (1 << (cfg.plunger.zbLaunchBall.btn - 1));
     
     // Time since last lbState transition.  Some of the states are time-
     // sensitive.  In the "uncocked" state, we'll return to state 0 if
@@ -1929,17 +2333,7 @@ int main(void)
     int firing = 0;
 
     // start the first CCD integration cycle
-    plungerSensor.init();
-    
-    // Device status.  We report this on each update so that the host config
-    // tool can detect our current settings.  This is a bit mask consisting
-    // of these bits:
-    //    0x0001  -> plunger sensor enabled
-    //    0x8000  -> RESERVED - must always be zero
-    //
-    // Note that the high bit (0x8000) must always be 0, since we use that
-    // to distinguish special request reply packets.
-    uint16_t statusFlags = (cfg.d.plungerEnabled ? 0x01 : 0x00);
+    plungerSensor->init();
     
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -1954,224 +2348,7 @@ int main(void)
         HID_REPORT report;
         for (int rr = 0 ; rr < 4 && js.readNB(&report) ; ++rr, wait_ms(1))
         {
-            // all Led-Wiz reports are 8 bytes exactly
-            if (report.length == 8)
-            {
-                // LedWiz commands come in two varieties:  SBA and PBA.  An
-                // SBA is marked by the first byte having value 64 (0x40).  In
-                // the real LedWiz protocol, any other value in the first byte
-                // means it's a PBA message.  However, *valid* PBA messages
-                // always have a first byte (and in fact all 8 bytes) in the
-                // range 0-49 or 129-132.  Anything else is invalid.  We take
-                // advantage of this to implement private protocol extensions.
-                // So our full protocol is as follows:
-                //
-                // first byte =
-                //   0-48     -> LWZ-PBA
-                //   64       -> LWZ SBA 
-                //   65       -> private control message; second byte specifies subtype
-                //   129-132  -> LWZ-PBA
-                //   200-219  -> extended bank brightness set for outputs N to N+6, where
-                //               N is (first byte - 200)*7
-                //   other    -> reserved for future use
-                //
-                uint8_t *data = report.data;
-                if (data[0] == 64) 
-                {
-                    // LWZ-SBA - first four bytes are bit-packed on/off flags
-                    // for the outputs; 5th byte is the pulse speed (1-7)
-                    //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
-                    //       data[1], data[2], data[3], data[4], data[5]);
-    
-                    // update all on/off states
-                    for (int i = 0, bit = 1, ri = 1 ; i < 32 ; ++i, bit <<= 1)
-                    {
-                        // figure the on/off state bit for this output
-                        if (bit == 0x100) {
-                            bit = 1;
-                            ++ri;
-                        }
-                        
-                        // set the on/off state
-                        wizOn[i] = ((data[ri] & bit) != 0);
-                        
-                        // If the wizVal setting is 255, it means that this
-                        // output was last set to a brightness value with the
-                        // extended protocol.  Return it to LedWiz control by
-                        // rescaling the brightness setting to the LedWiz range
-                        // and updating wizVal with the result.  If it's any
-                        // other value, it was previously set by a PBA message,
-                        // so simply retain the last setting - in the normal
-                        // LedWiz protocol, the "profile" (brightness) and on/off
-                        // states are independent, so an SBA just turns an output
-                        // on or off but retains its last brightness level.
-                        if (wizVal[i] == 255)
-                            wizVal[i] = (uint8_t)round(outLevel[i]*48);
-                    }
-                    
-                    // set the flash speed - enforce the value range 1-7
-                    wizSpeed = data[5];
-                    if (wizSpeed < 1)
-                        wizSpeed = 1;
-                    else if (wizSpeed > 7)
-                        wizSpeed = 7;
-        
-                    // update the physical outputs
-                    updateWizOuts();
-                    hc595.update();
-                    
-                    // reset the PBA counter
-                    pbaIdx = 0;
-                }
-                else if (data[0] == 65)
-                {
-                    // Private control message.  This isn't an LedWiz message - it's
-                    // an extension for this device.  65 is an invalid PBA setting,
-                    // and isn't used for any other LedWiz message, so we appropriate
-                    // it for our own private use.  The first byte specifies the 
-                    // message type.
-                    if (data[1] == 1)
-                    {
-                        // 1 = Set Configuration:
-                        //     data[2] = LedWiz unit number (0x00 to 0x0f)
-                        //     data[3] = feature enable bit mask:
-                        //               0x01 = enable plunger sensor
-                        
-                        // we'll need a reset if the LedWiz unit number is changing
-                        uint8_t newUnitNo = data[2] & 0x0f;
-                        needReset |= (newUnitNo != cfg.d.ledWizUnitNo);
-                        
-                        // set the configuration parameters from the message
-                        cfg.d.ledWizUnitNo = newUnitNo;
-                        cfg.d.plungerEnabled = data[3] & 0x01;
-                        
-                        // update the status flags
-                        statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
-                        
-                        // if the ccd is no longer enabled, use 0 for z reports
-                        if (!cfg.d.plungerEnabled)
-                            z = 0;
-                        
-                        // save the configuration
-                        cfg.save(iap, flash_addr);
-                    }
-#ifdef ENABLE_JOYSTICK
-                    else if (data[1] == 2)
-                    {
-                        // 2 = Calibrate plunger
-                        // (No parameters)
-                        
-                        // enter calibration mode
-                        calBtnState = 3;
-                        calBtnTimer.reset();
-                        cfg.resetPlunger();
-                    }
-                    else if (data[1] == 3)
-                    {
-                        // 3 = pixel dump
-                        // (No parameters)
-                        reportPix = true;
-                        
-                        // show purple until we finish sending the report
-                        ledR = 0;
-                        ledB = 0;
-                        ledG = 1;
-                    }
-                    else if (data[1] == 4)
-                    {
-                        // 4 = hardware configuration query
-                        // (No parameters)
-                        wait_ms(1);
-                        js.reportConfig(numOutputs, cfg.d.ledWizUnitNo);
-                    }
-                    else if (data[1] == 5)
-                    {
-                        // 5 = all outputs off, reset to LedWiz defaults
-                        allOutputsOff();
-                    }
-#endif // ENABLE_JOYSTICK
-                }
-                else if (data[0] >= 200 && data[0] < 220)
-                {
-                    // Extended protocol - banked brightness update.  
-                    // data[0]-200 gives us the bank of 7 outputs we're setting:
-                    // 200 is outputs 0-6, 201 is outputs 7-13, 202 is 14-20, etc.
-                    // The remaining bytes are brightness levels, 0-255, for the
-                    // seven outputs in the selected bank.  The LedWiz flashing 
-                    // modes aren't accessible in this message type; we can only 
-                    // set a fixed brightness, but in exchange we get 8-bit 
-                    // resolution rather than the paltry 0-48 scale that the real
-                    // LedWiz uses.  There's no separate on/off status for outputs
-                    // adjusted with this message type, either, as there would be
-                    // for a PBA message - setting a non-zero value immediately
-                    // turns the output, overriding the last SBA setting.
-                    //
-                    // For outputs 0-31, this overrides any previous PBA/SBA
-                    // settings for the port.  Any subsequent PBA/SBA message will
-                    // in turn override the setting made here.  It's simple - the
-                    // most recent message of either type takes precedence.  For
-                    // outputs above the LedWiz range, PBA/SBA messages can't
-                    // address those ports anyway.
-                    int i0 = (data[0] - 200)*7;
-                    int i1 = i0 + 7 < numOutputs ? i0 + 7 : numOutputs; 
-                    for (int i = i0 ; i < i1 ; ++i)
-                    {
-                        // set the brightness level for the output
-                        float b = data[i-i0+1]/255.0;
-                        outLevel[i] = b;
-                        
-                        // if it's in the basic LedWiz output set, set the LedWiz
-                        // profile value to 255, which means "use outLevel"
-                        if (i < 32) 
-                            wizVal[i] = 255;
-                            
-                        // set the output
-                        lwPin[i]->set(b);
-                    }
-                    
-                    // update 74HC595 outputs, if attached
-                    hc595.update();
-                }
-                else 
-                {
-                    // Everything else is LWZ-PBA.  This is a full "profile"
-                    // dump from the host for one bank of 8 outputs.  Each
-                    // byte sets one output in the current bank.  The current
-                    // bank is implied; the bank starts at 0 and is reset to 0
-                    // by any LWZ-SBA message, and is incremented to the next
-                    // bank by each LWZ-PBA message.  Our variable pbaIdx keeps
-                    // track of our notion of the current bank.  There's no direct
-                    // way for the host to select the bank; it just has to count
-                    // on us staying in sync.  In practice, the host will always
-                    // send a full set of 4 PBA messages in a row to set all 32
-                    // outputs.
-                    //
-                    // Note that a PBA implicitly overrides our extended profile
-                    // messages (message prefix 200-219), because this sets the
-                    // wizVal[] entry for each output, and that takes precedence
-                    // over the extended protocol settings.
-                    //
-                    //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
-                    //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
-    
-                    // Update all output profile settings
-                    for (int i = 0 ; i < 8 ; ++i)
-                        wizVal[pbaIdx + i] = data[i];
-    
-                    // Update the physical LED state if this is the last bank.
-                    // Note that hosts always send a full set of four PBA
-                    // messages, so there's no need to do a physical update
-                    // until we've received the last bank's PBA message.
-                    if (pbaIdx == 24)
-                    {
-                        updateWizOuts();
-                        hc595.update();
-                        pbaIdx = 0;
-                    }
-                    else
-                        pbaIdx += 8;
-                }
-            }
+            handleInputMsg(report, js, z);
         }
        
         // check for plunger calibration
@@ -2201,7 +2378,9 @@ int main(void)
                     // enter calibration mode
                     calBtnState = 3;
                     calBtnTimer.reset();
-                    cfg.resetPlunger();
+                    
+                    // reset the plunger calibration limits
+                    cfg.plunger.cal.reset(plungerSensor->npix);
                 }
                 break;
                 
@@ -2227,8 +2406,8 @@ int main(void)
                 calBtnState = 0;
                 
                 // save the updated configuration
-                cfg.d.plungerCal = 1;
-                cfg.save(iap, flash_addr);
+                cfg.plunger.cal.calibrated = 1;
+                saveConfigToFlash();
             }
             else if (calBtnState != 3)
             {
@@ -2282,25 +2461,26 @@ int main(void)
         // and the last plunger reading had the plunger pulled back at least
         // a bit, watch for plunger release events until it's time for our next
         // USB report.
-        if (!firing && cfg.d.plungerEnabled && z >= JOYMAX/6)
+        if (!firing && cfg.plunger.enabled && z >= JOYMAX/6)
         {
             // monitor the plunger until it's time for our next report
             while (reportTimer.read_ms() < 15)
             {
                 // do a fast low-res scan; if it's at or past the zero point,
                 // start a firing event
-                if (plungerSensor.lowResScan() <= cfg.d.plungerZero)
+                int pos0;
+                if (plungerSensor->lowResScan(pos0) && pos0 <= cfg.plunger.cal.zero)
                     firing = 1;
             }
         }
 
         // read the plunger sensor, if it's enabled
-        if (cfg.d.plungerEnabled)
+        if (cfg.plunger.enabled)
         {
             // start with the previous reading, in case we don't have a
             // clear result on this frame
             int znew = z;
-            if (plungerSensor.highResScan(pos))
+            if (plungerSensor->highResScan(pos))
             {
                 // We got a new reading.  If we're in calibration mode, use it
                 // to figure the new calibration, otherwise adjust the new reading
@@ -2309,15 +2489,15 @@ int main(void)
                 {
                     // Calibration mode.  If this reading is outside of the current
                     // calibration bounds, expand the bounds.
-                    if (pos < cfg.d.plungerMin)
-                        cfg.d.plungerMin = pos;
-                    if (pos < cfg.d.plungerZero)
-                        cfg.d.plungerZero = pos;
-                    if (pos > cfg.d.plungerMax)
-                        cfg.d.plungerMax = pos;
+                    if (pos < cfg.plunger.cal.min)
+                        cfg.plunger.cal.min = pos;
+                    if (pos < cfg.plunger.cal.zero)
+                        cfg.plunger.cal.zero = pos;
+                    if (pos > cfg.plunger.cal.max)
+                        cfg.plunger.cal.max = pos;
                         
                     // normalize to the full physical range while calibrating
-                    znew = int(round(float(pos)/npix * JOYMAX));
+                    znew = int(round(float(pos)/plungerSensor->npix * JOYMAX));
                 }
                 else
                 {
@@ -2329,10 +2509,10 @@ int main(void)
                     // plunger has a small amount of travel in the "push" direction,
                     // since the barrel spring can be compressed slightly.  Negative
                     // values represent travel in the push direction.
-                    if (pos > cfg.d.plungerMax)
-                        pos = cfg.d.plungerMax;
-                    znew = int(round(float(pos - cfg.d.plungerZero)
-                        / (cfg.d.plungerMax - cfg.d.plungerZero + 1) * JOYMAX));
+                    if (pos > cfg.plunger.cal.max)
+                        pos = cfg.plunger.cal.max;
+                    znew = int(round(float(pos - cfg.plunger.cal.zero)
+                        / (cfg.plunger.cal.max - cfg.plunger.cal.zero + 1) * JOYMAX));
                 }
             }
 
@@ -2348,54 +2528,59 @@ int main(void)
                 // The plunger has moved forward since the previous report.
                 // Watch it for a few more ms to see if we can get a stable
                 // new position.
-                int pos0 = plungerSensor.lowResScan();
-                int pos1 = pos0;
-                Timer tw;
-                tw.start();
-                while (tw.read_ms() < 6)
+                int pos0;
+                if (plungerSensor->lowResScan(pos0))
                 {
-                    // read the new position
-                    int pos2 = plungerSensor.lowResScan();
-                    
-                    // If it's stable over consecutive readings, stop looping.
-                    // (Count it as stable if the position is within about 1/8".
-                    // pos1 and pos2 are reported in pixels, so they range from
-                    // 0 to npix.  The overall travel of a standard plunger is
-                    // about 3.2", so we have (npix/3.2) pixels per inch, hence
-                    // 1/8" is (npix/3.2)*(1/8) pixels.)
-                    if (abs(pos2 - pos1) < int(npix/(3.2*8)))
-                        break;
-
-                    // If we've crossed the rest position, and we've moved by
-                    // a minimum distance from where we starting this loop, begin
-                    // a firing event.  (We require a minimum distance to prevent
-                    // spurious firing from random analog noise in the readings
-                    // when the plunger is actually just sitting still at the 
-                    // rest position.  If it's at rest, it's normal to see small
-                    // random fluctuations in the analog reading +/- 1% or so
-                    // from the 0 point, especially with a sensor like a
-                    // potentionemeter that reports the position as a single 
-                    // analog voltage.)  Note that we compare the latest reading
-                    // to the first reading of the loop - we don't require the
-                    // threshold motion over consecutive readings, but any time
-                    // over the stability wait loop.
-                    if (pos1 < cfg.d.plungerZero
-                        && abs(pos2 - pos0) > int(npix/(3.2*8)))
+                    int pos1 = pos0;
+                    Timer tw;
+                    tw.start();
+                    while (tw.read_ms() < 6)
                     {
-                        firing = 1;
-                        break;
+                        // read the new position
+                        int pos2;
+                        if (plungerSensor->lowResScan(pos2))
+                        {
+                            // If it's stable over consecutive readings, stop looping.
+                            // (Count it as stable if the position is within about 1/8".
+                            // pos1 and pos2 are reported in pixels, so they range from
+                            // 0 to npix.  The overall travel of a standard plunger is
+                            // about 3.2", so we have (npix/3.2) pixels per inch, hence
+                            // 1/8" is (npix/3.2)*(1/8) pixels.)
+                            if (abs(pos2 - pos1) < int(plungerSensor->npix/(3.2*8)))
+                                break;
+        
+                            // If we've crossed the rest position, and we've moved by
+                            // a minimum distance from where we starting this loop, begin
+                            // a firing event.  (We require a minimum distance to prevent
+                            // spurious firing from random analog noise in the readings
+                            // when the plunger is actually just sitting still at the 
+                            // rest position.  If it's at rest, it's normal to see small
+                            // random fluctuations in the analog reading +/- 1% or so
+                            // from the 0 point, especially with a sensor like a
+                            // potentionemeter that reports the position as a single 
+                            // analog voltage.)  Note that we compare the latest reading
+                            // to the first reading of the loop - we don't require the
+                            // threshold motion over consecutive readings, but any time
+                            // over the stability wait loop.
+                            if (pos1 < cfg.plunger.cal.zero
+                                && abs(pos2 - pos0) > int(plungerSensor->npix/(3.2*8)))
+                            {
+                                firing = 1;
+                                break;
+                            }
+                                                    
+                            // the new reading is now the prior reading
+                            pos1 = pos2;
+                        }
                     }
-                                            
-                    // the new reading is now the prior reading
-                    pos1 = pos2;
                 }
             }
             
             // Check for a simulated Launch Ball button press, if enabled
-            if (ZBLaunchBallPort != 0)
+            if (cfg.plunger.zbLaunchBall.port != 0)
             {
                 const int cockThreshold = JOYMAX/3;
-                const int pushThreshold = int(-JOYMAX/3 * LaunchBallPushDistance);
+                const int pushThreshold = int(-JOYMAX/3 * cfg.plunger.zbLaunchBall.pushDistance);
                 int newState = lbState;
                 switch (lbState)
                 {
@@ -2466,14 +2651,13 @@ int main(void)
                 }
                 
                 // change states if desired
-                const uint32_t lbButtonBit = (1 << (LaunchBallButton - 1));
                 if (newState != lbState)
                 {
                     // If we're entering Launch state OR we're entering the
                     // Press-and-Hold state, AND the ZB Launch Ball LedWiz signal 
                     // is turned on, simulate a Launch Ball button press.
                     if (((newState == 3 && lbState != 4) || newState == 5)
-                        && wizOn[ZBLaunchBallPort-1])
+                        && wizOn[cfg.plunger.zbLaunchBall.port-1])
                     {
                         lbBtnTimer.reset();
                         lbBtnTimer.start();
@@ -2482,7 +2666,7 @@ int main(void)
                     
                     // if we're switching to state 0, release the button
                     if (newState == 0)
-                        simButtons &= ~(1 << (LaunchBallButton - 1));
+                        simButtons &= ~(1 << (cfg.plunger.zbLaunchBall.btn - 1));
                     
                     // switch to the new state
                     lbState = newState;
@@ -2517,7 +2701,7 @@ int main(void)
                     int turnOff = false;
                     
                     // turn it off if the ZB Launch Ball signal is off
-                    if (!wizOn[ZBLaunchBallPort-1])
+                    if (!wizOn[cfg.plunger.zbLaunchBall.port-1])
                         turnOff = true;
                         
                     // also turn it off if we're in state 3 or 4 ("Launch"),
@@ -2618,16 +2802,15 @@ int main(void)
         }
 
         // update the buttons
-        uint32_t buttons = readButtons();
+        readButtons(cfg);
 
-#ifdef ENABLE_JOYSTICK
         // If it's been long enough since our last USB status report,
         // send the new report.  We throttle the report rate because
         // it can overwhelm the PC side if we report too frequently.
         // VP only wants to sync with the real world in 10ms intervals,
-        // so reporting more frequently only creates i/o overhead
-        // without doing anything to improve the simulation.
-        if (reportTimer.read_ms() > 15)
+        // so reporting more frequently creates I/O overhead without 
+        // doing anything to improve the simulation.
+        if (cfg.joystickEnabled && reportTimer.read_ms() > 15)
         {
             // read the accelerometer
             int xa, ya;
@@ -2648,13 +2831,33 @@ int main(void)
             // ZB Launch Ball turns off the plunger position because it
             // tells us that the table has a Launch Ball button instead of
             // a traditional plunger.
-            int zrep = (ZBLaunchBallPort != 0 && wizOn[ZBLaunchBallPort-1] ? 0 : z);
+            int zrep = (cfg.plunger.zbLaunchBall.port != 0 && wizOn[cfg.plunger.zbLaunchBall.port-1] ? 0 : z);
             
-            // Send the status report.  Note that we have to map the X and Y
-            // axes from the accelerometer to match the Windows joystick axes.
-            // The mapping is determined according to the mounting direction
-            // set in config.h via the ORIENTATION_xxx macros.
-            js.update(JOY_X(x,y), JOY_Y(x,y), zrep, buttons | simButtons, statusFlags);
+            // rotate X and Y according to the device orientation in the cabinet
+            accelRotate(x, y);
+
+            // send the joystick report
+            js.update(x, y, zrep, jsButtons | simButtons, statusFlags);
+            
+            // send the keyboard report(s), if applicable
+            bool waitBeforeMedia = false;
+            if (kbState.changed)
+            {
+                js.kbUpdate(kbState.data);
+                kbState.changed = false;
+                waitBeforeMedia = true;
+            }
+            if (mediaState.changed)
+            {
+                // just sent a key report - give the channel a moment to clear before 
+                // sending another report on its heels, to avoid clogging the pipe
+                if (waitBeforeMedia)
+                    wait_us(1);
+                    
+                // send the media key report
+                js.mediaUpdate(mediaState.data);
+                mediaState.changed = false;
+            }
             
             // we've just started a new report interval, so reset the timer
             reportTimer.reset();
@@ -2664,23 +2867,19 @@ int main(void)
         if (reportPix)
         {
             // send the report            
-            plungerSensor.sendExposureReport(js);
+            plungerSensor->sendExposureReport(js);
 
             // we have satisfied this request
             reportPix = false;
         }
         
-#else // ENABLE_JOYSTICK
-        // We're a secondary controller, with no joystick reporting.  Send
-        // a generic status report to the host periodically for the sake of
-        // the Windows config tool.
-        if (reportTimer.read_ms() > 200)
+        // If joystick reports are turned off, send a generic status report
+        // periodically for the sake of the Windows config tool.
+        if (!cfg.joystickEnabled && reportTimer.read_ms() > 200)
         {
             js.updateStatus(0);
         }
 
-#endif // ENABLE_JOYSTICK
-        
 #ifdef DEBUG_PRINTF
         if (x != 0 || y != 0)
             printf("%d,%d\r\n", x, y);
@@ -2727,16 +2926,7 @@ int main(void)
                     }
                 }
             }
-            else if (needReset)
-            {
-                // connected, need to reset due to changes in config parameters -
-                // flash red/green
-                hb = !hb;
-                ledR = (hb ? 0 : 1);
-                ledG = (hb ? 1 : 0);
-                ledB = 0;
-            }
-            else if (cfg.d.plungerEnabled && !cfg.d.plungerCal)
+            else if (cfg.plunger.enabled && !cfg.plunger.cal.calibrated)
             {
                 // connected, plunger calibration needed - flash yellow/green
                 hb = !hb;
