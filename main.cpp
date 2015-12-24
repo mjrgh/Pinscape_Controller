@@ -886,7 +886,7 @@ bool readButtons(Config &cfg)
                     
                     // start a new sticky period for debouncing this
                     // state change
-                    bs->t = 0.005;
+                    bs->t = 0.075;
                 }
             }
 
@@ -2819,6 +2819,20 @@ int main(void)
 
         // update the buttons
         bool buttonsChanged = readButtons(cfg);
+        
+        // send a keyboard report if we have new data to report
+        if (kbState.changed)
+        {
+            js.kbUpdate(kbState.data);
+            kbState.changed = false;
+        }
+
+        // send the media control report, if applicable
+        if (mediaState.changed)
+        {
+            js.mediaUpdate(mediaState.data);
+            mediaState.changed = false;
+        }
 
         // If it's been long enough since our last USB status report,
         // send the new report.  We throttle the report rate because
@@ -2826,8 +2840,7 @@ int main(void)
         // VP only wants to sync with the real world in 10ms intervals,
         // so reporting more frequently creates I/O overhead without 
         // doing anything to improve the simulation.
-        if (cfg.joystickEnabled 
-            && (reportTimer.read_ms() > 15 || buttonsChanged))
+        if (cfg.joystickEnabled && reportTimer.read_ms() > 10)
         {
             // read the accelerometer
             int xa, ya;
@@ -2855,26 +2868,6 @@ int main(void)
 
             // send the joystick report
             js.update(x, y, zrep, jsButtons | simButtons, statusFlags);
-            
-            // send the keyboard report(s), if applicable
-            bool waitBeforeMedia = false;
-            if (kbState.changed)
-            {
-                js.kbUpdate(kbState.data);
-                kbState.changed = false;
-                waitBeforeMedia = true;
-            }
-            if (mediaState.changed)
-            {
-                // just sent a key report - give the channel a moment to clear before 
-                // sending another report on its heels, to avoid clogging the pipe
-                if (waitBeforeMedia)
-                    wait_us(1);
-                    
-                // send the media key report
-                js.mediaUpdate(mediaState.data);
-                mediaState.changed = false;
-            }
             
             // we've just started a new report interval, so reset the timer
             reportTimer.reset();

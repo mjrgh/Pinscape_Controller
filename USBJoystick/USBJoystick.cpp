@@ -588,12 +588,12 @@ bool USBJoystick::USBCallback_setConfiguration(uint8_t configuration)
 // Handle messages on endpoint 4 - this is the keyboard interface.
 // The host uses this to send updates for the keyboard indicator LEDs
 // (caps lock, num lock, etc).  We don't do anything with these, but
-// we at least need to read them to keep the pipe from clogging up.
+// we have to read them to keep the pipe open.
 bool USBJoystick::EP4_OUT_callback() 
 {
     // read this message
     uint32_t bytesRead = 0;
-    uint8_t led[65];
+    uint8_t led[MAX_HID_REPORT_SIZE];
     USBDevice::readEP(EP4OUT, led, &bytesRead, MAX_HID_REPORT_SIZE);
 
     // start the next read
