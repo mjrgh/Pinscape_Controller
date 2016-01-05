@@ -8,6 +8,58 @@
  
 #include "USBHID.h"
 
+struct LedWizMsg
+{
+    uint8_t data[8];
+};
+
+// circular buffer for incoming reports
+template<class T, int cnt> class CircBuf
+{
+public:
+    CircBuf() 
+    {
+        iRead = iWrite = 0;
+    }
+
+    // Read an item from the buffer.  Returns true if an item was available,
+    // false if the buffer was empty.
+    bool read(T &result) 
+    {
+        if (iRead != iWrite)
+        {
+            memcpy(&result, &buf[iRead], sizeof(T));
+            iRead = advance(iRead);
+            return true;
+        }
+        else
+            return false;
+    }
+    
+    bool write(const T &item)
+    {
+        int nxt = advance(iWrite);
+        if (nxt != iRead)
+        {
+            memcpy(&buf[nxt], &item, sizeof(T));
+            iWrite = nxt;
+            return true;
+        }
+        else
+            return false;
+    }
+
+private:
+    int advance(int i)
+    {
+        return i + 1 >= cnt ? 0 : i + 1;
+    } 
+    
+    int iRead;
+    int iWrite;
+    T buf[cnt];
+};
+
 // keyboard interface report IDs 
 const uint8_t REPORT_ID_KB = 1;
 const uint8_t REPORT_ID_MEDIA = 2;
@@ -99,8 +151,15 @@ class USBJoystick: public USBHID {
              _init();
              this->useKB = useKB;
              this->enableJoystick = enableJoystick;
+             reqTimer.start();
              connect(waitForConnect);
          };
+
+         /* read a report from the LedWiz buffer */
+         bool readLedWizMsg(LedWizMsg &msg)
+         {
+             return lwbuf.read(msg);
+         }
          
          /**
           * Send a keyboard report.  The argument gives the key state, in the standard
@@ -196,9 +255,12 @@ class USBJoystick: public USBHID {
          virtual bool USBCallback_setConfiguration(uint8_t configuration);
          virtual bool USBCallback_setInterface(uint16_t interface, uint8_t alternate)
             { return interface == 0 || interface == 1; }
+            
+         virtual bool EP1_OUT_callback();
          virtual bool EP4_OUT_callback();
- 
+         
      private:
+         Timer reqTimer;
          bool enableJoystick;
          bool useKB;
          int16_t _x;                       
@@ -207,6 +269,9 @@ class USBJoystick: public USBHID {
          uint16_t _buttonsLo;
          uint16_t _buttonsHi;
          uint16_t _status;
+
+         // Incoming LedWiz message buffer.  Each LedWiz message is exactly 8 bytes.
+         CircBuf<LedWizMsg, 64> lwbuf;
          
          void _init();                 
 };

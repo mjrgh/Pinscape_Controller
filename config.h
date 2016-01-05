@@ -48,6 +48,11 @@ const int BtnTypeJoystick      = 1;      // joystick button
 const int BtnTypeKey           = 2;      // regular keyboard key
 const int BtnTypeModKey        = 3;      // keyboard modifier key (shift, ctrl, etc)
 const int BtnTypeMedia         = 4;      // media control key (volume up/down, etc)
+const int BtnTypeSpecial       = 5;      // special button (night mode switch, etc)
+
+// input button flags
+const uint8_t BtnFlagPulse     = 0x01;   // pulse mode - reports each change in the physical switch state
+                                         // as a brief press of the logical button/keyboard key
 
 // maximum number of input button mappings
 const int MAX_BUTTONS = 32;
@@ -62,10 +67,23 @@ const int PortType74HC595      = 4;      // 74HC595 port
 const int PortTypeVirtual      = 5;      // Virtual port - visible to host software, but not connected to a physical output
 
 // LedWiz output port flag bits
-const uint8_t PortFlagActiveLow = 0x01;  // physical output is active-low
+const uint8_t PortFlagActiveLow  = 0x01; // physical output is active-low
+const uint8_t PortFlagNoisemaker = 0x02; // noisemaker device - disable when night mode is engaged
 
 // maximum number of output ports
 const int MAX_OUT_PORTS = 203;
+
+// port configuration data
+struct LedWizPortCfg
+{
+    uint8_t typ;        // port type:  a PortTypeXxx value
+    uint8_t pin;        // physical output pin:  for a GPIO port, this is an index in the 
+                        // USB-to-PinName mapping list; for a TLC5940 or 74HC595 port, it's 
+                        // the output number, starting from 0 for OUT0 on the first chip in 
+                        // the daisy chain.  For inactive and virtual ports, it's unused.
+    uint8_t flags;      // flags:  a combination of PortFlagXxx values
+} __attribute__((packed));
+
 
 struct Config
 {
@@ -82,7 +100,7 @@ struct Config
         // be changed from the config tool, but for the sake of convenience we want the
         // default to be a value that most people won't have to change.
         usbVendorID = 0xFAFA;      // LedWiz vendor code
-        usbProductID = 0x00F7;     // LedWiz product code for unit #8
+        usbProductID = 0x00F0;     // LedWiz product code for unit #1
         psUnitNo = 8;
         
         // enable joystick reports
@@ -107,39 +125,127 @@ struct Config
         plunger.zbLaunchBall.btn = 0;
         
         // assume no TV ON switch
+#if 1
+        TVON.statusPin = PTD2;
+        TVON.latchPin = PTE0;
+        TVON.relayPin = PTD3;
+        TVON.delayTime = 7;
+#else
         TVON.statusPin = NC;
         TVON.latchPin = NC;
         TVON.relayPin = NC;
         TVON.delayTime = 0;
+#endif
         
         // assume no TLC5940 chips
+#if 1 // $$$
+        tlc5940.nchips = 2;
+#else
         tlc5940.nchips = 0;
+#endif
+
+        // default TLC5940 pin assignments
+        tlc5940.sin = PTC6;
+        tlc5940.sclk = PTC5;
+        tlc5940.xlat = PTC10;
+        tlc5940.blank = PTC7;
+        tlc5940.gsclk = PTA1;
         
         // assume no 74HC595 chips
         hc595.nchips = 0;
         
+        // default 74HC595 pin assignments
+        hc595.sin = PTA5;
+        hc595.sclk = PTA4;
+        hc595.latch = PTA12;
+        hc595.ena = PTD4;
+        
         // initially configure with no LedWiz output ports
         outPort[0].typ = PortTypeDisabled;
+        for (int i = 0 ; i < sizeof(specialPort)/sizeof(specialPort[0]) ; ++i)
+            specialPort[i].typ = PortTypeDisabled;
         
         // initially configure with no input buttons
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
             button[i].pin = 0;   // 0 == index of NC in USB-to-PinName mapping
+
+#if 1            
+        for (int i = 0 ; i < 24 ; ++i) {
+            static int bp[] = {
+                21, // 1 = PTC2
+                12, // 2 = PTB3
+                11, // 3 = PTB2
+                10, // 4 = PTB1
+                54, // 5 = PTE30
+                30, // 6 = PTC11
+                48, // 7 = PTE5
+                47, // 8 = PTE4
+                46, // 9 = PTE3
+                45, // 10 = PTE2
+                16, // 11 = PTB11
+                15, // 12 = PTB10
+                14, // 13 = PTB9
+                13, // 14 = PTB8
+                31, // 15 = PTC12
+                32, // 16 = PTC13
+                33, // 17 = PTC16
+                34, // 18 = PTC17
+                7,  // 19 = PTA16
+                8,  // 20 = PTA17
+                55, // 21 = PTE31
+                41, // 22 = PTD6
+                42, // 23 = PTD7
+                44  // 24 = PTE1
+            };                
+            button[i].pin = bp[i];
+            button[i].typ = BtnTypeKey;
+            button[i].val = i+4;  // A, B, C...
+        }
+#endif
+        
+#if 0
+        button[23].typ = BtnTypeJoystick;
+        button[23].val = 5;  // B
+        button[23].flags = 0x01;  // pulse button
+        
+        button[22].typ = BtnTypeModKey;
+        button[22].val = 0x02;  // left shift
+        
+        button[21].typ = BtnTypeMedia;
+        button[21].val = 0x02;  // vol down
+        
+        button[20].typ = BtnTypeMedia;
+        button[20].val = 0x01;  // vol up
+#endif
+        
+#if 1 // $$$
+        {
+            int n = 0;
+            for (int i = 0 ; i < 32 ; ++i, ++n) {
+                outPort[n].typ = PortTypeTLC5940;
+                outPort[n].pin = i;
+                outPort[n].flags = 0;
+            }
+            outPort[n].typ = PortTypeGPIODig;
+            outPort[n].pin = 27; // PTC8
+            outPort[n++].flags = 0;
             
-        button[0].pin = 6; // PTA13
-        button[0].typ = BtnTypeKey;
-        button[0].val = 4;  // A
-        button[1].pin = 38; // PTD5
-        button[1].typ = BtnTypeJoystick;
-        button[1].val = 5;  // B
-        button[2].pin = 37; // PTD4
-        button[2].typ = BtnTypeModKey;
-        button[2].val = 0x02;  // left shift
-        button[3].pin = 5;  // PTA12
-        button[3].typ = BtnTypeMedia;
-        button[3].val = 0x01;  // volume up
-        button[4].pin = 3;  // PTA4
-        button[4].typ = BtnTypeMedia;
-        button[4].val = 0x02;  // volume down
+            outPort[n].typ = PortTypeDisabled;
+        }
+#endif
+#if 0
+        outPort[0].typ = PortTypeGPIOPWM;
+        outPort[0].pin = 17;  // PTB18 = LED1 = Red LED
+        outPort[0].flags = PortFlagActiveLow;
+        outPort[1].typ = PortTypeGPIOPWM;
+        outPort[1].pin = 18;  // PTB19 = LED2 = Green LED
+        outPort[1].flags = PortFlagActiveLow;
+        outPort[2].typ = PortTypeGPIOPWM;
+        outPort[2].pin = 36;  // PTD1 = LED3 = Blue LED
+        outPort[2].flags = PortFlagActiveLow;
+
+        outPort[3].typ = PortTypeDisabled;
+#endif
     }        
     
     // --- USB DEVICE CONFIGURATION ---
@@ -327,20 +433,14 @@ struct Config
         uint8_t pin;        // physical input GPIO pin - a USB-to-PinName mapping index
         uint8_t typ;        // key type reported to PC - a BtnTypeXxx value
         uint8_t val;        // key value reported - meaning depends on 'typ' value
+        uint8_t flags;      // key flags - a bitwise combination of BtnFlagXxx values
         
-    } button[MAX_BUTTONS];
+    } __attribute__((packed))  button[MAX_BUTTONS] __attribute((packed));
     
 
     // --- LedWiz Output Port Setup ---
-    struct
-    {
-        uint8_t typ;        // port type:  a PortTypeXxx value
-        uint8_t pin;        // physical output pin:  for a GPIO port, this is an index in the 
-                            // USB-to-PinName mapping list; for a TLC5940 or 74HC595 port, it's 
-                            // the output number, starting from 0 for OUT0 on the first chip in 
-                            // the daisy chain.  For inactive and virtual ports, it's unused.
-        uint8_t flags;      // flags:  a combination of PortFlagXxx values
-    } outPort[MAX_OUT_PORTS];
+    LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 
+    LedWizPortCfg specialPort[1];          // special ports (Night Mode indicator, etc)
 };
 
 #endif

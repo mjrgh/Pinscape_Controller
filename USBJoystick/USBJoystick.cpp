@@ -585,7 +585,34 @@ bool USBJoystick::USBCallback_setConfiguration(uint8_t configuration)
     return true;
 }
 
-// Handle messages on endpoint 4 - this is the keyboard interface.
+// Handle incoming messages on the joystick/LedWiz interface = endpoint 1.
+// This interface receives LedWiz protocol commands and commands using our
+// custom LedWiz protocol extensions.
+//
+// We simply queue the messages in our circular buffer for processing in 
+// the main loop.  The circular buffer object is designed for safe access
+// from the interrupt handler using the rule that only the interrupt 
+// handler can change the write pointer, and only the regular code can
+// change the read pointer.
+bool USBJoystick::EP1_OUT_callback()
+{
+    // Read this message
+    union {
+        LedWizMsg msg;
+        uint8_t buf[MAX_HID_REPORT_SIZE];
+    } buf;
+    uint32_t bytesRead = 0;
+    USBDevice::readEP(EP1OUT, buf.buf, &bytesRead, MAX_HID_REPORT_SIZE);
+    
+    // if it's the right length, queue it to our circular buffer
+    if (bytesRead == 8)
+        lwbuf.write(buf.msg);
+
+    // start the next read
+    return readStart(EP1OUT, 9);
+}
+
+// Handle incoming messages on the keyboard interface = endpoint 4.
 // The host uses this to send updates for the keyboard indicator LEDs
 // (caps lock, num lock, etc).  We don't do anything with these, but
 // we have to read them to keep the pipe open.

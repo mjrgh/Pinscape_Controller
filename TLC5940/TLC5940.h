@@ -20,49 +20,47 @@
 #ifndef TLC5940_H
 #define TLC5940_H
 
-// Should we do the grayscale update within the blanking interval?
-// If this is set to 1, we'll send grayscale data during the blanking
-// interval; if 0, we'll send grayscale during the PWM cycle.
-// Mode 0 is the *intended* way of using these chips, but mode 1
-// produces a more stable signal in my test setup.
+// Data Transmission Mode.
 //
-// In my breadboard testing, using the standard data-during-PWM
-// mode causes some amount of signal instability with multiple
-// daisy-chained TLC5940's.  It appears that there's some signal
-// interference (maybe RF or electrical ringing in the wires) that
-// can make the bit data and/or clock prone to noise that causes
-// random bits to propagate down the daisy chain.  This happens
-// frequently enough in my breadboard setup to be visible as
-// regular flicker.  Careful wiring, short wire runs, and decoupling
-// capacitors noticeably improve it, but I haven't been able to 
-// eliminate it entirely in my test setup.  Using the data-during-
-// blanking mode, however, *does* eliminate it entirely.
+// NOTE!  This section contains a possible workaround to try if you're 
+// having data signal stability problems with your TLC5940 chips.  If
+// your chips are working properly, you can ignore this part!
 //
-// It clearly should be possible to eliminate the signal problems
-// in a well-designed PCB layout, but for the time being, I'm
-// making data-during-blanking the default, since it provides
-// such a noticeable improvement in my test setup, and the cost
-// is minimal.  The cost is that it lengthens the blanking interval
-// slightly.  With four chips and the SPI clock at 28MHz, the 
-// full data update takes 27us; with the PWM clock at 500kHz, the 
-// grayscale cycle is 8192us.  This means that the 27us data send 
-// keeps the BLANK asserted for an additional 0.3% of the cycle 
-// time, which in term reduces output brightness by the same amount.
-// This brightness reduction isn't noticeable on its own, but it
-// can be seen as a flicker on data cycles if we send data on
-// some blanking cycles but not on others.  To eliminate the
-// flicker, the code sends a data update on *every* cycle when
-// using this mode to ensure that the 0.3% brightness reduction
-// is uniform across time.
+// The software has two options for sending data updates to the chips:
 //
-// When using this code with TLC5940 chips on a PCB, I recommend
-// doing a test: set this to 0, run the board, turn on all outputs
-// (connected to LEDs), and observe the results.  If you don't
-// see any randomness or flicker in a minute or two of observation,
-// you're getting a good clean signal throughout the daisy chain
-// and don't need the workaround.  If you do see any instability, 
-// set this back to 1.
-#define DATA_UPDATE_INSIDE_BLANKING  1
+// Mode 0:  Send data *during* the grayscale cycle.  This is the way the
+// chips are designed to be used.  While the grayscale clock is running,
+// we send data for the *next* cycle, then latch the updated data to the
+// output registers during the blanking interval at the end of the cycle.
+//
+// Mode 1:  Send data *between* grayscale cycles.  In this mode, we send
+// each complete update during a blanking period, then latch the update
+// and start the next grayscale cycle.  This isn't the way the chips were
+// intended to be used, but it works.  The disadvantage is that it requires
+// the blanking interval to be extended to be long enough for the full
+// data update (192 bits * the number of chips in the chain).  Since the
+// outputs are turned off for the entire blanking period, this reduces
+// the overall brightness/intensity of the outputs by reducing the duty
+// cycle.  The TLC5940 chips can't achieve 100% duty cycle to begin with,
+// since they require a certain minimum time in the blanking interval
+// between grayscale cycles; however, the minimum is so short that the
+// duty cycle is close to 100%.  With the full data transmission stuffed
+// into the blanking interval, we reduce the duty cycle further below
+// 100%.  With four chips in the chain, a 28 MHz data clock, and a
+// 500 kHz grayscale clock, the reduction is about 0.3%.
+//
+// By default, we use Mode 0, because that's the timing model specified
+// by the manufacturer, and empirically it works well with the Pinscape 
+// Expansion boards.  
+// 
+// So what's the point of Mode 1?  In early testing, with a breadboard 
+// setup, I saw some problems with data signal stability, which manifested 
+// as sporadic flickering in the outputs.  Switching to Mode 1 improved
+// the signal stability considerably.  I'm therefore leaving this code
+// available as an option in case anyone runs into similar signal problems
+// and wants to try the alternative mode as a workaround.
+//
+#define DATA_UPDATE_INSIDE_BLANKING  0
 
 #include "mbed.h"
 #include "FastPWM.h"
@@ -99,31 +97,28 @@
   * isn't a factor.  E.g., at SPI=30MHz and GSCLK=500kHz, 
   * t(blank) is 8192us and t(refresh) is 25us.
   */
-#define SPI_SPEED 2800000
+#define SPI_SPEED 28000000
 
 /**
   * The rate at which the GSCLK pin is pulsed.   This also controls 
   * how often the reset function is called.   The reset function call
-  * rate is (1/GSCLK_SPEED) * 4096.  The maximum reliable rate is
+  * interval is (1/GSCLK_SPEED) * 4096.  The maximum reliable rate is
   * around 32Mhz.  It's best to keep this rate as low as possible:
   * the higher the rate, the higher the refresh() call frequency,
   * so the higher the CPU load.
   *
-  * The lower bound is probably dependent on the application.  For 
-  * driving LEDs, the limiting factor is that lower rates will increase
-  * visible flicker.  200 kHz seems to be a good lower bound for LEDs.  
-  * That provides about 48 cycles per second - that's about the same as
-  * the 50 Hz A/C cycle rate in many countries, which was itself chosen
-  * so that incandescent lights don't flicker.  (This rate is a function 
-  * of human eye physiology, which has its own refresh cycle of sorts
-  * that runs at about 50 Hz.  If you're designing an LED system for
-  * viewing by cats or drosophila, you might want to look into your
-  * target species' eye physiology, since the persistence of vision
-  * rate varies quite a bit from species to species.)  Flicker tends to 
-  * be more noticeable in LEDs than in incandescents, since LEDs don't
-  * have the thermal inertia of incandescents, so we use a slightly
-  * higher default here.  500 kHz = 122 full grayscale cycles per
-  * second = 122 reset calls per second (call every 8ms).
+  * The lower bound depends on the application.  For driving LEDs, 
+  * the limiting factor is that lower rates will increase visible flicker.
+  * A GSCLK speed of 200 kHz is about as low as you can go with LEDs 
+  * without excessive flicker.  That equals about 48 full grayscale
+  * cycles per second.  That might seem perfectly good in that it's 
+  * about the same as the standard 50Hz A/C cycle rate in many countries, 
+  * but the 50Hz rate was chosen to minimize visible flicker in 
+  * incandescent lamps, not LEDs.  LEDs need a higher rate because they 
+  * don't have thermal inertia as incandescents do.  The default we use 
+  * here is 500 kHz = 122 full grayscale cycles per second.  That seems
+  * to produce excellent visual results.  Higher rates would probably
+  * produce diminishing returns given that they also increase CPU load.
   */
 #define GSCLK_SPEED    500000
 
@@ -187,8 +182,7 @@ public:
         // grayscale levels, but SPI is ultimately just a bit-level serial format,
         // so we can reformat the 12-bit blocks into 8-bit bytes to fit the 
         // KL25Z's limits.  This should work equally well on other microcontrollers 
-        // that are more flexible.  The TLC5940 appears to require polarity/phase
-        // format 0.
+        // that are more flexible.  The TLC5940 requires polarity/phase format 0.
         spi.format(8, 0);
         spi.frequency(SPI_SPEED);
         
@@ -211,6 +205,7 @@ public:
         // Allocate a DMA buffer.  The transfer on each cycle is 192 bits per
         // chip = 24 bytes per chip.
         dmabuf = new char[nchips*24];
+        memset(dmabuf, 0, nchips*24);
         
         // Set up the Simple DMA interface object.  We use the DMA controller to
         // send grayscale data updates to the TLC5940 chips.  This lets the CPU
@@ -218,14 +213,14 @@ public:
         // allows our blanking interrupt handler return almost immediately.
         // The DMA transfer is from our internal DMA buffer to SPI0, which is
         // the SPI controller physically connected to the TLC5940s.
-        sdma.source(dmabuf, 1);
-        sdma.destination(&(SPI0->D), 0, 8);
+        sdma.source(dmabuf, true, 8);
+        sdma.destination(&(SPI0->D), false, 8);
         sdma.trigger(Trigger_SPI0_TX);
         sdma.attach(this, &TLC5940::dmaDone);
         
         // Enable DMA on SPI0.  SimpleDMA doesn't do this for us; we have to
         // do it explicitly.  This is just a matter of setting bit 5 (TXDMAE)
-        // in the SPI controllers Control Register 2 (C2).
+        // in the SPI controller's Control Register 2 (C2).
         SPI0->C2 |= 0x20; // set bit 5 = 0x20 = TXDMAE in SPI0 control register 2
 
         // Configure the GSCLK output's frequency
@@ -257,7 +252,7 @@ public:
         // in the timer clock vs the PWM clock that determines the GSCLCK
         // output to the TLC5940), which is far less noticeable than a 
         // constantly rotating phase misalignment.
-        reset_timer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
+        resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
     }
     
     ~TLC5940()
@@ -306,7 +301,7 @@ private:
 
     // Timeout to end each PWM cycle.  This is a one-shot timer that we reset
     // on each cycle.
-    Timeout reset_timer;
+    Timeout resetTimer;
     
     // Has new GS/DC data been loaded?
     volatile bool newGSData;
@@ -336,15 +331,21 @@ private:
         // update on every cycle, we make the brightness reduction
         // uniform across time, which makes it less perceptible.
         update();
+        sdma.start(nchips*24);
+
         
 #else // DATA_UPDATE_INSIDE_BLANKING
         
         // end the blanking interval
         endBlank();
         
-        // if we have pending grayscale data, start sending it
+        // if we have pending grayscale data, update the DMA data
         if (newGSData)
             update();
+                    
+        // send out the DMA contents
+        sdma.start(nchips*24);
+
 
 #endif // DATA_UPDATE_INSIDE_BLANKING
     }
@@ -373,7 +374,7 @@ private:
         gsclk.write(.5);
         
         // set up the next blanking interrupt
-        reset_timer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
+        resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
     }
     
     void update()
@@ -412,9 +413,6 @@ private:
             // third byte - element i bits 0-7
             dmabuf[dst++] = (gs[i] & 0x0FF);
         }
-        
-        // Start the DMA transfer
-        sdma.start(nchips*24);
         
         // we've now cleared the new GS data
         newGSData = false;

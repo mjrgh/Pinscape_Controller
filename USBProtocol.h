@@ -341,7 +341,14 @@
 //                    2 = regular keyboard key -> byte 6 is the USB key code (see below)
 //                    3 = keyboard modifier key -> byte 6 is the USB modifier code (see below)
 //                    4 = media control key -> byte 6 is the USB key code (see below)
+//                    5 = special button -> byte 6 is the special button code (see below)
 //          byte 6 = key code, which depends on the key type in byte 5
+//          byte 7 = flags - a combination of these bit values:
+//                    0x01 = pulse mode.  This reports a physical on/off switch's state
+//                           to the host as a brief key press whenever the switch changes
+//                           state.  This is useful for the VPinMAME Coin Door button,
+//                           which requires the End key to be pressed each time the
+//                           door changes state.
 //          
 // 13 -> LedWiz output port setup.  This sets up one output port; it can be repeated
 //       for each port to be configured.  There are 203 possible slots for output ports, 
@@ -378,7 +385,33 @@
 //                       (byte 5) is ignored for this port type.
 //         byte 5 = physical output ID, interpreted according to the value in byte 4
 //         byte 6 = flags: a combination of these bit values:
-//                   1 = active-high output (0V on output turns attached device ON)
+//                   0x01 = active-high output (0V on output turns attached device ON)
+//                   0x02 = noisemaker device: disable this output when "night mode" is engaged
+//
+//       Note that the on-board LED segments can be used as LedWiz output ports.  This
+//       is useful for testing a new installation with DOF or other PC software without
+//       having to connect any external devices.  Assigning the on-board LED segments to
+//       output ports overrides their normal status/diagnostic display use, so the normal
+//       status flash pattern won't appear when they're used this way.
+//
+//       Special port numbers:  if the LedWiz port number is one of these special values,
+//       the physical output is used for a special purpose.  These ports aren't visible
+//       to the PC as LedWiz ports; they're for internal use by the controller.  The
+//       special port numbers are:
+//
+//         254 = Night Mode indicator lamp.  This port is turned on when night mode
+//               is engaged, and turned off when night mode is disengaged.  This can
+//               be used, for example, to control an indicator LED inside a lighted
+//               momentary pushbutton switch used to activate night mode.  The light 
+//               provides visual feedback that the mode is turned on.
+//
+//
+// 14 -> Engage/disengage Night Mode.  When night mode is engaged, LedWiz outputs marked
+//       as "noisemaker" devices are disabled.  Byte 3 is 1 to engage night mode, 0 to
+//       cancel night mode.  Note that sending this command will override the current
+//       switch setting, if a toggle switch is configured to control Night Mode.  Toggling
+//       the switch will take control via the switch again.
+
 
 
 // --- PIN NUMBER MAPPINGS ---
@@ -407,44 +440,45 @@
 //    14 = PTB9
 //    15 = PTB10
 //    16 = PTB11
-//    17 = PTC0
-//    18 = PTC1
-//    19 = PTC2
-//    20 = PTC3
-//    21 = PTC4
-//    22 = PTC5
-//    23 = PTC6
-//    24 = PTC7
-//    25 = PTC8
-//    26 = PTC9
-//    27 = PTC10
-//    28 = PTC11
-//    29 = PTC12
-//    30 = PTC13
-//    31 = PTC16
-//    32 = PTC17
-//    33 = PTD0
-//    34 = PTD1
-//    35 = PTD2
-//    36 = PTD3
-//    37 = PTD4
-//    38 = PTD5
-//    39 = PTD6
-//    40 = PTD7
-//    41 = PTE0
-//    42 = PTE1
-//    43 = PTE2
-//    44 = PTE3
-//    45 = PTE4
-//    46 = PTE5
-//    47 = PTE20
-//    48 = PTE21
-//    49 = PTE22
-//    50 = PTE23
-//    51 = PTE29
-//    52 = PTE30
-//    53 = PTE31
-
+//    17 = PTB18    (on-board LED Red segment - not exposed as a header pin)
+//    18 = PTB19    (on-board LED Green segment - not exposed as a header pin)
+//    19 = PTC0
+//    20 = PTC1
+//    21 = PTC2
+//    22 = PTC3
+//    23 = PTC4
+//    24 = PTC5
+//    25 = PTC6
+//    26 = PTC7
+//    27 = PTC8
+//    28 = PTC9
+//    29 = PTC10
+//    30 = PTC11
+//    31 = PTC12
+//    32 = PTC13
+//    33 = PTC16
+//    34 = PTC17
+//    35 = PTD0
+//    36 = PTD1     (on-board LED Blue segment)
+//    37 = PTD2
+//    38 = PTD3
+//    39 = PTD4
+//    40 = PTD5
+//    41 = PTD6
+//    42 = PTD7
+//    43 = PTE0
+//    44 = PTE1
+//    45 = PTE2
+//    46 = PTE3
+//    47 = PTE4
+//    48 = PTE5
+//    49 = PTE20
+//    50 = PTE21
+//    51 = PTE22
+//    52 = PTE23
+//    53 = PTE29
+//    54 = PTE30
+//    55 = PTE31
 
 // --- USB KEYBOARD SCAN CODES ---
 //
@@ -516,4 +550,20 @@
 //    0x01 = Volume Up
 //    0x02 = Volume Down
 //    0x04 = Mute on/off
+
+
+// --- SPECIAL BUTTON KEY CODES ---
+//
+// Use these for special keys in the button mappings
+//
+//    0x01 = Night mode switch, momentary switch mode.  Pushing this button 
+//           engages night mode, disabling all LedWiz outputs marked with the 
+//           "noisemaker" flag.  Other outputs are unaffected.  Pushing
+//           the button again disengages night mode.  Use this option if the
+//           physical button attached to the input is a momentary switch type.
+//
+//    0x02 = Night mode switch, toggle switch mode.  When this switch is on,
+//           night mode is engaged; when the switch is off, night mode is 
+//           disengaged.  Use this option if the physical switch attached to
+//           to the input is a toggle switch (not a momentary switch).
 
