@@ -7,12 +7,34 @@
 
 // ------ OUTGOING MESSAGES (DEVICE TO HOST) ------
 //
+// 1. Joystick reports
 // In most cases, our outgoing messages are HID joystick reports, using the
 // format defined in USBJoystick.cpp.  This allows us to be installed on
 // Windows as a standard USB joystick, which all versions of Windows support
 // using in-the-box drivers.  This allows a completely transparent, driverless,
-// plug-and-play installation experience on Windows.
+// plug-and-play installation experience on Windows.  Our joystick report
+// looks like this (see USBJoystick.cpp for the formal HID report descriptor):
 //
+//    ss     status bits:  0x01 -> plunger enabled
+//    00     always zero for joystick reports
+//    bb     joystick buttons, low byte (buttons 1-16, 1 bit per button)
+//    bb     joystick buttons, high byte (buttons 17-32)
+//    xx     low byte of X position = nudge/accelerometer X axis
+//    xx     high byte of X position
+//    yy     low byte of Y position = nudge/accelerometer Y axis
+//    yy     high byte of Y position
+//    zz     low byte of Z position = plunger position
+//    zz     high byte of Z position
+//
+// The X, Y, and Z values are 16-bit signed integers.  The accelerometer
+// values are on an abstract scale, where 0 represents no acceleration,
+// negative maximum represents -1g on that axis, and positive maximum
+// represents +1g on that axis.  For the plunger position, 0 is the park
+// position (the rest position of the plunger) and positive values represent
+// retracted (pulled back) positions.  A negative value means that the plunger
+// is pushed forward of the park position.
+//
+// 2. Special reports
 // We subvert the joystick report format in certain cases to report other 
 // types of information, when specifically requested by the host.  This allows
 // our custom configuration UI on the Windows side to query additional 
@@ -20,15 +42,24 @@
 // define a custom vendor-specific "status" field in the reports that we
 // use to identify these special reports, as described below.
 //
-// Normal joystick reports always have 0 in the high bit of the first byte
+// Normal joystick reports always have 0 in the high bit of the 2nd byte
 // of the report.  Special non-joystick reports always have 1 in the high bit 
 // of the first byte.  (This byte is defined in the HID Report Descriptor
 // as an opaque vendor-defined value, so the joystick interface on the
 // Windows side simply ignores it.)
 //
-// Pixel dumps:  requested by custom protocol message 65 3 (see below).  
-// This sends a series of reports to the host in the following format, for 
-// as many messages as are neessary to report all pixels:
+// 2A. Plunger sensor pixel dump
+// Software on the PC can request a full read of the pixels from the plunger 
+// image sensor (if an imaging sensor type is being used) by sending custom 
+// protocol message 65 3 (see below).  Normally, the pixels from the image
+// sensor are read and processed on the controller device without being sent
+// to the PC; the PC only receives the plunger position reading obtained from
+// analyzing the image data.  For debugging and setup purposes, software on
+// the host can use this special report to obtain the full image pixel array.
+// The image sensors we use have too many pixels to fit into one report, so 
+// we have to send a series of reports to transmit the full image.  We send
+// as many reports as necessary to transmit the full image.  Each report
+// looks like this:
 //
 //    bytes 0:1 = 11-bit index, with high 5 bits set to 10000.  For 
 //                example, 0x04 0x80 indicates index 4.  This is the 
@@ -38,8 +69,9 @@
 //    bytes 4:5 = brightness of pixel at index+1
 //    etc for the rest of the packet
 //
-// Configuration query:  requested by custom protocol message 65 4 (see 
-// below).  This sends one report to the host using this format:
+// 2B. Configuration query.
+// This is requested by sending custom protocol message 65 4 (see below).
+// In reponse, the device sends one report to the host using this format:
 //
 //    bytes 0:1 = 0x8800.  This has the bit pattern 10001 in the high
 //                5 bits, which distinguishes it from regular joystick
@@ -156,6 +188,9 @@
 //
 // 65  -> Miscellaneous control message.  The second byte specifies the specific
 //        operation:
+//
+//        0 -> No Op - does nothing.  (This can be used to send a test message on the
+//             USB endpoint.)
 //
 //        1 -> Set device unit number and plunger status, and save the changes immediately
 //             to flash.  The device will automatically reboot after the changes are saved.

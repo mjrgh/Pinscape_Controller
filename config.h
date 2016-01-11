@@ -216,6 +216,7 @@ struct Config
         
         button[20].typ = BtnTypeMedia;
         button[20].val = 0x01;  // vol up
+        
 #endif
         
 #if 1 // $$$

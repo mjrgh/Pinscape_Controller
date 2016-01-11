@@ -173,10 +173,6 @@ public:
         // power-on, for example.)
         blank = 1;
         
-        // allocate the grayscale buffer, and set all outputs to fully off
-        gs = new unsigned short[nchips*16];
-        memset(gs, 0, nchips*16*sizeof(gs[0]));
-        
         // Configure SPI format and speed.  Note that KL25Z ONLY supports 8-bit
         // mode.  The TLC5940 nominally requires 12-bit data blocks for the
         // grayscale levels, but SPI is ultimately just a bit-level serial format,
@@ -202,8 +198,8 @@ public:
         xlat = 1;
         xlat = 0;
 
-        // Allocate a DMA buffer.  The transfer on each cycle is 192 bits per
-        // chip = 24 bytes per chip.
+        // Allocate our DMA buffers.  The transfer on each cycle is 192 bits per
+        // chip = 24 bytes per chip. 
         dmabuf = new char[nchips*24];
         memset(dmabuf, 0, nchips*24);
         
@@ -257,20 +253,55 @@ public:
     
     ~TLC5940()
     {
-        delete [] gs;
         delete [] dmabuf;
     }
 
-    /**
-      *  Set the next chunk of grayscale data to be sent
-      *  @param data - Array of 16 bit shorts containing 16 12 bit grayscale data chunks per TLC5940
-      *  @note These must be in intervals of at least (1/GSCLK_SPEED) * 4096 to be sent
+     /*
+      *  Set an output
       */
     void set(int idx, unsigned short data) 
     {
-        // store the data, and flag the pending update for the interrupt handler to carry out
-        gs[idx] = data; 
-        newGSData = true;
+        // validate the index
+        if (idx >= 0 && idx < nchips*16)
+        {
+            // Figure the DMA buffer location of the data.  The DMA buffer has the
+            // packed bit format that we send across the wire, with 12 bits per output,
+            // arranged from last output to first output (N = number of outputs = nchips*16):
+            //
+            //       byte 0  =  high 8 bits of output N-1
+            //            1  =  low 4 bits of output N-1 | high 4 bits of output N-2
+            //            2  =  low 8 bits of N-2
+            //            3  =  high 8 bits of N-3
+            //            4  =  low 4 bits of N-3 | high 4 bits of N-2
+            //            5  =  low 8bits of N-4
+            //           ...
+            //  24*nchips-3  =  high 8 bits of output 1
+            //  24*nchips-2  =  low 4 bits of output 1 | high 4 bits of output 0
+            //  24*nchips-1  =  low 8 bits of output 0
+            //
+            // So this update will affect two bytes.  If the output number if even, we're
+            // in the high 4 + low 8 pair; if odd, we're in the high 8 + low 4 pair.
+            int di = nchips*24 - 3 - (3*(idx/2));
+            if (idx & 1)
+            {
+                //printf("out %d = %d -> updating dma[%d] odd (xx x. ..)\r\n", idx, data, di);
+                // ODD = high 8 | low 4
+                dmabuf[di]    = uint8_t((data >> 4) & 0xff);
+                dmabuf[di+1] &= 0x0F;
+                dmabuf[di+1] |= uint8_t((data << 4) & 0xf0);
+            }
+            else
+            {
+                // EVEN = high 4 | low 8
+                //printf("out %d = %d -> updating dma[%d] even (.. .x xx)\r\n", idx, data, di);
+                dmabuf[di+1] &= 0xF0;
+                dmabuf[di+1] |= uint8_t((data >> 8) & 0x0f);
+                dmabuf[di+2]  = uint8_t(data & 0xff);
+            }
+            
+            // note the update
+            newGSData = true;
+        }
     }
 
 private:
@@ -330,9 +361,7 @@ private:
         // did updates on some cycles and not others.  By doing an
         // update on every cycle, we make the brightness reduction
         // uniform across time, which makes it less perceptible.
-        update();
         sdma.start(nchips*24);
-
         
 #else // DATA_UPDATE_INSIDE_BLANKING
         
@@ -340,12 +369,14 @@ private:
         endBlank();
         
         // if we have pending grayscale data, update the DMA data
-        if (newGSData)
-            update();
-                    
-        // send out the DMA contents
-        sdma.start(nchips*24);
-
+        // if (newGSData) 
+        {
+            // send out the DMA contents
+            sdma.start(nchips*24);
+            
+            // we don't have to send again until the next gs data cahnge
+            newGSData = false;
+        }
 
 #endif // DATA_UPDATE_INSIDE_BLANKING
     }
@@ -377,47 +408,6 @@ private:
         resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
     }
     
-    void update()
-    {
-        // Send new grayscale data to the TLC5940 chips.
-        //
-        // To do this, we set up our DMA buffer with the bytes formatted exactly
-        // as they will go across the wire, then kick off the transfer request with 
-        // the DMA controller.  We can then return from the interrupt and continue
-        // with other tasks while the DMA hardware handles the transfer for us.
-        // When the transfer is completed, the DMA controller will fire an
-        // interrupt, which will call our interrupt handler, which will finish
-        // the blanking cycle.
-        //
-        // The serial format orders the outputs from last to first (output #15 on 
-        // the last chip in the daisy-chain to output #0 on the first chip).  For 
-        // each output, we send 12 bits containing the grayscale level (0 = fully 
-        // off, 0xFFF = fully on).  Bit order is most significant bit first.  
-        // 
-        // The KL25Z SPI can only send in 8-bit increments, so we need to divvy up 
-        // the 12-bit outputs into 8-bit bytes.  Each pair of 12-bit outputs adds up 
-        // to 24 bits, which divides evenly into 3 bytes, so send each pairs of 
-        // outputs as three bytes:
-        //
-        //   [    element i+1 bits   ]  [ element i bits        ]
-        //   11 10 9 8 7 6 5 4 3 2 1 0  11 10 9 8 7 6 5 4 3 2 1 0
-        //   [  first byte   ] [   second byte  ] [  third byte ]
-        for (int i = (16 * nchips) - 2, dst = 0 ; i >= 0 ; i -= 2)
-        {
-            // first byte - element i+1 bits 4-11
-            dmabuf[dst++] = (((gs[i+1] & 0xFF0) >> 4) & 0xff);
-            
-            // second byte - element i+1 bits 0-3, then element i bits 8-11
-            dmabuf[dst++] = ((((gs[i+1] & 0x00F) << 4) | ((gs[i] & 0xF00) >> 8)) & 0xFF);
-            
-            // third byte - element i bits 0-7
-            dmabuf[dst++] = (gs[i] & 0x0FF);
-        }
-        
-        // we've now cleared the new GS data
-        newGSData = false;
-    }
-
     // Interrupt handler for DMA completion.  The DMA controller calls this
     // when it finishes with the transfer request we set up above.  When the
     // transfer is done, we simply end the blanking cycle and start a new

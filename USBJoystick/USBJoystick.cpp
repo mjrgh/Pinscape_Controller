@@ -421,7 +421,7 @@ uint8_t * USBJoystick::configurationDesc()
             C_RESERVED | C_SELF_POWERED,    // bmAttributes
             C_POWER(0),                     // bMaxPowerHello World from Mbed
         
-            // INTERFACE 0 - JOYSTICK/LEDWIZ
+            // ***** INTERFACE 0 - JOYSTICK/LEDWIZ ******
             INTERFACE_DESCRIPTOR_LENGTH,    // bLength
             INTERFACE_DESCRIPTOR,           // bDescriptorType
             0x00,                           // bInterfaceNumber - first interface = 0
@@ -458,7 +458,7 @@ uint8_t * USBJoystick::configurationDesc()
             MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
             1,                              // bInterval (milliseconds)
             
-            // INTERFACE 1 - KEYBOARD
+            // ****** INTERFACE 1 - KEYBOARD ******
             INTERFACE_DESCRIPTOR_LENGTH,    // bLength
             INTERFACE_DESCRIPTOR,           // bDescriptorType
             0x01,                           // bInterfaceNumber - second interface = 1
@@ -604,12 +604,16 @@ bool USBJoystick::EP1_OUT_callback()
     uint32_t bytesRead = 0;
     USBDevice::readEP(EP1OUT, buf.buf, &bytesRead, MAX_HID_REPORT_SIZE);
     
+//    printf("joy.read len=%d [%2x %2x %2x %2x %2x %2x %2x %2x], msg=[%2x %2x %2x %2x %2x %2x %2x %2x]\r\n", bytesRead, 
+//        buf.buf[0], buf.buf[1], buf.buf[2], buf.buf[3], buf.buf[4], buf.buf[5], buf.buf[6], buf.buf[7],
+//        buf.msg.data[0], buf.msg.data[1], buf.msg.data[2], buf.msg.data[3], buf.msg.data[4], buf.msg.data[5], buf.msg.data[6], buf.msg.data[7]);
+    
     // if it's the right length, queue it to our circular buffer
     if (bytesRead == 8)
         lwbuf.write(buf.msg);
 
     // start the next read
-    return readStart(EP1OUT, 9);
+    return readStart(EP1OUT, MAX_HID_REPORT_SIZE);
 }
 
 // Handle incoming messages on the keyboard interface = endpoint 4.
@@ -626,3 +630,4 @@ bool USBJoystick::EP4_OUT_callback()
     // start the next read
     return readStart(EP4OUT, MAX_HID_REPORT_SIZE);
 }
+

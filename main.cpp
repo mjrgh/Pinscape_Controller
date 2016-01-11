@@ -1063,6 +1063,11 @@ void initButtons(Config &cfg, bool &kbKeys)
                 bs->mediakey = val;
                 kbKeys = true;
                 break;
+                
+            case BtnTypeSpecial:
+                // special key
+                bs->special = val;
+                break;
             }
         }
     }
@@ -1438,6 +1443,26 @@ public:
             
              // reset the timer
              tCenter_.reset();
+             
+             // If we haven't seen an interrupt in a while, do an explicit read to
+             // "unstick" the device.  The device can become stuck - which is to say,
+             // it will stop delivering data-ready interrupts - if we fail to service
+             // one data-ready interrupt before the next one occurs.  Reading a sample
+             // will clear up this overrun condition and allow normal interrupt
+             // generation to continue.
+             //
+             // Note that this stuck condition *shouldn't* ever occur - if it does,
+             // it means that we're spending a long period with interrupts disabled
+             // (either in a critical section or in another interrupt handler), which
+             // will likely cause other worse problems beyond the sticky accelerometer.
+             // Even so, it's easy to detect and correct, so we'll do so for the sake
+             // of making the system more fault-tolerant.
+             if (tInt_.read() > 1.0f)
+             {
+                 printf("unwedging the accelerometer\r\n");
+                float x, y, z;
+                mma_.getAccXYZ(x, y, z);
+             }
          }
          
          // report our integrated velocity reading in x,y
@@ -1479,7 +1504,7 @@ private:
         mma_.getAccXYZ(x, y, z);
         
         // calculate the time since the last interrupt
-        float dt = tInt_.read_us()/1.0e6;
+        float dt = tInt_.read();
         tInt_.reset();
 
         // integrate the time slice from the previous reading to this reading
@@ -2250,7 +2275,7 @@ void configVarMsg(uint8_t *data)
 // Handle an input report from the USB host.  Input reports use our extended
 // LedWiz protocol.
 //
-void handleInputMsg(uint8_t data[8], USBJoystick &js, int &z)
+void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
 {
     // LedWiz commands come in two varieties:  SBA and PBA.  An
     // SBA is marked by the first byte having value 64 (0x40).  In
@@ -2270,6 +2295,7 @@ void handleInputMsg(uint8_t data[8], USBJoystick &js, int &z)
     //               N is (first byte - 200)*7
     //   other    -> reserved for future use
     //
+    uint8_t *data = lwm.data;
     if (data[0] == 64) 
     {
         // LWZ-SBA - first four bytes are bit-packed on/off flags
@@ -2325,40 +2351,47 @@ void handleInputMsg(uint8_t data[8], USBJoystick &js, int &z)
         // and isn't used for any other LedWiz message, so we appropriate
         // it for our own private use.  The first byte specifies the 
         // message type.
-        if (data[1] == 1)
+        switch (data[1])
         {
+        case 0:
+            // No Op
+            break;
+            
+        case 1:
             // 1 = Old Set Configuration:
             //     data[2] = LedWiz unit number (0x00 to 0x0f)
             //     data[3] = feature enable bit mask:
             //               0x01 = enable plunger sensor
-
-            // get the new LedWiz unit number - this is 0-15, whereas we
-            // we save the *nominal* unit number 1-16 in the config                
-            uint8_t newUnitNo = (data[2] & 0x0f) + 1;
-
-            // we'll need a reset if the LedWiz unit number is changing
-            bool needReset = (newUnitNo != cfg.psUnitNo);
+            {
+    
+                // get the new LedWiz unit number - this is 0-15, whereas we
+                // we save the *nominal* unit number 1-16 in the config                
+                uint8_t newUnitNo = (data[2] & 0x0f) + 1;
+    
+                // we'll need a reset if the LedWiz unit number is changing
+                bool needReset = (newUnitNo != cfg.psUnitNo);
+                
+                // set the configuration parameters from the message
+                cfg.psUnitNo = newUnitNo;
+                cfg.plunger.enabled = data[3] & 0x01;
+                
+                // update the status flags
+                statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
+                
+                // if the plunger is no longer enabled, use 0 for z reports
+                if (!cfg.plunger.enabled)
+                    z = 0;
+                
+                // save the configuration
+                saveConfigToFlash();
+                
+                // reboot if necessary
+                if (needReset)
+                    reboot(js);
+            }
+            break;
             
-            // set the configuration parameters from the message
-            cfg.psUnitNo = newUnitNo;
-            cfg.plunger.enabled = data[3] & 0x01;
-            
-            // update the status flags
-            statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
-            
-            // if the plunger is no longer enabled, use 0 for z reports
-            if (!cfg.plunger.enabled)
-                z = 0;
-            
-            // save the configuration
-            saveConfigToFlash();
-            
-            // reboot if necessary
-            if (needReset)
-                reboot(js);
-        }
-        else if (data[1] == 2)
-        {
+        case 2:
             // 2 = Calibrate plunger
             // (No parameters)
             
@@ -2366,33 +2399,32 @@ void handleInputMsg(uint8_t data[8], USBJoystick &js, int &z)
             calBtnState = 3;
             calBtnTimer.reset();
             cfg.plunger.cal.reset(plungerSensor->npix);
-        }
-        else if (data[1] == 3)
-        {
+            break;
+            
+        case 3:
             // 3 = pixel dump
             // (No parameters)
             reportPix = true;
             
             // show purple until we finish sending the report
             diagLED(1, 0, 1);
-        }
-        else if (data[1] == 4)
-        {
+            break;
+            
+        case 4:
             // 4 = hardware configuration query
             // (No parameters)
-            wait_ms(1);
             js.reportConfig(
                 numOutputs, 
                 cfg.psUnitNo - 1,   // report 0-15 range for unit number (we store 1-16 internally)
                 cfg.plunger.cal.zero, cfg.plunger.cal.max);
-        }
-        else if (data[1] == 5)
-        {
+            break;
+            
+        case 5:
             // 5 = all outputs off, reset to LedWiz defaults
             allOutputsOff();
-        }
-        else if (data[1] == 6)
-        {
+            break;
+            
+        case 6:
             // 6 = Save configuration to flash.
             saveConfigToFlash();
             
@@ -2401,6 +2433,7 @@ void handleInputMsg(uint8_t data[8], USBJoystick &js, int &z)
             // so we don't bother tracking whether or not a reboot is
             // really needed.
             reboot(js);
+            break;
         }
     }
     else if (data[0] == 66)
@@ -2518,9 +2551,10 @@ void preConnectFlasher()
 //
 int main(void)
 {
-    printf("\r\nPinscape Controller starting\r\n"); // $$$ debug
+    printf("\r\nPinscape Controller starting\r\n");
+    // memory config debugging: {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);}
     
-    // clear the I2C bus for the accelerometer
+    // clear the I2C bus (for the accelerometer)
     clear_i2c();
 
     // load the saved configuration
@@ -2715,12 +2749,12 @@ int main(void)
     // host requests
     for (;;)
     {
-        // Process incoming reports
-        LedWizMsg lwmsg;
-        for (int rr = 0 ; rr < 64 && js.readLedWizMsg(lwmsg) ; ++rr) 
-            handleInputMsg(lwmsg.data, js, z);
+        // Process incoming reports on the joystick interface.  This channel
+        // is used for LedWiz commands are our extended protocol commands.
+        LedWizMsg lwm;
+        while (js.readLedWizMsg(lwm))
+            handleInputMsg(lwm, js, z);
        
-
         // check for plunger calibration
         if (calBtn != 0 && !calBtn->read())
         {
@@ -3300,19 +3334,23 @@ int main(void)
             }
             else if (jsOKTimer.read() > 5)
             {
-                // too long without a USB report - show red/yellow
+                // USB freeze - show red/yellow.
+                //  Our outgoing joystick messages aren't going through, even though we
+                // think we're still connected.  This indicates that one or more of our
+                // USB endpoints have stopped working, which can happen as a result of
+                // bugs in the USB HAL or latency responding to a USB IRQ.  Show a
+                // distinctive diagnostic flash to signal the error.  I haven't found a 
+                // way to recover from this class of error other than rebooting the MCU, 
+                // so the goal is to fix the HAL so that this error never happens.  This
+                // flash pattern is thus for debugging purposes only; hopefully it won't
+                // ever occur in a real installation.
                 static bool dumped;
                 if (!dumped) {
+                    // If we haven't already, dump the USB HAL status to the debug console,
+                    // in case it helps identify the reason for the endpoint failure.
                     extern void USBDeviceStatusDump(void);
                     USBDeviceStatusDump();
                     dumped = true;
-                }
-                extern bool USB_DMAERR;
-                if (USB_DMAERR) {
-                    printf("USB DMAERR DETECTED!\r\n");
-                    //   js.disconnect();
-                    //   js.connect();
-                    //   USB_DMAERR = false;
                 }
                 jsOKTimer.stop();
                 hb = !hb;
