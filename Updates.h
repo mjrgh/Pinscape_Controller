@@ -69,6 +69,16 @@
 // noisy, so you can still enjoy the rest of your feedback features during
 // night play (e.g., flashers and other lighting effects).
 //
+// Gamma correction: each output can now optionally have gamma correction 
+// applied.  This can be set in the configuration individually for each 
+// output attached to an LED or lamp.  Gamma correction translates the
+// computer's idea of linear brightness to the human eye's logarithmic
+// brightness curve, which makes make the perceived brightness level of a 
+// lamp more linear.  This can greatly improve the appearance of fading 
+// effects and the fidelity of color mixing in RGB devices.  Without gamma
+// correction, fades tend to saturate on the bright end of the scale, and
+// mixed colors tend to look washed out.
+//
 // USB fixes: the low-level USB device code had some serious bugs that only
 // very occasionally manifested in past versions, but became much more
 // frequently triggered due to other changes in this release (particularly

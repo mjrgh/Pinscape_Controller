@@ -126,7 +126,7 @@ public:
                 pix[dst] = ao1.read_u16();
                 pix[dst+n/2] = ao2.read_u16();
                 
-                // turn off the ADC until the next pixel is ready
+                // turn off the ADC until the next pixel is clocked out
                 ao1.disable();
                 ao2.disable();
                 
@@ -188,8 +188,12 @@ public:
         si = 0;
         clockPort->PCOR |= clockMask;
         
+        // if in serial mode, clock all pixels across both sensor halves;
+        // in parallel mode, the pixels are clocked together
+        int n = parallel ? nPix/2 : nPix;
+        
         // clock out all pixels
-        for (int i = 0 ; i < nPix + 1 ; ++i) {
+        for (int i = 0 ; i < n + 1 ; ++i) {
             clockPort->PSOR |= clockMask;
             clockPort->PCOR |= clockMask;
         }
@@ -197,13 +201,13 @@ public:
 
 private:
     int nPix;                 // number of pixels in physical sensor array
-    DigitalOut si;
-    DigitalOut clock;
-    FGPIO_Type *clockPort;    // IOPORT base address for clock pin, for fast writes
+    DigitalOut si;            // GPIO pin for sensor SI (serial data) 
+    DigitalOut clock;         // GPIO pin for sensor SCLK (serial clock)
+    FGPIO_Type *clockPort;    // IOPORT base address for clock pin - cached for fast writes
     uint32_t clockMask;       // IOPORT register bit mask for clock pin
-    FastAnalogIn ao1; 
-    FastAnalogIn ao2;         // valid iff running in parallel mode
-    bool parallel;            // true -> running in parallel mode
+    FastAnalogIn ao1;         // GPIO pin for sensor AO1 (analog output 1) - we read sensor data from this pin
+    FastAnalogIn ao2;         // GPIO pin for sensor AO2 (analog output 2) - 2nd sensor data pin, when in parallel mode
+    bool parallel;            // true -> running in parallel mode (we read AO1 and AO2 separately on each clock)
 };
  
 #endif /* TSL1410R_H */

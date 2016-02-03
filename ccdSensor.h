@@ -52,9 +52,9 @@ public:
         // determine which end is brighter
         uint16_t p1 = pix[0];
         uint16_t p2 = pix[nlpix-1];
-        int si = 1, di = 1;
+        int si = 0, di = 1;
         if (p1 < p2)
-            si = nlpix, di = -1;
+            si = nlpix - 1, di = -1;
         
         // figure the shadow edge threshold - just use the midpoint 
         // of the levels at the bright and dark ends

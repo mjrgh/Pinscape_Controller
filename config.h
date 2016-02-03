@@ -53,6 +53,25 @@ const int BtnTypeSpecial       = 5;      // special button (night mode switch, e
 // input button flags
 const uint8_t BtnFlagPulse     = 0x01;   // pulse mode - reports each change in the physical switch state
                                          // as a brief press of the logical button/keyboard key
+                                         
+// button setup structure
+struct ButtonCfg
+{
+    uint8_t pin;        // physical input GPIO pin - a USB-to-PinName mapping index
+    uint8_t typ;        // key type reported to PC - a BtnTypeXxx value
+    uint8_t val;        // key value reported - meaning depends on 'typ' value
+    uint8_t flags;      // key flags - a bitwise combination of BtnFlagXxx values
+
+    void set(uint8_t pin, uint8_t typ, uint8_t val, uint8_t flags = 0)
+    {
+        this->pin = pin;
+        this->typ = typ;
+        this->val = val;
+        this->flags = flags;
+    }
+        
+} __attribute__((packed));
+    
 
 // maximum number of input button mappings
 const int MAX_BUTTONS = 32;
@@ -69,6 +88,7 @@ const int PortTypeVirtual      = 5;      // Virtual port - visible to host softw
 // LedWiz output port flag bits
 const uint8_t PortFlagActiveLow  = 0x01; // physical output is active-low
 const uint8_t PortFlagNoisemaker = 0x02; // noisemaker device - disable when night mode is engaged
+const uint8_t PortFlagGamma      = 0x04; // apply gamma correction to this output
 
 // maximum number of output ports
 const int MAX_OUT_PORTS = 203;
@@ -82,6 +102,14 @@ struct LedWizPortCfg
                         // the output number, starting from 0 for OUT0 on the first chip in 
                         // the daisy chain.  For inactive and virtual ports, it's unused.
     uint8_t flags;      // flags:  a combination of PortFlagXxx values
+    
+    void set(uint8_t typ, uint8_t pin, uint8_t flags = 0)
+    {
+        this->typ = typ;
+        this->pin = pin;
+        this->flags = flags;
+    }
+        
 } __attribute__((packed));
 
 
@@ -139,7 +167,7 @@ struct Config
         
         // assume no TLC5940 chips
 #if 1 // $$$
-        tlc5940.nchips = 2;
+        tlc5940.nchips = 4;
 #else
         tlc5940.nchips = 0;
 #endif
@@ -152,8 +180,12 @@ struct Config
         tlc5940.gsclk = PTA1;
         
         // assume no 74HC595 chips
+#if 1 // $$$
+        hc595.nchips = 1;
+#else
         hc595.nchips = 0;
-        
+#endif
+    
         // default 74HC595 pin assignments
         hc595.sin = PTA5;
         hc595.sclk = PTA4;
@@ -196,10 +228,8 @@ struct Config
                 41, // 22 = PTD6
                 42, // 23 = PTD7
                 44  // 24 = PTE1
-            };                
-            button[i].pin = bp[i];
-            button[i].typ = BtnTypeKey;
-            button[i].val = i+4;  // A, B, C...
+            };               
+            button[i].set(bp[i], BtnTypeKey, i+4); // A, B, C... 
         }
 #endif
         
@@ -220,31 +250,54 @@ struct Config
 #endif
         
 #if 1 // $$$
+        // CONFIGURE EXPANSION BOARD PORTS
+        //
+        // We have the following hardware attached:
+        //
+        //   Main board
+        //     TLC ports 0-15  -> flashers
+        //     TLC ports 16    -> strobe
+        //     TLC ports 17-31 -> flippers
+        //     Dig GPIO PTC8   -> knocker (timer-protected outputs)
+        //
+        //   Power board:
+        //     TLC ports 32-63 -> general purpose outputs
+        //
+        //   Chime board:
+        //     HC595 ports 0-7 -> timer-protected outputs
+        //
         {
             int n = 0;
-            for (int i = 0 ; i < 32 ; ++i, ++n) {
-                outPort[n].typ = PortTypeTLC5940;
-                outPort[n].pin = i;
-                outPort[n].flags = 0;
-            }
-            outPort[n].typ = PortTypeGPIODig;
-            outPort[n].pin = 27; // PTC8
-            outPort[n++].flags = 0;
             
+            // 1-15 = flashers (TLC ports 0-15)
+            // 16   = strobe   (TLC port 15)
+            for (int i = 0 ; i < 16 ; ++i)
+                outPort[n++].set(PortTypeTLC5940, i, PortFlagGamma);
+            
+            // 17 = knocker
+            outPort[n++].set(PortTypeGPIODig, 27);
+            
+            // 18-49 = power board outputs 1-32 (TLC ports 32-63)
+            for (int i = 0 ; i < 32 ; ++i)
+                outPort[n++].set(PortTypeTLC5940, i+32);
+            
+            // 50-65 = flipper RGB (TLC ports 16-31)
+            for (int i = 0 ; i < 16 ; ++i)
+                outPort[n++].set(PortTypeTLC5940, i+16, PortFlagGamma);
+            
+            // 66-73 = chime board ports 1-8 (74HC595 ports 0-7)
+            for (int i = 0 ; i < 8 ; ++i)
+                outPort[n++].set(PortType74HC595, i);
+            
+            // set Disabled to signify end of configured outputs
             outPort[n].typ = PortTypeDisabled;
         }
 #endif
 #if 0
-        outPort[0].typ = PortTypeGPIOPWM;
-        outPort[0].pin = 17;  // PTB18 = LED1 = Red LED
-        outPort[0].flags = PortFlagActiveLow;
-        outPort[1].typ = PortTypeGPIOPWM;
-        outPort[1].pin = 18;  // PTB19 = LED2 = Green LED
-        outPort[1].flags = PortFlagActiveLow;
-        outPort[2].typ = PortTypeGPIOPWM;
-        outPort[2].pin = 36;  // PTD1 = LED3 = Blue LED
-        outPort[2].flags = PortFlagActiveLow;
-
+        // configure the on-board RGB LED as outputs 1,2,3
+        outPort[0].set(PortTypeGPIOPWM, 17, PortFlagActiveLow);     // PTB18 = LED1 = Red LED
+        outPort[1].set(PortTypeGPIOPWM, 18, PortFlagActiveLow);     // PTB19 = LED2 = Green LED
+        outPort[2].set(PortTypeGPIOPWM, 36, PortFlagActiveLow);     // PTD1  = LED3 = Blue LED
         outPort[3].typ = PortTypeDisabled;
 #endif
     }        
@@ -315,18 +368,18 @@ struct Config
         // This can be connected to the physical Launch button, or can simply be
         // an otherwise unused button.
         //
-        // The "push distance" is the distance, in inches, for registering a push
-        // on the plunger as a button push.  If the player pushes the plunger forward
-        // of the rest position by this amount, we'll treat it as pushing the button,
-        // even if the player didn't pull back the plunger first.  This lets the
-        // player treat the plunger knob as a button for games where it's meaningful
+        // The "push distance" is the distance, in 1/1000 inch units, for registering a 
+        // push on the plunger as a button push.  If the player pushes the plunger 
+        // forward of the rest position by this amount, we'll treat it as pushing the 
+        // button, even if the player didn't pull back the plunger first.  This lets 
+        // the player treat the plunger knob as a button for games where it's meaningful
         // to hold down the Launch button for specific intervals (e.g., "Championship 
         // Pub").
         struct
         {
             int port;
             int btn;
-            float pushDistance;
+            int pushDistance;
         
         } zbLaunchBall;
            
@@ -388,10 +441,10 @@ struct Config
         // relay.  Raising the pin HIGH turns the relay ON (energizes the coil).
         PinName relayPin;
         
-        // TV ON delay time, in seconds.  This is the interval between sensing
-        // that the secondary power supply has turned on and pulsing the TV ON
-        // switch relay.  
-        float delayTime;
+        // TV ON delay time, in 1/100 second units.  This is the interval between 
+        // sensing that the secondary power supply has turned on and pulsing the 
+        // TV ON switch relay.  
+        int delayTime;
     
     } TVON;
     
@@ -429,15 +482,7 @@ struct Config
 
 
     // --- Button Input Setup ---
-    struct
-    {
-        uint8_t pin;        // physical input GPIO pin - a USB-to-PinName mapping index
-        uint8_t typ;        // key type reported to PC - a BtnTypeXxx value
-        uint8_t val;        // key value reported - meaning depends on 'typ' value
-        uint8_t flags;      // key flags - a bitwise combination of BtnFlagXxx values
-        
-    } __attribute__((packed))  button[MAX_BUTTONS] __attribute((packed));
-    
+    ButtonCfg button[MAX_BUTTONS] __attribute__((packed));
 
     // --- LedWiz Output Port Setup ---
     LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 

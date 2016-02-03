@@ -18,15 +18,18 @@
 // and calibration data in flash memory.
 //
 // Hack alert!
+//
 // Our use of flash for this purpose is ad hoc and not supported
-// by the mbed platform.  mbed doesn't impose a file system on the
-// KL25Z flash; it simply treats the flash as a raw storage space
-// and assumes that the linker output is the only thing using it.
-// So if we want to use the flash, we basically have to do it on 
-// the sly, by using space that the linker happens to leave unused.
-// Fortunately, it's fairly easy to do this, because the flash
-// is mapped in the obvious way, as a single contiguous block in 
-// the CPU memory space, and the linker does the obvious thing, 
+// by the mbed platform.  mbed doesn't impose a file system (or any
+// other kind of formal structure) on the KL25Z flash; it simply 
+// treats the flash as a raw storage space for linker output and 
+// assumes that the linker is the only thing using it.  So ito use 
+// the flash, we basically have to do it on the sly, by using space 
+// that the linker happens to leave unused.
+// 
+// Fortunately, it's fairly easy to do this, because the flash is
+// mapped in the obvious way, as a single contiguous block in the
+// CPU memory space, and because the linker does the obvious thing, 
 // storing its entire output in a single contiguous block starting
 // at the lowest flash address.  This means that all flash memory
 // from (lowest flash address + length of linker output) to
@@ -44,6 +47,11 @@
 // configuration structure is much much smaller than the available 
 // leftover flash space, so we should be safe indefinitely, barring 
 // a major expansion of the configuration structure or code size.
+// (And if we get to the point where we actually don't have space
+// for our ~1K structure, we'll be up against the limits of the
+// device anyway, so we'd have to rein in our ambitions or write
+// more efficient code for deeper reasons than sharing this tiny
+// sliver of memory.)
 //
 // The boot loader seems to erase the entire flash space every time
 // we load new firmware, so our configuration structure is lost

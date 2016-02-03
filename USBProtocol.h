@@ -16,9 +16,13 @@
 // looks like this (see USBJoystick.cpp for the formal HID report descriptor):
 //
 //    ss     status bits:  0x01 -> plunger enabled
+//    00     2nd byte of status (reserved)
+//    00     3rd byte of status (reserved)
 //    00     always zero for joystick reports
-//    bb     joystick buttons, low byte (buttons 1-16, 1 bit per button)
-//    bb     joystick buttons, high byte (buttons 17-32)
+//    bb     joystick buttons, low byte (buttons 1-8, 1 bit per button)
+//    bb     joystick buttons, 2nd byte (buttons 9-16)
+//    bb     joystick buttons, 3rd byte (buttons 17-24)
+//    bb     joystick buttons, high byte (buttons 25-32)
 //    xx     low byte of X position = nudge/accelerometer X axis
 //    xx     high byte of X position
 //    yy     low byte of Y position = nudge/accelerometer Y axis
@@ -75,12 +79,27 @@
 //
 //    bytes 0:1 = 0x8800.  This has the bit pattern 10001 in the high
 //                5 bits, which distinguishes it from regular joystick
-//                reports and from exposure status reports.
+//                reports and from other special report types.
 //    bytes 2:3 = total number of outputs, little endian
-//    bytes 4:5 = plunger calibration zero point, little endian
-//    bytes 6:7 = plunger calibration maximum point, little endian
-//    remaining bytes = reserved for future use; set to 0 in current version
+//    bytes 6:7 = plunger calibration zero point, little endian
+//    bytes 8:9 = plunger calibration maximum point, little endian
+//    byte  10   = bit flags: 
+//                 0x01 -> configuration loaded; 0 in this bit means that
+//                         the firmware has been loaded but no configuration
+//                         has been sent from the host
+//    The remaining bytes are reserved for future use.
 //
+// 2C. Device ID query.
+// This is requested by sending custom protocol message 65 7 (see below).
+// In response, the device sends one report to the host using this format:
+//
+//    bytes 0:1 = 0x9000.  This has bit pattern 10010 in the high 5
+//                bits, which distinguishes this special report from other 
+//                report types.
+//    bytes 2-11 = Unique CPU ID.  This is the ID stored in the CPU at the
+//                factory, guaranteed to be unique across Kinetis devices.
+//                This can be used by the host to distinguish devices when
+//                two or more controllers are attached.
 //
 // WHY WE USE THIS HACKY APPROACH TO DIFFERENT REPORT TYPES
 //
@@ -211,7 +230,8 @@
 //             plunger sensor isn't an image sensor type, no pixel messages are sent.
 //
 //        4 -> Query configuration.  The device sends a special configuration report,
-//             defined in USBJoystick.cpp, then resumes sending normal joystick reports.
+//             (see above; see also USBJoystick.cpp), then resumes sending normal 
+//             joystick reports.
 //
 //        5 -> Turn all outputs off and restore LedWiz defaults.  Sets output ports
 //             1-32 to OFF and LedWiz brightness/mode setting 48, sets outputs 33 and
@@ -220,6 +240,14 @@
 //        6 -> Save configuration to flash.  This saves all variable updates sent via
 //             type 66 messages since the last reboot, then automatically reboots the
 //             device to put the changes into effect.
+//
+//        7 -> Query device ID.  The device replies with a special device ID report
+//             (see above; see also USBJoystick.cpp), then resumes sending normal
+//             joystick reports.
+//
+//        8 -> Engage/disengage night mode.  The third byte of the message is 1 to
+//             engage night mode, 0 to disengage night mode.  (This mode isn't stored
+//             persistently; night mode is disengaged after a reset or power cycle.)
 //
 // 66  -> Set configuration variable.  The second byte of the message is the config
 //        variable number, and the remaining bytes give the new value for the variable.
@@ -327,8 +355,8 @@
 //       in DOF.  Set the port to 0 to disable the feature.  Byte 4 is the button
 //       number (1-32) that we'll "press" when the feature is activated.  Bytes 5-6
 //       give the "push distance" for activating the button by pushing forward on
-//       the plunger knob, in .001 inch increments (e.g., 80 represents 0.08", which
-//       is the recommended setting).
+//       the plunger knob, in 1/1000 inch increments (e.g., 80 represents 0.08", 
+//       which is the recommended setting).
 //
 // 9  -> TV ON relay setup.  This requires external circuitry implemented on the
 //       Expansion Board (or an equivalent circuit as described in the Build Guide).
@@ -422,6 +450,7 @@
 //         byte 6 = flags: a combination of these bit values:
 //                   0x01 = active-high output (0V on output turns attached device ON)
 //                   0x02 = noisemaker device: disable this output when "night mode" is engaged
+//                   0x04 = apply gamma correction to this output
 //
 //       Note that the on-board LED segments can be used as LedWiz output ports.  This
 //       is useful for testing a new installation with DOF or other PC software without
@@ -440,12 +469,6 @@
 //               momentary pushbutton switch used to activate night mode.  The light 
 //               provides visual feedback that the mode is turned on.
 //
-//
-// 14 -> Engage/disengage Night Mode.  When night mode is engaged, LedWiz outputs marked
-//       as "noisemaker" devices are disabled.  Byte 3 is 1 to engage night mode, 0 to
-//       cancel night mode.  Note that sending this command will override the current
-//       switch setting, if a toggle switch is configured to control Night Mode.  Toggling
-//       the switch will take control via the switch again.
 
 
 

@@ -85,30 +85,32 @@
 //  - LedWiz emulation.  The KL25Z can appear to the PC as an LedWiz device, and will
 //    accept and process LedWiz commands from the host.  The software can turn digital
 //    output ports on and off, and can set varying PWM intensitiy levels on a subset
-//    of ports.  (The KL25Z can only provide 6 PWM ports.  Intensity level settings on
-//    other ports is ignored, so non-PWM ports can only be used for simple on/off
-//    devices such as contactors and solenoids.)  The KL25Z can only supply 4mA on its
-//    output ports, so external hardware is required to take advantage of the LedWiz
-//    emulation.  Many different hardware designs are possible, but there's a simple
-//    reference design in the documentation that uses a Darlington array IC to
-//    increase the output from each port to 500mA (the same level as the LedWiz),
-//    plus an extended design that adds an optocoupler and MOSFET to provide very
-//    high power handling, up to about 45A or 150W, with voltages up to 100V.
-//    That will handle just about any DC device directly (wtihout relays or other
-//    amplifiers), and switches fast enough to support PWM devices.
+//    of ports.  The KL25Z hardware is limited to 10 PWM ports.  Ports beyond the
+//    10 PWM ports are simple digital on/off ports.  Intensity level settings on 
+//    digital ports is ignored, so such ports can only be used for devices such as 
+//    contactors and solenoids that don't need differeing intensities.
 //
-//    The device can report any desired LedWiz unit number to the host, which makes
-//    it possible to use the LedWiz emulation on a machine that also has one or more
-//    actual LedWiz devices intalled.  The LedWiz design allows for up to 16 units
-//    to be installed in one machine - each one is invidually addressable by its
-//    distinct unit number.
+//    Note that the KL25Z can only supply or sink 4mA on its output ports, so external 
+//    amplifier hardware is required to use the LedWiz emulation.  Many different 
+//    hardware designs are possible, but there's a simple reference design in the 
+//    documentation that uses a Darlington array IC to increase the output from 
+//    each port to 500mA (the same level as the LedWiz), plus an extended design 
+//    that adds an optocoupler and MOSFET to provide very high power handling, up 
+//    to about 45A or 150W, with voltages up to 100V.  That will handle just about 
+//    any DC device directly (wtihout relays or other amplifiers), and switches fast 
+//    enough to support PWM devices.  For example, you can use it to drive a motor at
+//    different speeds via the PWM intensity.
+//
+//    The Controller device can report any desired LedWiz unit number to the host, 
+//    which makes it possible for one or more Pinscape Controller units to coexist
+//    with one more more real LedWiz units in the same machine.  The LedWiz design 
+//    allows for up to 16 units to be installed in one machine.  Each device needs
+//    to have a distinct LedWiz Unit Number, which allows software on the PC to
+//    address each device independently.
 //
 //    The LedWiz emulation features are of course optional.  There's no need to 
 //    build any of the external port hardware (or attach anything to the output 
-//    ports at all) if the LedWiz features aren't needed.  Most people won't have
-//    any use for the LedWiz features.  I built them mostly as a learning exercise,
-//    but with a slight practical need for a handful of extra ports (I'm using the
-//    cutting-edge 10-contactor setup, so my real LedWiz is full!).
+//    ports at all) if the LedWiz features aren't needed.
 //
 //  - Enhanced LedWiz emulation with TLC5940 PWM controller chips.  You can attach
 //    external PWM controller chips for controlling device outputs, instead of using
@@ -219,9 +221,28 @@ inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
 
 // --------------------------------------------------------------------------
 // 
+// Extended verison of Timer class.  This adds the ability to interrogate
+// the running state.
+//
+class Timer2: public Timer
+{
+public:
+    Timer2() : running(false) { }
+
+    void start() { running = true; Timer::start(); }
+    void stop()  { running = false; Timer::stop(); }
+    
+    bool isRunning() const { return running; }
+    
+private:
+    bool running;
+};
+
+// --------------------------------------------------------------------------
+// 
 // USB product version number
 //
-const uint16_t USB_VERSION_NO = 0x0008;
+const uint16_t USB_VERSION_NO = 0x0009;
 
 // --------------------------------------------------------------------------
 //
@@ -232,8 +253,8 @@ const uint16_t USB_VERSION_NO = 0x0008;
 
 // ---------------------------------------------------------------------------
 //
-// Wire protocol value translations.  These translate byte values from
-// the USB protocol to local native format.
+// Wire protocol value translations.  These translate byte values to and
+// from the USB protocol to local native format.
 //
 
 // unsigned 16-bit integer 
@@ -241,15 +262,31 @@ inline uint16_t wireUI16(const uint8_t *b)
 {
     return b[0] | ((uint16_t)b[1] << 8);
 }
+inline void ui16Wire(uint8_t *b, uint16_t val)
+{
+    b[0] = (uint8_t)(val & 0xff);
+    b[1] = (uint8_t)((val >> 8) & 0xff);
+}
 
 inline int16_t wireI16(const uint8_t *b)
 {
     return (int16_t)wireUI16(b);
 }
+inline void i16Wire(uint8_t *b, int16_t val)
+{
+    ui16Wire(b, (uint16_t)val);
+}
 
 inline uint32_t wireUI32(const uint8_t *b)
 {
     return b[0] | ((uint32_t)b[1] << 8) | ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
+}
+inline void ui32Wire(uint8_t *b, uint32_t val)
+{
+    b[0] = (uint8_t)(val & 0xff);
+    b[1] = (uint8_t)((val >> 8) & 0xff);    
+    b[2] = (uint8_t)((val >> 16) & 0xff);    
+    b[3] = (uint8_t)((val >> 24) & 0xff);    
 }
 
 inline int32_t wireI32(const uint8_t *b)
@@ -257,17 +294,29 @@ inline int32_t wireI32(const uint8_t *b)
     return (int32_t)wireUI32(b);
 }
 
+static const PinName pinNameMap[] =  {
+    NC,    PTA1,  PTA2,  PTA4,  PTA5,  PTA12, PTA13, PTA16, PTA17, PTB0,    // 0-9
+    PTB1,  PTB2,  PTB3,  PTB8,  PTB9,  PTB10, PTB11, PTB18, PTB19, PTC0,    // 10-19
+    PTC1,  PTC2,  PTC3,  PTC4,  PTC5,  PTC6,  PTC7,  PTC8,  PTC9,  PTC10,   // 20-29
+    PTC11, PTC12, PTC13, PTC16, PTC17, PTD0,  PTD1,  PTD2,  PTD3,  PTD4,    // 30-39
+    PTD5,  PTD6,  PTD7,  PTE0,  PTE1,  PTE2,  PTE3,  PTE4,  PTE5,  PTE20,   // 40-49
+    PTE21, PTE22, PTE23, PTE29, PTE30, PTE31                                // 50-55
+};
 inline PinName wirePinName(int c)
 {
-    static const PinName p[] =  {
-        NC,    PTA1,  PTA2,  PTA4,  PTA5,  PTA12, PTA13, PTA16, PTA17, PTB0,    // 0-9
-        PTB1,  PTB2,  PTB3,  PTB8,  PTB9,  PTB10, PTB11, PTB18, PTB19, PTC0,    // 10-19
-        PTC1,  PTC2,  PTC3,  PTC4,  PTC5,  PTC6,  PTC7,  PTC8,  PTC9,  PTC10,   // 20-29
-        PTC11, PTC12, PTC13, PTC16, PTC17, PTD0,  PTD1,  PTD2,  PTD3,  PTD4,    // 30-39
-        PTD5,  PTD6,  PTD7,  PTE0,  PTE1,  PTE2,  PTE3,  PTE4,  PTE5,  PTE20,   // 40-49
-        PTE21, PTE22, PTE23, PTE29, PTE30, PTE31                                // 50-55
-    };
-    return (c < countof(p) ? p[c] : NC);
+    return (c < countof(pinNameMap) ? pinNameMap[c] : NC);
+}
+inline void pinNameWire(uint8_t *b, PinName n)
+{
+    b[0] = 0; // presume invalid -> NC
+    for (int i = 0 ; i < countof(pinNameMap) ; ++i)
+    {
+        if (pinNameMap[i] == n)
+        {
+            b[0] = i;
+            return;
+        }
+    }
 }
 
 
@@ -381,9 +430,9 @@ static int pbaIdx = 0;
 class LwOut
 {
 public:
-    // Set the output intensity.  'val' is 0.0 for fully off, 1.0 for
-    // fully on, and fractional values for intermediate intensities.
-    virtual void set(float val) = 0;
+    // Set the output intensity.  'val' is 0 for fully off, 255 for
+    // fully on, with values in between signifying lower intensity.
+    virtual void set(uint8_t val) = 0;
 };
 
 // LwOut class for virtual ports.  This type of port is visible to
@@ -395,21 +444,72 @@ class LwVirtualOut: public LwOut
 {
 public:
     LwVirtualOut() { }
-    virtual void set(float val) { }
+    virtual void set(uint8_t ) { }
 };
 
 // Active Low out.  For any output marked as active low, we layer this
 // on top of the physical pin interface.  This simply inverts the value of
-// the output value, so that 1.0 means fully off and 0.0 means fully on.
+// the output value, so that 255 means fully off and 0 means fully on.
 class LwInvertedOut: public LwOut
 {
 public:
     LwInvertedOut(LwOut *o) : out(o) { }
-    virtual void set(float val) { out->set(1.0 - val); }
+    virtual void set(uint8_t val) { out->set(255 - val); }
     
 private:
     LwOut *out;
 };
+
+// Gamma correction table for 8-bit input values
+static const uint8_t gamma[] = {
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0, 
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1, 
+      1,   1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   2, 
+      2,   3,   3,   3,   3,   3,   3,   3,   4,   4,   4,   4,   4,   5,   5,   5, 
+      5,   6,   6,   6,   6,   7,   7,   7,   7,   8,   8,   8,   9,   9,   9,  10, 
+     10,  10,  11,  11,  11,  12,  12,  13,  13,  13,  14,  14,  15,  15,  16,  16, 
+     17,  17,  18,  18,  19,  19,  20,  20,  21,  21,  22,  22,  23,  24,  24,  25, 
+     25,  26,  27,  27,  28,  29,  29,  30,  31,  32,  32,  33,  34,  35,  35,  36, 
+     37,  38,  39,  39,  40,  41,  42,  43,  44,  45,  46,  47,  48,  49,  50,  50, 
+     51,  52,  54,  55,  56,  57,  58,  59,  60,  61,  62,  63,  64,  66,  67,  68, 
+     69,  70,  72,  73,  74,  75,  77,  78,  79,  81,  82,  83,  85,  86,  87,  89, 
+     90,  92,  93,  95,  96,  98,  99, 101, 102, 104, 105, 107, 109, 110, 112, 114, 
+    115, 117, 119, 120, 122, 124, 126, 127, 129, 131, 133, 135, 137, 138, 140, 142, 
+    144, 146, 148, 150, 152, 154, 156, 158, 160, 162, 164, 167, 169, 171, 173, 175, 
+    177, 180, 182, 184, 186, 189, 191, 193, 196, 198, 200, 203, 205, 208, 210, 213, 
+    215, 218, 220, 223, 225, 228, 231, 233, 236, 239, 241, 244, 247, 249, 252, 255
+};
+
+// Gamma-corrected out.  This is a filter object that we layer on top
+// of a physical pin interface.  This applies gamma correction to the
+// input value and then passes it along to the underlying pin object.
+class LwGammaOut: public LwOut
+{
+public:
+    LwGammaOut(LwOut *o) : out(o) { }
+    virtual void set(uint8_t val) { out->set(gamma[val]); }
+    
+private:
+    LwOut *out;
+};
+
+// Noisy output.  This is a filter object that we layer on top of
+// a physical pin output.  This filter disables the port when night
+// mode is engaged.
+class LwNoisyOut: public LwOut
+{
+public:
+    LwNoisyOut(LwOut *o) : out(o) { }
+    virtual void set(uint8_t val) { out->set(nightMode ? 0 : val); }
+    
+    static bool nightMode;
+
+private:
+    LwOut *out;
+};
+
+// global night mode flag
+bool LwNoisyOut::nightMode = false;
 
 
 //
@@ -426,6 +526,55 @@ void init_tlc5940(Config &cfg)
     }
 }
 
+// Conversion table for 8-bit DOF level to 12-bit TLC5940 level
+static const uint16_t dof_to_tlc[] = {
+       0,   16,   32,   48,   64,   80,   96,  112,  128,  145,  161,  177,  193,  209,  225,  241, 
+     257,  273,  289,  305,  321,  337,  353,  369,  385,  401,  418,  434,  450,  466,  482,  498, 
+     514,  530,  546,  562,  578,  594,  610,  626,  642,  658,  674,  691,  707,  723,  739,  755, 
+     771,  787,  803,  819,  835,  851,  867,  883,  899,  915,  931,  947,  964,  980,  996, 1012, 
+    1028, 1044, 1060, 1076, 1092, 1108, 1124, 1140, 1156, 1172, 1188, 1204, 1220, 1237, 1253, 1269, 
+    1285, 1301, 1317, 1333, 1349, 1365, 1381, 1397, 1413, 1429, 1445, 1461, 1477, 1493, 1510, 1526, 
+    1542, 1558, 1574, 1590, 1606, 1622, 1638, 1654, 1670, 1686, 1702, 1718, 1734, 1750, 1766, 1783, 
+    1799, 1815, 1831, 1847, 1863, 1879, 1895, 1911, 1927, 1943, 1959, 1975, 1991, 2007, 2023, 2039, 
+    2056, 2072, 2088, 2104, 2120, 2136, 2152, 2168, 2184, 2200, 2216, 2232, 2248, 2264, 2280, 2296, 
+    2312, 2329, 2345, 2361, 2377, 2393, 2409, 2425, 2441, 2457, 2473, 2489, 2505, 2521, 2537, 2553, 
+    2569, 2585, 2602, 2618, 2634, 2650, 2666, 2682, 2698, 2714, 2730, 2746, 2762, 2778, 2794, 2810, 
+    2826, 2842, 2858, 2875, 2891, 2907, 2923, 2939, 2955, 2971, 2987, 3003, 3019, 3035, 3051, 3067, 
+    3083, 3099, 3115, 3131, 3148, 3164, 3180, 3196, 3212, 3228, 3244, 3260, 3276, 3292, 3308, 3324, 
+    3340, 3356, 3372, 3388, 3404, 3421, 3437, 3453, 3469, 3485, 3501, 3517, 3533, 3549, 3565, 3581, 
+    3597, 3613, 3629, 3645, 3661, 3677, 3694, 3710, 3726, 3742, 3758, 3774, 3790, 3806, 3822, 3838, 
+    3854, 3870, 3886, 3902, 3918, 3934, 3950, 3967, 3983, 3999, 4015, 4031, 4047, 4063, 4079, 4095
+};
+
+// Conversion table for 8-bit DOF level to 12-bit TLC5940 level, with 
+// gamma correction.  Note that the output layering scheme can handle
+// this without a separate table, by first applying gamma to the DOF
+// level to produce an 8-bit gamma-corrected value, then convert that
+// to the 12-bit TLC5940 value.  But we get better precision by doing
+// the gamma correction in the 12-bit TLC5940 domain.  We can only
+// get the 12-bit domain by combining both steps into one layering
+// object, though, since the intermediate values in the layering system
+// are always 8 bits.
+static const uint16_t dof_to_gamma_tlc[] = {
+      0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1,   1, 
+      2,   2,   2,   3,   3,   4,   4,   5,   5,   6,   7,   8,   8,   9,  10,  11, 
+     12,  13,  15,  16,  17,  18,  20,  21,  23,  25,  26,  28,  30,  32,  34,  36, 
+     38,  40,  43,  45,  48,  50,  53,  56,  59,  62,  65,  68,  71,  75,  78,  82, 
+     85,  89,  93,  97, 101, 105, 110, 114, 119, 123, 128, 133, 138, 143, 149, 154, 
+    159, 165, 171, 177, 183, 189, 195, 202, 208, 215, 222, 229, 236, 243, 250, 258, 
+    266, 273, 281, 290, 298, 306, 315, 324, 332, 341, 351, 360, 369, 379, 389, 399, 
+    409, 419, 430, 440, 451, 462, 473, 485, 496, 508, 520, 532, 544, 556, 569, 582, 
+    594, 608, 621, 634, 648, 662, 676, 690, 704, 719, 734, 749, 764, 779, 795, 811, 
+    827, 843, 859, 876, 893, 910, 927, 944, 962, 980, 998, 1016, 1034, 1053, 1072, 1091, 
+    1110, 1130, 1150, 1170, 1190, 1210, 1231, 1252, 1273, 1294, 1316, 1338, 1360, 1382, 1404, 1427, 
+    1450, 1473, 1497, 1520, 1544, 1568, 1593, 1617, 1642, 1667, 1693, 1718, 1744, 1770, 1797, 1823, 
+    1850, 1877, 1905, 1932, 1960, 1988, 2017, 2045, 2074, 2103, 2133, 2162, 2192, 2223, 2253, 2284, 
+    2315, 2346, 2378, 2410, 2442, 2474, 2507, 2540, 2573, 2606, 2640, 2674, 2708, 2743, 2778, 2813, 
+    2849, 2884, 2920, 2957, 2993, 3030, 3067, 3105, 3143, 3181, 3219, 3258, 3297, 3336, 3376, 3416, 
+    3456, 3496, 3537, 3578, 3619, 3661, 3703, 3745, 3788, 3831, 3874, 3918, 3962, 4006, 4050, 4095
+};
+
+
 // LwOut class for TLC5940 outputs.  These are fully PWM capable.
 // The 'idx' value in the constructor is the output index in the
 // daisy-chained TLC5940 array.  0 is output #0 on the first chip,
@@ -434,15 +583,30 @@ void init_tlc5940(Config &cfg)
 class Lw5940Out: public LwOut
 {
 public:
-    Lw5940Out(int idx) : idx(idx) { prv = -1; }
-    virtual void set(float val)
+    Lw5940Out(int idx) : idx(idx) { prv = 0; }
+    virtual void set(uint8_t val)
     {
         if (val != prv)
-           tlc5940->set(idx, (int)((prv = val) * 4095.0f));
+           tlc5940->set(idx, dof_to_tlc[prv = val]);
     }
     int idx;
-    float prv;
+    uint8_t prv;
 };
+
+// LwOut class for TLC5940 gamma-corrected outputs.
+class Lw5940GammaOut: public LwOut
+{
+public:
+    Lw5940GammaOut(int idx) : idx(idx) { prv = 0; }
+    virtual void set(uint8_t val)
+    {
+        if (val != prv)
+           tlc5940->set(idx, dof_to_gamma_tlc[prv = val]);
+    }
+    int idx;
+    uint8_t prv;
+};
+
 
 
 // 74HC595 interface object.  Set this up with the port assignments in
@@ -468,51 +632,81 @@ void init_hc595(Config &cfg)
 class Lw595Out: public LwOut
 {
 public:
-    Lw595Out(int idx) : idx(idx) { prv = -1; }
-    virtual void set(float val)
+    Lw595Out(int idx) : idx(idx) { prv = 0; }
+    virtual void set(uint8_t val)
     {
         if (val != prv)
-           hc595->set(idx, (prv = val) == 0.0 ? 0 : 1);
+           hc595->set(idx, (prv = val) == 0 ? 0 : 1);
     }
     int idx;
-    float prv;
+    uint8_t prv;
 };
 
 
-// 
-// Default LedWiz mode - using on-board GPIO ports.  In this mode, we
-// assign a KL25Z GPIO port to each LedWiz output.  We have to use a
-// mix of PWM-capable and Digital-Only ports in this configuration, 
-// since the KL25Z hardware only has 10 PWM channels, which isn't
-// enough to fill out the full complement of 32 LedWiz outputs.
-//
+
+// Conversion table - 8-bit DOF output level to PWM float level
+// (normalized to 0.0..1.0 scale)
+static const float pwm_level[] = {
+    0.000000, 0.003922, 0.007843, 0.011765, 0.015686, 0.019608, 0.023529, 0.027451, 
+    0.031373, 0.035294, 0.039216, 0.043137, 0.047059, 0.050980, 0.054902, 0.058824, 
+    0.062745, 0.066667, 0.070588, 0.074510, 0.078431, 0.082353, 0.086275, 0.090196, 
+    0.094118, 0.098039, 0.101961, 0.105882, 0.109804, 0.113725, 0.117647, 0.121569, 
+    0.125490, 0.129412, 0.133333, 0.137255, 0.141176, 0.145098, 0.149020, 0.152941, 
+    0.156863, 0.160784, 0.164706, 0.168627, 0.172549, 0.176471, 0.180392, 0.184314, 
+    0.188235, 0.192157, 0.196078, 0.200000, 0.203922, 0.207843, 0.211765, 0.215686, 
+    0.219608, 0.223529, 0.227451, 0.231373, 0.235294, 0.239216, 0.243137, 0.247059, 
+    0.250980, 0.254902, 0.258824, 0.262745, 0.266667, 0.270588, 0.274510, 0.278431, 
+    0.282353, 0.286275, 0.290196, 0.294118, 0.298039, 0.301961, 0.305882, 0.309804, 
+    0.313725, 0.317647, 0.321569, 0.325490, 0.329412, 0.333333, 0.337255, 0.341176, 
+    0.345098, 0.349020, 0.352941, 0.356863, 0.360784, 0.364706, 0.368627, 0.372549, 
+    0.376471, 0.380392, 0.384314, 0.388235, 0.392157, 0.396078, 0.400000, 0.403922, 
+    0.407843, 0.411765, 0.415686, 0.419608, 0.423529, 0.427451, 0.431373, 0.435294, 
+    0.439216, 0.443137, 0.447059, 0.450980, 0.454902, 0.458824, 0.462745, 0.466667, 
+    0.470588, 0.474510, 0.478431, 0.482353, 0.486275, 0.490196, 0.494118, 0.498039, 
+    0.501961, 0.505882, 0.509804, 0.513725, 0.517647, 0.521569, 0.525490, 0.529412, 
+    0.533333, 0.537255, 0.541176, 0.545098, 0.549020, 0.552941, 0.556863, 0.560784, 
+    0.564706, 0.568627, 0.572549, 0.576471, 0.580392, 0.584314, 0.588235, 0.592157, 
+    0.596078, 0.600000, 0.603922, 0.607843, 0.611765, 0.615686, 0.619608, 0.623529, 
+    0.627451, 0.631373, 0.635294, 0.639216, 0.643137, 0.647059, 0.650980, 0.654902, 
+    0.658824, 0.662745, 0.666667, 0.670588, 0.674510, 0.678431, 0.682353, 0.686275, 
+    0.690196, 0.694118, 0.698039, 0.701961, 0.705882, 0.709804, 0.713725, 0.717647, 
+    0.721569, 0.725490, 0.729412, 0.733333, 0.737255, 0.741176, 0.745098, 0.749020, 
+    0.752941, 0.756863, 0.760784, 0.764706, 0.768627, 0.772549, 0.776471, 0.780392, 
+    0.784314, 0.788235, 0.792157, 0.796078, 0.800000, 0.803922, 0.807843, 0.811765, 
+    0.815686, 0.819608, 0.823529, 0.827451, 0.831373, 0.835294, 0.839216, 0.843137, 
+    0.847059, 0.850980, 0.854902, 0.858824, 0.862745, 0.866667, 0.870588, 0.874510, 
+    0.878431, 0.882353, 0.886275, 0.890196, 0.894118, 0.898039, 0.901961, 0.905882, 
+    0.909804, 0.913725, 0.917647, 0.921569, 0.925490, 0.929412, 0.933333, 0.937255, 
+    0.941176, 0.945098, 0.949020, 0.952941, 0.956863, 0.960784, 0.964706, 0.968627, 
+    0.972549, 0.976471, 0.980392, 0.984314, 0.988235, 0.992157, 0.996078, 1.000000
+};
 
 // LwOut class for a PWM-capable GPIO port
 class LwPwmOut: public LwOut
 {
 public:
-    LwPwmOut(PinName pin) : p(pin) { prv = -1; }
-    virtual void set(float val) 
+    LwPwmOut(PinName pin) : p(pin) { prv = 0; }
+    virtual void set(uint8_t val) 
     { 
         if (val != prv)
-            p.write(prv = val); 
+            p.write(pwm_level[prv = val]); 
     }
     PwmOut p;
-    float prv;
+    uint8_t prv;
 };
 
 // LwOut class for a Digital-Only (Non-PWM) GPIO port
 class LwDigOut: public LwOut
 {
 public:
-    LwDigOut(PinName pin) : p(pin) { prv = -1; }
-    virtual void set(float val) 
+    LwDigOut(PinName pin) : p(pin) { prv = 0; }
+    virtual void set(uint8_t val) 
     {
          if (val != prv)
-            p.write((prv = val) == 0.0 ? 0 : 1); 
+            p.write((prv = val) == 0 ? 0 : 1); 
     }
     DigitalOut p;
-    float prv;
+    uint8_t prv;
 };
 
 // Array of output physical pin assignments.  This array is indexed
@@ -532,6 +726,7 @@ static LwOut **lwPin;
 //    [0] = Night Mode indicator light
 //
 static LwOut *specialPin[1];
+const int SPECIAL_PIN_NIGHTMODE = 0;
 
 
 // Number of LedWiz emulation outputs.  This is the number of ports
@@ -541,20 +736,11 @@ static LwOut *specialPin[1];
 // lower of 32 or the actual number of outputs.
 static int numLwOutputs;
 
-// Current absolute brightness level for an output.  This is a float
-// value from 0.0 for fully off to 1.0 for fully on.  This is used
-// for all extended ports (33 and above), and for any LedWiz port
-// with wizVal == 255.
-static float *outLevel;
-
-// Day/night mode override for an output.  For each output, this is
-// set to 1 if the output is enabled and 0 if the output is disabled
-// by a global mode control, such as Night Mode (currently Night Mode
-// is the only such global mode, but the idea could be extended to
-// other similar controls if other needs emerge).  To get the final
-// output level for each output, we simply multiply the outLevel value
-// for the port by this override vlaue.
-static uint8_t *modeLevel;
+// Current absolute brightness level for an output.  This is a DOF
+// brightness level value, from 0 for fully off to 255 for fully on.  
+// This is used for all extended ports (33 and above), and for any 
+// LedWiz port with wizVal == 255.
+static uint8_t *outLevel;
 
 // create a single output pin
 LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
@@ -563,7 +749,9 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
     int typ = pc.typ;
     int pin = pc.pin;
     int flags = pc.flags;
+    int noisy = flags & PortFlagNoisemaker;
     int activeLow = flags & PortFlagActiveLow;
+    int gamma = flags & PortFlagGamma;
 
     // create the pin interface object according to the port type        
     LwOut *lwp;
@@ -583,9 +771,37 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
         // TLC5940 port (if we don't have a TLC controller object, or it's not a valid
         // output port number on the chips we have, create a virtual port)
         if (tlc5940 != 0 && pin < cfg.tlc5940.nchips*16)
-            lwp = new Lw5940Out(pin);
+        {
+            // If gamma correction is to be used, and we're not inverting the output,
+            // use the combined TLC4950 + Gamma output class.  Otherwise use the plain 
+            // TLC5940 output.  We skip the combined class if the output is inverted
+            // because we need to apply gamma BEFORE the inversion to get the right
+            // results, but the combined class would apply it after because of the
+            // layering scheme - the combined class is a physical device output class,
+            // and a physical device output class is necessarily at the bottom of 
+            // the stack.  We don't have a combined inverted+gamma+TLC class, because
+            // inversion isn't recommended for TLC5940 chips in the first place, so
+            // it's not worth the extra memory footprint to have a dedicated table
+            // for this unlikely case.
+            if (gamma && !activeLow)
+            {
+                // use the gamma-corrected 5940 output mapper
+                lwp = new Lw5940GammaOut(pin);
+                
+                // DON'T apply further gamma correction to this output
+                gamma = false;
+            }
+            else
+            {
+                // no gamma - use the plain (linear) 5940 output class
+                lwp = new Lw5940Out(pin);
+            }
+        }
         else
+        {
+            // no TLC5940 chips, or invalid port number - use a virtual out
             lwp = new LwVirtualOut();
+        }
         break;
     
     case PortType74HC595:
@@ -604,9 +820,20 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
         break;
     }
     
-    // if it's Active Low, layer on an inverter
+    // If it's Active Low, layer on an inverter.  Note that an inverter
+    // needs to be the bottom-most layer, since all of the other filters
+    // assume that they're working with normal (non-inverted) values.
     if (activeLow)
         lwp = new LwInvertedOut(lwp);
+        
+    // If it's a noisemaker, layer on a night mode switch.  Note that this
+    // needs to be 
+    if (noisy)
+        lwp = new LwNoisyOut(lwp);
+        
+    // If it's gamma-corrected, layer on a gamma corrector
+    if (gamma)
+        lwp = new LwGammaOut(lwp);
 
     // turn it off initially      
     lwp->set(0);
@@ -643,13 +870,7 @@ void initLwOut(Config &cfg)
     // allocate the full set of actual ports if we have more than the
     // LedWiz complement.
     int minOuts = numOutputs < 32 ? 32 : numOutputs;
-    outLevel = new float[minOuts];
-    
-    // Allocate the mode override array
-    modeLevel = new uint8_t[minOuts];
-    
-    // start with all modeLevel values set to ON
-    memset(modeLevel, 1, minOuts);
+    outLevel = new uint8_t[minOuts];
     
     // create the pin interface object for each port
     for (i = 0 ; i < numOutputs ; ++i)
@@ -674,22 +895,24 @@ void initLwOut(Config &cfg)
 // on/off state for each LedWiz output
 static uint8_t wizOn[32];
 
-// Profile (brightness/blink) state for each LedWiz output.  If the
-// output was last updated through an LedWiz protocol message, it
-// will have one of these values:
+// LedWiz "Profile State" (the LedWiz brightness level or blink mode)
+// for each LedWiz output.  If the output was last updated through an 
+// LedWiz protocol message, it will have one of these values:
 //
 //   0-48 = fixed brightness 0% to 100%
+//   49  = fixed brightness 100% (equivalent to 48)
 //   129 = ramp up / ramp down
 //   130 = flash on / off
 //   131 = on / ramp down
 //   132 = ramp up / on
 //
-// Special value 255:  If the output was updated through the 
-// extended protocol, we'll set the wizVal entry to 255, which has 
-// no meaning in the LedWiz protocol.  This tells us that the value 
-// in outLevel[] was set directly from the extended protocol, so it 
-// shouldn't be derived from wizVal[].
+// If the output was last updated through an extended protocol message,
+// it will have the special value 255.  This means that we use the
+// outLevel[] value for the port instead of an LedWiz setting.
 //
+// (Note that value 49 isn't documented in the LedWiz spec, but real
+// LedWiz units treat it as equivalent to 48, and some PC software uses
+// it, so we need to accept it for compatibility.)
 static uint8_t wizVal[32] = {
     48, 48, 48, 48, 48, 48, 48, 48,
     48, 48, 48, 48, 48, 48, 48, 48,
@@ -701,11 +924,24 @@ static uint8_t wizVal[32] = {
 // rate for lights in blinking states.
 static uint8_t wizSpeed = 2;
 
-// Current LedWiz flash cycle counter.
+// Current LedWiz flash cycle counter.  This runs from 0 to 255
+// during each cycle.
 static uint8_t wizFlashCounter = 0;
 
-// Get the current brightness level for an LedWiz output.
-static float wizState(int idx)
+// translate an LedWiz brightness level (0-49) to a DOF brightness
+// level (0-255)
+static const uint8_t lw_to_dof[] = {
+       0,    5,   11,   16,   21,   27,   32,   37, 
+      43,   48,   53,   58,   64,   69,   74,   80, 
+      85,   90,   96,  101,  106,  112,  117,  122, 
+     128,  133,  138,  143,  149,  154,  159,  165, 
+     170,  175,  181,  186,  191,  197,  202,  207, 
+     213,  218,  223,  228,  234,  239,  244,  250, 
+     255,  255
+};
+
+// Translate an LedWiz output (ports 1-32) to a DOF brightness level.
+static uint8_t wizState(int idx)
 {
     // if the output was last set with an extended protocol message,
     // use the value set there, ignoring the output's LedWiz state
@@ -718,7 +954,7 @@ static float wizState(int idx)
 
     // check the state
     uint8_t val = wizVal[idx];
-    if (val <= 48)
+    if (val <= 49)
     {
         // PWM brightness/intensity level.  Rescale from the LedWiz
         // 0..48 integer range to our internal PwmOut 0..1 float range.
@@ -740,40 +976,34 @@ static float wizState(int idx)
         // makes us work properly with software that's expecting the
         // documented LedWiz behavior and therefore uses level 48 to
         // turn a contactor or relay fully on.
-        return val/48.0f;
-    }
-    else if (val == 49)
-    {
-        // 49 is undefined in the LedWiz documentation, but actually
-        // means 100% on.  The documentation says that levels 1-48 are
-        // the full PWM range, but empirically it appears that the real
-        // range implemented in the firmware is 1-49.  Some software on
-        // the PC side (notably DOF) is aware of this and uses level 49
-        // to mean "100% on".  To ensure compatibility with existing 
-        // PC-side software, we need to recognize level 49.
-        return 1.0f;
+        //
+        // Note that value 49 is undefined in the LedWiz documentation,
+        // but real LedWiz units treat it as 100%, equivalent to 48.
+        // Some software on the PC side uses this, so we need to treat
+        // it the same way for compatibility.
+        return lw_to_dof[val];
     }
     else if (val == 129)
     {
-        //   129 = ramp up / ramp down
+        // 129 = ramp up / ramp down
         return wizFlashCounter < 128 
-            ? wizFlashCounter/128.0f 
-            : (256 - wizFlashCounter)/128.0f;
+            ? wizFlashCounter*2 + 1
+            : (255 - wizFlashCounter)*2;
     }
     else if (val == 130)
     {
-        //   130 = flash on / off
-        return wizFlashCounter < 128 ? 1.0f : 0.0f;
+        // 130 = flash on / off
+        return wizFlashCounter < 128 ? 255 : 0;
     }
     else if (val == 131)
     {
-        //   131 = on / ramp down
-        return wizFlashCounter < 128 ? 1.0f : (255 - wizFlashCounter)/128.0f;
+        // 131 = on / ramp down
+        return wizFlashCounter < 128 ? 255 : (255 - wizFlashCounter)*2;
     }
     else if (val == 132)
     {
-        //   132 = ramp up / on
-        return wizFlashCounter < 128 ? wizFlashCounter/128.0f : 1.0f;
+        // 132 = ramp up / on
+        return wizFlashCounter < 128 ? wizFlashCounter*2 : 255;
     }
     else
     {
@@ -782,7 +1012,7 @@ static float wizState(int idx)
         // LedWiz unit exhibits in response is accidental and could change
         // in a future version.  We'll treat all undefined values as equivalent 
         // to 48 (fully on).
-        return 1.0f;
+        return 255;
     }
 }
 
@@ -812,7 +1042,7 @@ static void wizPulse()
             uint8_t s = wizVal[i];
             if (s >= 129 && s <= 132)
             {
-                lwPin[i]->set(wizState(i) * modeLevel[i]);
+                lwPin[i]->set(wizState(i));
                 ena = true;
             }
         }
@@ -837,7 +1067,7 @@ static void updateWizOuts()
     for (int i = 0 ; i < numLwOutputs ; ++i)
     {
         pulse |= (wizVal[i] >= 129 && wizVal[i] <= 132);
-        lwPin[i]->set(wizState(i) * modeLevel[i]);
+        lwPin[i]->set(wizState(i));
     }
     
     // if any outputs are set to flashing mode, and the pulse timer
@@ -856,11 +1086,11 @@ static void updateAllOuts()
 {
     // uddate each LedWiz output
     for (int i = 0 ; i < numLwOutputs ; ++i)
-        lwPin[i]->set(wizState(i) * modeLevel[i]);
+        lwPin[i]->set(wizState(i));
         
     // update each extended output
     for (int i = 33 ; i < numOutputs ; ++i)
-        lwPin[i]->set(outLevel[i] * modeLevel[i]);
+        lwPin[i]->set(outLevel[i]);
         
     // flush 74HC595 changes, if necessary
     if (hc595 != 0)
@@ -1677,7 +1907,7 @@ void allOutputsOff()
     }
     
     // reset all extended outputs (ports >32) to full off (brightness 0)
-    for (int i = 32 ; i < numOutputs ; ++i)
+    for (int i = numLwOutputs ; i < numOutputs ; ++i)
     {
         outLevel[i] = 0;
         lwPin[i]->set(0);
@@ -1723,16 +1953,20 @@ void allOutputsOff()
 // previous check.  When we see this condition, we start a countdown
 // timer, and pulse the TV switch relay when the countdown ends.
 //
-// This scheme might seem a little convoluted, but it neatly handles
-// all of the different cases that can occur:
+// This scheme might seem a little convoluted, but it handles a number
+// of tricky but likely scenarios:
 //
 // - Most cabinets systems are set up with "soft" PC power switches, 
-//   so that the PC goes into "Soft Off" mode (ACPI state S5, in Windows
-//   parlance) when the user turns off the cabinet.  In this state, the
-//   motherboard supplies power to USB devices, so the KL25Z continues
-//   running without interruption.  The latch system lets us monitor
-//   the power state even when we're never rebooted, since the latch
-//   will turn off when PSU2 is off regardless of what the KL25Z is doing.
+//   so that the PC goes into "Soft Off" mode when the user turns off
+//   the cabinet by pushing the power button or using the Shut Down
+//   command from within Windows.  In Windows parlance, this "soft off"
+//   condition is called ACPI State S5.  In this state, the main CPU
+//   power is turned off, but the motherboard still provides power to
+//   USB devices.  This means that the KL25Z keeps running.  Without
+//   the external power sensing circuit, the only hint that we're in 
+//   this state is that the USB connection to the host goes into Suspend
+//   mode, but that could mean other things as well.  The latch circuit
+//   lets us tell for sure that we're in this state.
 //
 // - Some cabinet builders might prefer to use "hard" power switches,
 //   cutting all power to the cabinet, including the PC motherboard (and
@@ -1741,14 +1975,15 @@ void allOutputsOff()
 //   a power outage occurs, etc.  In these cases, the KL25Z will do a cold
 //   boot when the PC is turned on.  We don't know whether the KL25Z
 //   will power up before or after PSU2, so it's not good enough to 
-//   observe the *current* state of PSU2 when we first check - if PSU2
-//   were to come on first, checking the current state alone would fool
-//   us into thinking that no action is required, because we would never
-//   have known that PSU2 was ever off.  The latch handles this case by
-//   letting us see that PSU2 *was* off before we checked.
+//   observe the current state of PSU2 when we first check.  If PSU2
+//   were to come on first, checking only the current state would fool
+//   us into thinking that no action is required, because we'd only see
+//   that PSU2 is turned on any time we check.  The latch handles this 
+//   case by letting us see that PSU2 was indeed off some time before our
+//   first check.
 //
 // - If the KL25Z is rebooted while the main system is running, or the 
-//   KL25Z is unplugged and plugged back in, we will correctly leave the 
+//   KL25Z is unplugged and plugged back in, we'll correctly leave the 
 //   TVs as they are.  The latch state is independent of the KL25Z's 
 //   power or software state, so it's won't affect the latch state when
 //   the KL25Z is unplugged or rebooted; when we boot, we'll see that 
@@ -1756,7 +1991,6 @@ void allOutputsOff()
 //   This is important because TV ON buttons are usually on/off toggles,
 //   so we don't want to push the button on a TV that's already on.
 //   
-//
 
 // Current PSU2 state:
 //   1 -> default: latch was on at last check, or we haven't checked yet
@@ -1764,7 +1998,6 @@ void allOutputsOff()
 //   3 -> SET pulsed low, ready to check status
 //   4 -> TV timer countdown in progress
 //   5 -> TV relay on
-//   
 int psu2_state = 1;
 
 // PSU2 power sensing circuit connections
@@ -1810,7 +2043,7 @@ void TVTimerInt()
         
     case 3:
         // CHECK state: we pulsed SET, and we're now ready to see
-        // if that stuck.  If the latch is now on, PSU2 has transitioned
+        // if it stuck.  If the latch is now on, PSU2 has transitioned
         // from OFF to ON, so start the TV countdown.  If the latch is
         // off, our SET command didn't stick, so PSU2 is still off.
         if (psu2_status_sense->read())
@@ -1863,7 +2096,7 @@ void startTVTimer(Config &cfg)
         psu2_status_sense = new DigitalIn(cfg.TVON.statusPin);
         psu2_status_set = new DigitalOut(cfg.TVON.latchPin);
         tv_relay = new DigitalOut(cfg.TVON.relayPin);
-        tv_delay_time = cfg.TVON.delayTime;
+        tv_delay_time = cfg.TVON.delayTime/100.0;
     
         // Set up our time routine to run every 1/4 second.  
         tv_ticker.attach(&TVTimerInt, 0.25);
@@ -1957,43 +2190,26 @@ void saveConfigToFlash()
 
 // ---------------------------------------------------------------------------
 //
-// NIGHT MODE flag.  When night mode is on, we disable all outputs
-// marked as "noisemakers" in the output configuration flags.
-int nightMode;
-
-// Update the global output mode settings
-static void globalOutputModeChange()
-{
-    // set the global modeLevel[] 
-    for (int i = 0 ; i < numOutputs ; ++i)
-    {
-        // assume the port will be on
-        uint8_t f = 1;
-        
-        // if night mode is in effect, and this is a noisemaker, disable it
-        if (nightMode && (cfg.outPort[i].flags & PortFlagNoisemaker) != 0)
-            f = 0;
-            
-        // set the final output port override value
-        modeLevel[i] = f;
-    }
-    
-    // update all outputs for the mode change
-    updateAllOuts();
-}
+// Night mode setting updates
+//
 
 // Turn night mode on or off
 static void setNightMode(bool on)
 {
-    nightMode = on;
-    globalOutputModeChange();
-    specialPin[0]->set(on ? 255.0 : 0.0);
+    // set the new night mode flag in the noisy output class
+    LwNoisyOut::nightMode = on;
+
+    // update the special output pin that shows the night mode state
+    specialPin[SPECIAL_PIN_NIGHTMODE]->set(on ? 255 : 0);
+
+    // update all outputs for the mode change
+    updateAllOuts();
 }
 
 // Toggle night mode
 static void toggleNightMode()
 {
-    setNightMode(!nightMode);
+    setNightMode(!LwNoisyOut::nightMode);
 }
 
 
@@ -2131,144 +2347,32 @@ int calBtnLit = false;
 
 // ---------------------------------------------------------------------------
 //
-// Handle a configuration variable update.  'data' is the USB message we
-// received from the host.
+// Configuration variable get/set message handling
 //
-void configVarMsg(uint8_t *data)
-{
-    switch (data[1])
-    {
-    case 1:
-        // USB identification (Vendor ID, Product ID)
-        cfg.usbVendorID = wireUI16(data+2);
-        cfg.usbProductID = wireUI16(data+4);
-        break;
-        
-    case 2:
-        // Pinscape Controller unit number - note that data[2] contains
-        // the nominal unit number, 1-16
-        if (data[2] >= 1 && data[2] <= 16)
-            cfg.psUnitNo = data[2];
-        break;
-        
-    case 3:
-        // Enable/disable joystick
-        cfg.joystickEnabled = data[2];
-        break;
-        
-    case 4:
-        // Accelerometer orientation
-        cfg.orientation = data[2];
-        break;
 
-    case 5:
-        // Plunger sensor type
-        cfg.plunger.sensorType = data[2];
-        break;
-        
-    case 6:
-        // Set plunger pin assignments
-        cfg.plunger.sensorPin[0] = wirePinName(data[2]);
-        cfg.plunger.sensorPin[1] = wirePinName(data[3]);
-        cfg.plunger.sensorPin[2] = wirePinName(data[4]);
-        cfg.plunger.sensorPin[3] = wirePinName(data[5]);
-        break;
-        
-    case 7:
-        // Plunger calibration button and indicator light pin assignments
-        cfg.plunger.cal.btn = wirePinName(data[2]);
-        cfg.plunger.cal.led = wirePinName(data[3]);
-        break;
-        
-    case 8:
-        // ZB Launch Ball setup
-        cfg.plunger.zbLaunchBall.port = (int)(unsigned char)data[2];
-        cfg.plunger.zbLaunchBall.btn = (int)(unsigned char)data[3];
-        cfg.plunger.zbLaunchBall.pushDistance = (float)wireUI16(data+4) / 1000.0;
-        break;
-        
-    case 9:
-        // TV ON setup
-        cfg.TVON.statusPin = wirePinName(data[2]);
-        cfg.TVON.latchPin = wirePinName(data[3]);
-        cfg.TVON.relayPin = wirePinName(data[4]);
-        cfg.TVON.delayTime = (float)wireUI16(data+5) / 100.0;
-        break;
-        
-    case 10:
-        // TLC5940NT PWM controller chip setup
-        cfg.tlc5940.nchips = (int)(unsigned char)data[2];
-        cfg.tlc5940.sin = wirePinName(data[3]);
-        cfg.tlc5940.sclk = wirePinName(data[4]);
-        cfg.tlc5940.xlat = wirePinName(data[5]);
-        cfg.tlc5940.blank = wirePinName(data[6]);
-        cfg.tlc5940.gsclk = wirePinName(data[7]);
-        break;
-        
-    case 11:
-        // 74HC595 shift register chip setup
-        cfg.hc595.nchips = (int)(unsigned char)data[2];
-        cfg.hc595.sin = wirePinName(data[3]);
-        cfg.hc595.sclk = wirePinName(data[4]);
-        cfg.hc595.latch = wirePinName(data[5]);
-        cfg.hc595.ena = wirePinName(data[6]);
-        break;
-        
-    case 12:
-        // button setup
-        {
-            // get the button number
-            int idx = data[2];
-            
-            // if it's in range, set the button data
-            if (idx > 0 && idx <= MAX_BUTTONS)
-            {
-                // adjust to an array index
-                --idx;
-                
-                // set the values
-                cfg.button[idx].pin = data[3];
-                cfg.button[idx].typ = data[4];
-                cfg.button[idx].val = data[5];
-                cfg.button[idx].flags = data[6];
-            }
-        }
-        break;
-        
-    case 13:
-        // LedWiz output port setup
-        {
-            // get the port number
-            int idx = data[2];
-            
-            // if it's in range, set the port data
-            if (idx > 0 && idx <= MAX_OUT_PORTS)
-            {
-                // adjust to an array index
-                --idx;
-                
-                // set the values
-                cfg.outPort[idx].typ = data[3];
-                cfg.outPort[idx].pin = data[4];
-                cfg.outPort[idx].flags = data[5];
-            }
-            else if (idx == 254)
-            {
-                // special ports
-                idx -= 254;
-                cfg.specialPort[idx].typ = data[3];
-                cfg.specialPort[idx].pin = data[4];
-                cfg.specialPort[idx].flags = data[5];
-            }
-        }
-        break;
+// Handle SET messages - write configuration variables from USB message data
+#define if_msg_valid(test)  if (test)
+#define v_byte(var, ofs)   cfg.var = data[ofs]
+#define v_ui16(var, ofs)   cfg.var = wireUI16(data+ofs)
+#define v_pin(var, ofs)    cfg.var = wirePinName(data[ofs])
+#define v_func configVarSet
+#include "cfgVarMsgMap.h"
 
-    case 14:
-        // engage/cancel Night Mode
-        setNightMode(data[2]);
-        break;
-    }
-}
+// redefine everything for the SET messages
+#undef if_msg_valid
+#undef v_byte
+#undef v_ui16
+#undef v_pin
+#undef v_func
+
+// Handle GET messages - read variable values and return in USB message daa
+#define if_msg_valid(test)
+#define v_byte(var, ofs)   data[ofs] = cfg.var
+#define v_ui16(var, ofs)   ui16Wire(data+ofs, cfg.var)
+#define v_pin(var, ofs)    pinNameWire(data+ofs, cfg.var)
+#define v_func  configVarGet
+#include "cfgVarMsgMap.h"
+
 
 // ---------------------------------------------------------------------------
 //
@@ -2326,7 +2430,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
             // states are independent, so an SBA just turns an output
             // on or off but retains its last brightness level.
             if (wizVal[i] == 255)
-                wizVal[i] = (uint8_t)round(outLevel[i]*48);
+                wizVal[i] = (uint8_t)round(outLevel[i]/255.0 * 48.0);
         }
         
         // set the flash speed - enforce the value range 1-7
@@ -2416,7 +2520,8 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
             js.reportConfig(
                 numOutputs, 
                 cfg.psUnitNo - 1,   // report 0-15 range for unit number (we store 1-16 internally)
-                cfg.plunger.cal.zero, cfg.plunger.cal.max);
+                cfg.plunger.cal.zero, cfg.plunger.cal.max,
+                nvm.valid());
             break;
             
         case 5:
@@ -2434,6 +2539,18 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
             // really needed.
             reboot(js);
             break;
+            
+        case 7:
+            // 7 = Device ID report
+            // (No parameters)
+            js.reportID();
+            break;
+            
+        case 8:
+            // 8 = Engage/disengage night mode.
+            //     data[2] = 1 to engage, 0 to disengage
+            setNightMode(data[2]);
+            break;
         }
     }
     else if (data[0] == 66)
@@ -2442,7 +2559,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
         // The second byte of the message is the ID of the variable
         // to update, and the remaining bytes give the new value,
         // in a variable-dependent format.
-        configVarMsg(data);
+        configVarSet(data);
     }
     else if (data[0] >= 200 && data[0] <= 228)
     {
@@ -2470,7 +2587,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
         for (int i = i0 ; i < i1 ; ++i)
         {
             // set the brightness level for the output
-            float b = data[i-i0+1]/255.0;
+            uint8_t b = data[i-i0+1];
             outLevel[i] = b;
             
             // if it's in the basic LedWiz output set, set the LedWiz
@@ -2479,7 +2596,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
                 wizVal[i] = 255;
                 
             // set the output
-            lwPin[i]->set(b * modeLevel[i]);
+            lwPin[i]->set(b);
         }
         
         // update 74HC595 outputs, if attached
@@ -2567,12 +2684,9 @@ int main(void)
     Ticker preConnectTicker;
     preConnectTicker.attach(preConnectFlasher, 3);
 
-    // start the TV timer, if applicable
-    startTVTimer(cfg);
-    
     // we're not connected/awake yet
     bool connected = false;
-    time_t connectChangeTime = time(0);
+    Timer connectChangeTimer;
 
     // create the plunger sensor interface
     createPlunger();
@@ -2594,6 +2708,9 @@ int main(void)
     if (tlc5940 != 0)
         tlc5940->start();
         
+    // start the TV timer, if applicable
+    startTVTimer(cfg);
+    
     // initialize the button input ports
     bool kbKeys = false;
     initButtons(cfg, kbKeys);
@@ -2604,7 +2721,7 @@ int main(void)
     
     // we're now connected - kill the pre-connect ticker
     preConnectTicker.detach();
-        
+    
     // Last report timer for the joytick interface.  We use the joystick timer 
     // to throttle the report rate, because VP doesn't benefit from reports any 
     // faster than about every 10ms.
@@ -2980,7 +3097,7 @@ int main(void)
             if (cfg.plunger.zbLaunchBall.port != 0)
             {
                 const int cockThreshold = JOYMAX/3;
-                const int pushThreshold = int(-JOYMAX/3 * cfg.plunger.zbLaunchBall.pushDistance);
+                const int pushThreshold = int(-JOYMAX/3.0 * cfg.plunger.zbLaunchBall.pushDistance/1000.0);
                 int newState = lbState;
                 switch (lbState)
                 {
@@ -3293,20 +3410,70 @@ int main(void)
 #endif
 
         // check for connection status changes
-        int newConnected = js.isConnected() && !js.isSuspended();
+        bool newConnected = js.isConnected() && !js.isSuspended();
         if (newConnected != connected)
         {
             // give it a few seconds to stabilize
-            time_t tc = time(0);
-            if (tc - connectChangeTime > 3)
+            connectChangeTimer.start();
+            if (connectChangeTimer.read() > 3)
             {
                 // note the new status
                 connected = newConnected;
-                connectChangeTime = tc;
                 
-                // if we're no longer connected, turn off all outputs
-                if (!connected)
+                // done with the change timer for this round - reset it for next time
+                connectChangeTimer.stop();
+                connectChangeTimer.reset();
+                
+                // adjust to the new status
+                if (connected)
+                {
+                    // We're newly connected.  This means we just powered on, we were
+                    // just plugged in to the PC USB port after being unplugged, or the
+                    // PC just came out of sleep/suspend mode and resumed the connection.
+                    // In any of these cases, we can now assume that the PC power supply
+                    // is on (the PC must be on for the USB connection to be running, and
+                    // if the PC is on, its power supply is on).  This also means that 
+                    // power to any external output controller chips (TLC5940, 74HC595)
+                    // is now on, because those have to be powered from the PC power
+                    // supply to allow for a reliable data connection to the KL25Z.
+                    // We can thus now set clear initial output state in those chips and
+                    // enable their outputs.
+                    if (tlc5940 != 0)
+                    {
+                        tlc5940->update(true);
+                        tlc5940->enable(true);
+                    }
+                    if (hc595 != 0)
+                    {
+                        hc595->update(true);
+                        hc595->enable(true);
+                    }
+                }
+                else
+                {
+                    // We're no longer connected.  Turn off all outputs.
                     allOutputsOff();
+                    
+                    // The KL25Z runs off of USB power, so we might (depending on the PC
+                    // and OS configuration) continue to receive power even when the main
+                    // PC power supply is turned off, such as in soft-off or suspend/sleep
+                    // mode.  Any external output controller chips (TLC5940, 74HC595) might
+                    // be powered from the PC power supply directly rather than from our
+                    // USB power, so they might be powered off even when we're still running.
+                    // To ensure cleaner startup when the power comes back on, globally
+                    // disable the outputs.  The global disable signals come from GPIO lines
+                    // that remain powered as long as the KL25Z is powered, so these modes
+                    // will apply smoothly across power state transitions in the external
+                    // hardware.  That is, when the external chips are powered up, they'll
+                    // see the global disable signals as stable voltage inputs immediately,
+                    // which will cause them to suppress any output triggering.  This ensures
+                    // that we don't fire any solenoids or flash any lights spuriously when
+                    // the power first comes on.
+                    if (tlc5940 != 0)
+                        tlc5940->enable(false);
+                    if (hc595 != 0)
+                        hc595->enable(false);
+                }
             }
         }
         
@@ -3335,23 +3502,19 @@ int main(void)
             else if (jsOKTimer.read() > 5)
             {
                 // USB freeze - show red/yellow.
-                //  Our outgoing joystick messages aren't going through, even though we
+                // Our outgoing joystick messages aren't going through, even though we
                 // think we're still connected.  This indicates that one or more of our
                 // USB endpoints have stopped working, which can happen as a result of
                 // bugs in the USB HAL or latency responding to a USB IRQ.  Show a
                 // distinctive diagnostic flash to signal the error.  I haven't found a 
                 // way to recover from this class of error other than rebooting the MCU, 
-                // so the goal is to fix the HAL so that this error never happens.  This
-                // flash pattern is thus for debugging purposes only; hopefully it won't
-                // ever occur in a real installation.
-                static bool dumped;
-                if (!dumped) {
-                    // If we haven't already, dump the USB HAL status to the debug console,
-                    // in case it helps identify the reason for the endpoint failure.
-                    extern void USBDeviceStatusDump(void);
-                    USBDeviceStatusDump();
-                    dumped = true;
-                }
+                // so the goal is to fix the HAL so that this error never happens.  
+                //
+                // NOTE!  This diagnostic code *hopefully* shouldn't occur.  It happened
+                // in the past due to a number of bugs in the mbed KL25Z USB HAL that
+                // I've since fixed.  I think I found all of the cases that caused it,
+                // but I'm leaving the diagnostics here in case there are other bugs
+                // still lurking that can trigger the same symptoms.
                 jsOKTimer.stop();
                 hb = !hb;
                 diagLED(1, hb, 0);

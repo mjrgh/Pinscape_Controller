@@ -24,35 +24,37 @@
 //
 // NOTE!  This section contains a possible workaround to try if you're 
 // having data signal stability problems with your TLC5940 chips.  If
-// your chips are working properly, you can ignore this part!
+// things are working properly, you can ignore this part.
 //
 // The software has two options for sending data updates to the chips:
 //
-// Mode 0:  Send data *during* the grayscale cycle.  This is the way the
-// chips are designed to be used.  While the grayscale clock is running,
-// we send data for the *next* cycle, then latch the updated data to the
-// output registers during the blanking interval at the end of the cycle.
-//
+// Mode 0:  Send data *during* the grayscale cycle.  This is the default,
+// and it's the standard method the chips are designed for.  In this mode, 
+// we start sending an update just after then blanking interval that starts 
+// a new grayscale cycle.  The timing is arranged so that the update is 
+// completed well before the end of the grayscale cycle.  At the next 
+// blanking interval, we latch the new data, so the new brightness levels 
+// will be shown starting on the next cycle.
+
 // Mode 1:  Send data *between* grayscale cycles.  In this mode, we send
 // each complete update during a blanking period, then latch the update
 // and start the next grayscale cycle.  This isn't the way the chips were
 // intended to be used, but it works.  The disadvantage is that it requires
-// the blanking interval to be extended to be long enough for the full
-// data update (192 bits * the number of chips in the chain).  Since the
-// outputs are turned off for the entire blanking period, this reduces
+// the blanking interval to be extended long enough for the full data 
+// update (192 bits * the number of chips in the chain).  Since the
+// outputs are turned off throughout the blanking period, this reduces
 // the overall brightness/intensity of the outputs by reducing the duty
 // cycle.  The TLC5940 chips can't achieve 100% duty cycle to begin with,
-// since they require a certain minimum time in the blanking interval
+// since they require a brief minimum time in the blanking interval
 // between grayscale cycles; however, the minimum is so short that the
 // duty cycle is close to 100%.  With the full data transmission stuffed
 // into the blanking interval, we reduce the duty cycle further below
 // 100%.  With four chips in the chain, a 28 MHz data clock, and a
 // 500 kHz grayscale clock, the reduction is about 0.3%.
 //
-// By default, we use Mode 0, because that's the timing model specified
-// by the manufacturer, and empirically it works well with the Pinscape 
-// Expansion boards.  
-// 
+// Mode 0 is the method documented in the manufacturer's data sheet.
+// It works well empirically with the Pinscape expansion boards.
+//
 // So what's the point of Mode 1?  In early testing, with a breadboard 
 // setup, I saw some problems with data signal stability, which manifested 
 // as sporadic flickering in the outputs.  Switching to Mode 1 improved
@@ -105,22 +107,17 @@
   * interval is (1/GSCLK_SPEED) * 4096.  The maximum reliable rate is
   * around 32Mhz.  It's best to keep this rate as low as possible:
   * the higher the rate, the higher the refresh() call frequency,
-  * so the higher the CPU load.
+  * so the higher the CPU load.  Higher frequencies also make it more
+  * challenging to wire the chips for clean signal transmission, so
+  * minimizing the clock speed will help with signal stability.
   *
-  * The lower bound depends on the application.  For driving LEDs, 
-  * the limiting factor is that lower rates will increase visible flicker.
-  * A GSCLK speed of 200 kHz is about as low as you can go with LEDs 
-  * without excessive flicker.  That equals about 48 full grayscale
-  * cycles per second.  That might seem perfectly good in that it's 
-  * about the same as the standard 50Hz A/C cycle rate in many countries, 
-  * but the 50Hz rate was chosen to minimize visible flicker in 
-  * incandescent lamps, not LEDs.  LEDs need a higher rate because they 
-  * don't have thermal inertia as incandescents do.  The default we use 
-  * here is 500 kHz = 122 full grayscale cycles per second.  That seems
-  * to produce excellent visual results.  Higher rates would probably
-  * produce diminishing returns given that they also increase CPU load.
+  * The lower bound depends on the application.  For driving lights,
+  * the limiting factor is flicker: the lower the rate, the more
+  * noticeable the flicker.  Incandescents tend to look flicker-free
+  * at about 50 Hz (205 kHz grayscale clock).  LEDs need slightly 
+  * faster rates.
   */
-#define GSCLK_SPEED    500000
+#define GSCLK_SPEED    350000
 
 /**
   *  This class controls a TLC5940 PWM driver IC.
@@ -163,6 +160,9 @@ public:
           xlat(XLAT),
           nchips(nchips)
     {
+        // start up initially disabled
+        enabled = false;
+        
         // set XLAT to initially off
         xlat = 0;
         
@@ -199,17 +199,28 @@ public:
         xlat = 0;
 
         // Allocate our DMA buffers.  The transfer on each cycle is 192 bits per
-        // chip = 24 bytes per chip. 
-        dmabuf = new char[nchips*24];
-        memset(dmabuf, 0, nchips*24);
+        // chip = 24 bytes per chip.  Allocate two buffers, so that we have a
+        // stable buffer that we can send to the chips, and a separate working
+        // copy that we can asynchronously update.
+        dmalen = nchips*24;
+        dmabuf = new uint8_t[dmalen*2];
+        memset(dmabuf, 0, dmalen*2);
         
+        zerobuf = new uint8_t[dmalen];//$$$
+        memset(zerobuf, 0xff, dmalen);//$$$
+        
+        // start with buffer 0 live, with no new data pending
+        livebuf = dmabuf;
+        workbuf = dmabuf + dmalen;
+        dirty = false;
+
         // Set up the Simple DMA interface object.  We use the DMA controller to
         // send grayscale data updates to the TLC5940 chips.  This lets the CPU
         // keep running other tasks while we send gs updates, and importantly
         // allows our blanking interrupt handler return almost immediately.
         // The DMA transfer is from our internal DMA buffer to SPI0, which is
         // the SPI controller physically connected to the TLC5940s.
-        sdma.source(dmabuf, true, 8);
+        sdma.source(livebuf, true, 8);
         sdma.destination(&(SPI0->D), false, 8);
         sdma.trigger(Trigger_SPI0_TX);
         sdma.attach(this, &TLC5940::dmaDone);
@@ -223,9 +234,36 @@ public:
         gsclk.period(1.0/GSCLK_SPEED);
         
         // mark that we need an initial update
-        newGSData = true;
+        dirty = true;
         needXlat = false;
-     }
+    }
+     
+    // Global enable/disble.  When disabled, we assert the blanking signal
+    // continuously to keep all outputs turned off.  This can be used during
+    // startup and sleep mode to prevent spurious output signals from
+    // uninitialized grayscale registers.  The chips have random values in
+    // their internal registers when power is first applied, so we have to 
+    // explicitly send the initial zero levels after power cycling the chips.
+    // The chips might not have power even when the KL25Z is running, because
+    // they might be powered from a separate power supply from the KL25Z
+    // (the Pinscape Expansion Boards work this way).  Global blanking helps
+    // us start up more cleanly by suppressing all outputs until we can be
+    // reasonably sure that the various chip registers are initialized.
+    void enable(bool f)
+    {
+        // note the new setting
+        enabled = f;
+        
+        // if disabled, apply blanking immediately
+        if (!f)
+        {
+            gsclk.write(0);
+            blank = 1;
+        }
+        
+        // do a full update with the new setting
+        dirty = true;
+    }
     
     // Start the clock running
     void start()
@@ -264,6 +302,20 @@ public:
         // validate the index
         if (idx >= 0 && idx < nchips*16)
         {
+            // this is a critical section, since we're updating a static buffer and
+            // can call this routine from application context or interrupt context
+            __disable_irq();
+            
+            // If the buffer isn't dirty, it means that the previous working buffer
+            // was swapped into the live buffer on the last blanking interval.  This
+            // means that the working buffer hasn't been updated to the live data yet,
+            // so we need to copy it now.
+            if (!dirty) 
+            {
+                memcpy(workbuf, livebuf, dmalen);
+                dirty = true;
+            }
+
             // Figure the DMA buffer location of the data.  The DMA buffer has the
             // packed bit format that we send across the wire, with 12 bits per output,
             // arranged from last output to first output (N = number of outputs = nchips*16):
@@ -284,24 +336,32 @@ public:
             int di = nchips*24 - 3 - (3*(idx/2));
             if (idx & 1)
             {
-                //printf("out %d = %d -> updating dma[%d] odd (xx x. ..)\r\n", idx, data, di);
                 // ODD = high 8 | low 4
-                dmabuf[di]    = uint8_t((data >> 4) & 0xff);
-                dmabuf[di+1] &= 0x0F;
-                dmabuf[di+1] |= uint8_t((data << 4) & 0xf0);
+                workbuf[di]    = uint8_t((data >> 4) & 0xff);
+                workbuf[di+1] &= 0x0F;
+                workbuf[di+1] |= uint8_t((data << 4) & 0xf0);
             }
             else
             {
                 // EVEN = high 4 | low 8
-                //printf("out %d = %d -> updating dma[%d] even (.. .x xx)\r\n", idx, data, di);
-                dmabuf[di+1] &= 0xF0;
-                dmabuf[di+1] |= uint8_t((data >> 8) & 0x0f);
-                dmabuf[di+2]  = uint8_t(data & 0xff);
+                workbuf[di+1] &= 0xF0;
+                workbuf[di+1] |= uint8_t((data >> 8) & 0x0f);
+                workbuf[di+2]  = uint8_t(data & 0xff);
             }
             
-            // note the update
-            newGSData = true;
+            // end the critical section
+            __enable_irq();
         }
+    }
+    
+    // Update the outputs.  We automatically update the outputs on the grayscale timer
+    // when we have pending changes, so it's not necessary to call this explicitly after 
+    // making a change via set().  This can be called to force an update when the chips
+    // might be out of sync with our internal state, such as after power-on.
+    void update(bool force = false)
+    {
+        if (force)
+            dirty = true;
     }
 
 private:
@@ -311,10 +371,36 @@ private:
     // Simple DMA interface object
     SimpleDMA sdma;
 
-    // DMA transfer buffer.  Each time we have data to transmit to the TLC5940 chips,
-    // we format the data into this buffer exactly as it will go across the wire, then
-    // hand the buffer to the DMA controller to move through the SPI port.
-    char *dmabuf;
+    // DMA transfer buffers - double buffer.  Each time we have data to transmit to the 
+    // TLC5940 chips, we format the data into the working half of this buffer exactly as 
+    // it will go across the wire, then hand the buffer to the DMA controller to move 
+    // through the SPI port.  This memory block is actually two buffers, one live and 
+    // one pending.  When we're ready to send updates to the chips, we swap the working
+    // buffer into the live buffer so that we can send the latest updates.  We keep a
+    // separate working copy so that our live copy is stable, so that we don't alter
+    // any data in the midst of an asynchronous DMA transmission to the chips.
+    uint8_t *dmabuf;
+    
+    uint8_t *zerobuf; // $$$ buffer for all zeroes to flush chip registers when no updates are needed
+    
+    // The working and live buffer pointers.  At any give time, one buffer is live and
+    // the other is active.
+    // dmabuf1 is live and the other is the working buffer.  When there's pending work,
+    // we swap them to make the pending data live.
+    uint8_t *livebuf;
+    uint8_t *workbuf;
+    
+    // length of each DMA buffer, in bytes - 12 bits = 1.5 bytes per output, 16 outputs
+    // per chip -> 24 bytes per chip
+    uint16_t dmalen;
+    
+    // Dirty: true means that the non-live buffer has new pending data.  False means
+    // that the non-live buffer is empty.
+    bool dirty;
+    
+    // Enabled: this enables or disables all outputs.  When this is true, we assert the
+    // BLANK signal continuously.
+    bool enabled;
     
     // SPI port - only MOSI and SCK are used
     SPI spi;
@@ -334,17 +420,35 @@ private:
     // on each cycle.
     Timeout resetTimer;
     
-    // Has new GS/DC data been loaded?
-    volatile bool newGSData;
-    
     // Do we need an XLAT signal on the next blanking interval?
     volatile bool needXlat;
+    volatile bool newGSData;//$$$
 
-    // Function to reset the display and send the next chunks of data
+    // Reset the grayscale cycle and send the next data update
     void reset()
     {
         // start the blanking cycle
         startBlank();
+        
+        // if we have pending grayscale data, update the DMA data
+        /*$$$bool*/ newGSData = false;
+        if (dirty) 
+        {
+            // swap live and working buffers
+            uint8_t *tmp = livebuf;
+            livebuf = workbuf;
+            workbuf = tmp;
+            
+            // set the new DMA source
+            sdma.source(livebuf, true, 8);            
+            
+            // no longer dirty
+            dirty = false;
+            
+            // note the new data
+            newGSData = true;
+        }
+        else { sdma.source(zerobuf, true, 8); }//$$$
         
 #if DATA_UPDATE_INSIDE_BLANKING
         // We're configured to send the new GS data entirely within
@@ -361,22 +465,16 @@ private:
         // did updates on some cycles and not others.  By doing an
         // update on every cycle, we make the brightness reduction
         // uniform across time, which makes it less perceptible.
-        sdma.start(nchips*24);
+        sdma.start(dmalen);
         
 #else // DATA_UPDATE_INSIDE_BLANKING
         
         // end the blanking interval
         endBlank();
         
-        // if we have pending grayscale data, update the DMA data
-        // if (newGSData) 
-        {
-            // send out the DMA contents
-            sdma.start(nchips*24);
-            
-            // we don't have to send again until the next gs data cahnge
-            newGSData = false;
-        }
+        // send out the DMA contents if we have new data
+       //$$$ if (newGSData)
+            sdma.start(dmalen);
 
 #endif // DATA_UPDATE_INSIDE_BLANKING
     }
@@ -385,6 +483,7 @@ private:
     {
         // turn off the grayscale clock, and assert BLANK to end the grayscale cycle
         gsclk.write(0);
+        blank = 0;  // for a slight delay - chip requires 20ns GSCLK up to BLANK up
         blank = 1;        
     }
             
@@ -400,8 +499,9 @@ private:
             needXlat = false;
         }
 
-        // end the blanking interval and restart the grayscale clock
-        blank = 0;
+        // End the blanking interval and restart the grayscale clock.  Note
+        // that we keep the blanking on if the chips are globally disabled.
+        blank = enabled ? 0 : 1;
         gsclk.write(.5);
         
         // set up the next blanking interrupt
@@ -416,7 +516,7 @@ private:
     {
         // mark that we need to assert XLAT to latch the new
         // grayscale data during the next blanking interval
-        needXlat = true;
+        needXlat = newGSData;//$$$ true;
         
 #if DATA_UPDATE_INSIDE_BLANKING
         // we're doing the gs update within the blanking cycle, so end

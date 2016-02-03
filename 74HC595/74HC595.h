@@ -70,9 +70,10 @@ public:
     }
     
     // Initialize.  This must be called once at startup to clear the chips' 
-    // shift registers and enable the physical outputs.  We clock a 0 bit (OFF
-    // state) to each shift register position, latch the OFF states on the
-    // outputs, and enable the chips.
+    // shift registers.  We clock a 0 bit (OFF state) to each shift register 
+    // position and latch the OFF states on the outputs.  Note that this
+    // doesn't enable the chips - that must be done with a separate call
+    // to enable(true).
     void init()
     {
         // set the internal state of all inputs
@@ -91,9 +92,6 @@ public:
         // bit for each pin to the actual output pin)
         latch = 1;
         latch = 0;
-        
-        // enable the outputs
-        ena = 1;
     }
     
     // Set an output state.  This only sets the state internally; call
@@ -107,12 +105,32 @@ public:
         }
     }
     
-    // Apply updates.  This sends the current state of each pin to the
-    // chips and latches the new settings.
-    void update()
+    // Global enable/disable the outputs.  We use this for cleaner startup,
+    // by disabling all outputs after power-on and when coming out of sleep
+    // mode until we've had a chance to initialize the chip registers.  The
+    // chips have random values in their shift registers when first powered
+    // on, so we have to send an initial update after power-on.  The snag
+    // is that the chips might have a separate power supply from the KL25Z,
+    // so we can't assume that the chips are powered just because the program
+    // is running.  Instead, we can use the USB connection status as a proxy
+    // for chip power, on the assumption that (a) the chips are running off
+    // of the PC power supply, and (b) the USB connection can only be running
+    // when the PC is running (hence the PC power supply is on).  
+    void enable(bool f)
     {
-        // if we have changes to apply, send the changes
-        if (dirty)
+        // set the new enable state
+        ena = (f ? 1 : 0);
+    }
+    
+    // Apply updates.  This sends the current state of each pin to the
+    // chips and latches the new settings.  If 'force' is true, we flush
+    // our internal state to the chips even if we haven't made any changes
+    // since the last update.
+    void update(bool force = false)
+    {
+        // if we have changes to apply, or the caller wants the update to
+        // happen regardless of pending changes, refresh the chips
+        if (dirty || force)
         {
             // Clock out the new states.  Since the outputs are arranged
             // as shift registers, we have to clock out the bits in reverse

@@ -47,8 +47,9 @@ bool USBJoystick::update()
 
    // Fill the report according to the Joystick Descriptor
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
+#define putl(idx, val) (put(idx, val), put((idx)+2, (val) >> 16))
    put(0, _status);
-   put(2, 0);  // second byte of status isn't used in normal reports
+   put(2, 0);  // second word of status - zero in high bit identifies as normal joystick report
    put(4, _buttonsLo);
    put(6, _buttonsHi);
    put(8, _x);
@@ -119,7 +120,28 @@ bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
     return sendTO(&report, 100);
 }
 
-bool USBJoystick::reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax)
+bool USBJoystick::reportID()
+{
+    HID_REPORT report;
+
+    // initially fill the report with zeros
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate that it's an ID report
+    uint16_t s = 0x9000;
+    put(0, s);
+    
+    // write the 80-bit ID
+    put(2, SIM->UIDMH);
+    putl(4, SIM->UIDML);
+    putl(8, SIM->UIDL);
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax, bool configured)
 {
     HID_REPORT report;
 
@@ -139,6 +161,10 @@ bool USBJoystick::reportConfig(int numOutputs, int unitNo, int plungerZero, int 
     // write the plunger zero and max values
     put(6, plungerZero);
     put(8, plungerMax);
+    
+    // write the status bits: 
+    //  0x01  -> configuration loaded
+    report.data[10] = (configured ? 0x01 : 0x00);
     
     // send the report
     report.length = reportLen;

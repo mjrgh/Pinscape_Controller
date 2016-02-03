@@ -229,8 +229,16 @@ class USBJoystick: public USBHID {
          *
          * @param numOutputs the number of configured output channels
          * @param unitNo the device unit number
+         * @param plungerZero plunger zero calibration point
+         * @param plungerMax plunger max calibration point
+         * @param configured true if a configuration has been saved to flash from the host
          */
-         bool reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax);
+         bool reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax, bool configured);
+         
+         /**
+         * Write a device ID report.
+         */
+         bool reportID();
  
          /**
          * Send a joystick report to the host
