@@ -28,8 +28,8 @@
 class PlungerSensorCCD: public PlungerSensor
 {
 public:
-    PlungerSensorCCD(int nPix, PinName si, PinName clock, PinName ao1, PinName ao2) 
-        : ccd(nPix, si, clock, ao1, ao2)
+    PlungerSensorCCD(int nativePix, PinName si, PinName clock, PinName ao1, PinName ao2) 
+        : ccd(nativePix, si, clock, ao1, ao2)
     {
     }
     
@@ -45,7 +45,6 @@ public:
     virtual bool lowResScan(int &pos)
     {
         // read the pixels at low resolution
-        const int nlpix = 32;
         uint16_t pix[nlpix];
         ccd.read(pix, nlpix);
     
@@ -144,13 +143,17 @@ public:
     // send an exposure report to the joystick interface
     virtual void sendExposureReport(USBJoystick &js)
     {
+        // Read a fresh high-res scan, then do another right away.  This
+        // gives us the shortest possible exposure for the sample we report,
+        // which helps ensure that the user inspecting the data sees something
+        // close to what we see when we calculate the plunger position.
+        ccd.read(pix, npix);
+        ccd.read(pix, npix);        
+        
         // send reports for all pixels
         int idx = 0;
         while (idx < npix)
-        {
             js.updateExposure(idx, npix, pix);
-            wait_ms(1);
-        }
             
         // The pixel dump requires many USB reports, since each report
         // can only send a few pixel values.  An integration cycle has
@@ -163,10 +166,16 @@ public:
     }
     
 protected:
-    // pixel buffer
+    // pixel buffer - concrete subclasses must set to a buffer of the
+    // appropriate size
     uint16_t *pix;
     
+    // number of pixels in low-res scan - concrete subclasses must set
+    // this to a value that evenly divides the native sensor size
+    int nlpix;
+    
     // the low-level interface to the CCD hardware
+public://$$$
     TSL1410R ccd;
 };
 
@@ -180,11 +189,17 @@ public:
     {
         // This sensor is 1x1280 pixels at 400dpi.  Sample every 8th
         // pixel -> 160 pixels at 50dpi == 0.5mm spatial resolution.
-        npix = 160;
+        npix = 320;
+        
+        // for the low-res scan, sample every 40th pixel -> 32 pixels
+        // at 10dpi == 2.54mm spatial resolution.
+        nlpix = 32;
+        
+        // set the pixel buffer
         pix = pixbuf;
     }
     
-    uint16_t pixbuf[160];
+    uint16_t pixbuf[320];
 };
 
 // TSL1412R
@@ -197,6 +212,12 @@ public:
         // This sensor is 1x1536 pixels at 400dpi.  Sample every 8th
         // pixel -> 192 pixels at 50dpi == 0.5mm spatial resolution.
         npix = 192;
+        
+        // for the low-res scan, sample every 48 pixels -> 32 pixels
+        // at 8.34dpi = 3.05mm spatial resolution
+        nlpix = 32;
+        
+        // set the pixel buffer
         pix = pixbuf;
     }
     

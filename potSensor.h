@@ -1,9 +1,18 @@
 // Potentiometer plunger sensor
 //
 // This file implements our generic plunger sensor interface for a
-// potentiometer.
+// potentiometer.  The potentiometer resistance must be linear in 
+// position.  To connect physically, wire the fixed ends of the
+// potentiometer to +3.3V and GND (respectively), and connect the 
+// wiper to an ADC-capable GPIO pin on the KL25Z.  The wiper voltage 
+// that we read on the ADC will vary linearly with the wiper position.
+// Mechanically attach the wiper to the plunger so that the wiper moves
+// in lock step with the plunger.
+//
+// Although this class is nominally for potentiometers, it will also
+// work with any other type of sensor that provides a single analog 
+// voltage level that maps linearly to the position, such as an LVDT.
 
-#include "FastAnalogIn.h"
 
 class PlungerSensorPot: public PlungerSensor
 {
@@ -46,9 +55,11 @@ public:
     {
         // Use an average of several readings.  Note that even though this
         // is nominally a "low res" scan, we can still afford to take an
-        // average.  The point of the low res interface is speed, and since
-        // we only have one analog value to read, we can afford to take
-        // several samples here even in the low res case.
+        // average.  The point of the low res interface is to speed things
+        // up for the image sensor types, which have a large number of
+        // analog samples to read.  In our case, we only have the one
+        // input to sample, so our normal scan is already so fast that
+        // there's no need to do anything different here.
         pos = int((pot.read() + pot.read() + pot.read())/3.0 * npix);
         return true;
     }

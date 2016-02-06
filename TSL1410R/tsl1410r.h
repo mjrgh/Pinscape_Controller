@@ -6,7 +6,7 @@
  
 #include "mbed.h"
 #include "config.h"
-#include "FastAnalogIn.h"
+#include "AltAnalogIn.h"
  
 #ifndef TSL1410R_H
 #define TSL1410R_H
@@ -28,14 +28,15 @@
 // to be assigned dynamically at run-time, which we prefer because it allows for
 // configuration changes to be made on the fly rather than having to recompile
 // the program.
-#define GPIO_PORT_BASE(pin)   ((FGPIO_Type *)(FPTA_BASE + ((unsigned int)pin >> PORT_SHIFT) * 0x40))
-#define GPIO_PINMASK(pin)     (1 << ((pin & 0x7F) >> 2))
+#define GPIO_PORT(pin)        (((unsigned int)(pin)) >> PORT_SHIFT)
+#define GPIO_PORT_BASE(pin)   ((FGPIO_Type *)(FPTA_BASE + GPIO_PORT(pin) * 0x40))
+#define GPIO_PINMASK(pin)     gpio_set(pin)
  
 class TSL1410R
 {
 public:
-    TSL1410R(int nPix, PinName siPin, PinName clockPin, PinName ao1Pin, PinName ao2Pin) 
-        : nPix(nPix), si(siPin), clock(clockPin), ao1(ao1Pin), ao2(ao2Pin)
+    TSL1410R(int nPixSensor, PinName siPin, PinName clockPin, PinName ao1Pin, PinName ao2Pin) 
+        : nPixSensor(nPixSensor), si(siPin), clock(clockPin), ao1(ao1Pin), ao2(ao2Pin)
     {
         // we're in parallel mode if ao2 is a valid pin
         parallel = (ao2Pin != NC);
@@ -44,16 +45,14 @@ public:
         clockPort = GPIO_PORT_BASE(clockPin);
         clockMask = GPIO_PINMASK(clockPin);
         
-        // disable continuous conversion mode in FastAnalogIn - since we're
-        // reading discrete pixel values, we want to control when the samples
-        // are taken rather than continuously averaging over time
-        ao1.disable();
-        if (parallel) ao2.disable();
-
-        // clear out power-on noise by clocking through all pixels twice
+        // clear out power-on random data by clocking through all pixels twice
         clear();
         clear();
+        
+        totalTime = 0.0; nRuns = 0; // $$$
     }
+    
+    float totalTime; int nRuns; // $$$
 
     // Read the pixels.
     //
@@ -90,86 +89,109 @@ public:
     // If the caller has other work to tend to that takes longer than the
     // desired maximum integration time, it can call clear() to clock out
     // the current pixels and start a fresh integration cycle.
-    void read(uint16_t *pix, int n)
+    void read(register uint16_t *pix, int n)
     {
+        Timer t; t.start(); // $$$
+        
         // get the clock pin pointers into local variables for fast access
-        register FGPIO_Type *clockPort = this->clockPort;
-        register uint32_t clockMask = this->clockMask;
+        register volatile uint32_t *clockPSOR = &clockPort->PSOR;
+        register volatile uint32_t *clockPCOR = &clockPort->PCOR;
+        register const uint32_t clockMask = this->clockMask;
         
         // start the next integration cycle by pulsing SI and one clock
         si = 1;
-        clockPort->PSOR |= clockMask;       // turn the clock pin on (clock = 1)
+        clock = 1;
         si = 0;
-        clockPort->PCOR |= clockMask;       // turn the clock pin off (clock = 0)
+        clock = 0;
         
         // figure how many pixels to skip on each read
-        int skip = nPix/n - 1;
+        int skip = nPixSensor/n - 1;
         
+///$$$
+static int done=0;
+if (done++ == 0) printf("nPixSensor=%d, n=%d, skip=%d, parallel=%d\r\n", nPixSensor, n, skip, parallel);
+
+        // get the clock PSOR and PCOR register addresses for fast access
+
         // read all of the pixels
+        int dst;
         if (parallel)
         {
-            // parallel mode - read pixels from each half sensor concurrently
-            int nPixHalf = nPix/2;
-            for (int src = 0, dst = 0 ; src < nPixHalf ; ++src)
+            // Parallel mode - read pixels from each half sensor concurrently.
+            // Divide 'n' (the output pixel count) by 2 to get the loop count,
+            // since we're going to do 2 pixels on each iteration.
+            for (n /= 2, dst = 0 ; dst < n ; ++dst)
             {
-                // pulse the clock and start the ADC sampling
-                clockPort->PSOR |= clockMask;
-                ao1.enable();
-                ao2.enable();
-                wait_us(1);
-                clockPort->PCOR |= clockMask;
+                // Take the clock high.  The TSL1410R will connect the next
+                // pixel pair's hold capacitors to the A01 and AO2 lines 
+                // (respectively) on the clock rising edge.
+                *clockPSOR = clockMask;
+
+                // Start the ADC sampler for AO1.  The TSL1410R sample 
+                // stabilization time per the data sheet is 120ns.  This is
+                // fast enough that we don't need an explicit delay, since
+                // the instructions to execute this call will take longer
+                // than that.
+                ao1.start();
                 
-                // wait for the ADCs to stabilize
-                wait_us(11);
+                // take the clock low while we're waiting for the reading
+                *clockPCOR = clockMask;
                 
-                // read the pixels
+                // Read the first half-sensor pixel from AO1
                 pix[dst] = ao1.read_u16();
-                pix[dst+n/2] = ao2.read_u16();
                 
-                // turn off the ADC until the next pixel is clocked out
-                ao1.disable();
-                ao2.disable();
+                // Read the second half-sensor pixel from AO2, and store it
+                // in the destination array at the current index PLUS 'n',
+                // which you will recall contains half the output pixel count.
+                // This second pixel is halfway up the sensor from the first 
+                // pixel, so it goes halfway up the output array from the
+                // current output position.
+                ao2.start();
+                pix[dst + n] = ao2.read_u16();
                 
-                // clock skipped pixels
-                for (int i = 0 ; i < skip ; ++i, ++src) 
+                // Clock through the skipped pixels
+                for (int i = skip ; i > 0 ; --i) 
                 {
-                    clockPort->PSOR |= clockMask;
-                    clockPort->PCOR |= clockMask;
+                    *clockPSOR = clockMask;
+                    *clockPCOR = clockMask;
                 }
             }
         }
         else
         {
             // serial mode - read all pixels in a single file
-            for (int src = 0, dst = 0 ; src < nPix ; ++src)
+            for (dst = 0 ; dst < n ; ++dst)
             {
-                // pulse the clock and start the ADC sampling
-                clockPort->PSOR |= clockMask;
-                ao1.enable();
-                wait_us(1);
-                clockPort->PCOR |= clockMask;
+                // Clock the next pixel onto the sensor A0 line
+                *clockPSOR = clockMask;
                 
-                // wait for the ADC sample to stabilize
-                wait_us(11);
+                // start the ADC sampler
+                ao1.start();
                 
-                // read the ADC sample
-                pix[dst++] = ao1.read_u16();
+                // take the clock low while we're waiting for the analog reading
+                *clockPCOR = clockMask;
                 
-                // turn off the ADC until the next pixel is ready
-                ao1.disable();
+                // wait for and read the ADC sample; plug it into the output
+                // array, and increment the output pointer to the next position
+                pix[dst] = ao1.read_u16();
                 
-                // clock skipped pixels
-                for (int i = 0 ; i < skip ; ++i, ++src) 
+                // clock through the skipped pixels
+                for (int i = skip ; i > 0 ; --i) 
                 {
-                    clockPort->PSOR |= clockMask;
-                    clockPort->PCOR |= clockMask;
+                    *clockPSOR = clockMask;
+                    *clockPCOR = clockMask;
                 }
             }
         }
         
+//$$$
+if (done==1) printf(". done: dst=%d\r\n", dst);
+        
         // clock out one extra pixel to leave A1 in the high-Z state
-        clockPort->PSOR |= clockMask;
-        clockPort->PCOR |= clockMask;
+        clock = 1;
+        clock = 0;
+        
+        if (n >= 80) { totalTime += t.read(); nRuns += 1; } // $$$
     }
 
     // Clock through all pixels to clear the array.  Pulses SI at the
@@ -184,29 +206,29 @@ public:
 
         // clock in an SI pulse
         si = 1;
-        clockPort->PSOR |= clockMask;
+        clockPort->PSOR = clockMask;
         si = 0;
-        clockPort->PCOR |= clockMask;
+        clockPort->PCOR = clockMask;
         
         // if in serial mode, clock all pixels across both sensor halves;
         // in parallel mode, the pixels are clocked together
-        int n = parallel ? nPix/2 : nPix;
+        int n = parallel ? nPixSensor/2 : nPixSensor;
         
         // clock out all pixels
         for (int i = 0 ; i < n + 1 ; ++i) {
-            clockPort->PSOR |= clockMask;
-            clockPort->PCOR |= clockMask;
+            clock = 1; // $$$clockPort->PSOR = clockMask;
+            clock = 0; // $$$clockPort->PCOR = clockMask;
         }
     }
 
 private:
-    int nPix;                 // number of pixels in physical sensor array
+    int nPixSensor;           // number of pixels in physical sensor array
     DigitalOut si;            // GPIO pin for sensor SI (serial data) 
     DigitalOut clock;         // GPIO pin for sensor SCLK (serial clock)
     FGPIO_Type *clockPort;    // IOPORT base address for clock pin - cached for fast writes
     uint32_t clockMask;       // IOPORT register bit mask for clock pin
-    FastAnalogIn ao1;         // GPIO pin for sensor AO1 (analog output 1) - we read sensor data from this pin
-    FastAnalogIn ao2;         // GPIO pin for sensor AO2 (analog output 2) - 2nd sensor data pin, when in parallel mode
+    AltAnalogIn ao1;          // GPIO pin for sensor AO1 (analog output 1) - we read sensor data from this pin
+    AltAnalogIn ao2;          // GPIO pin for sensor AO2 (analog output 2) - 2nd sensor data pin, when in parallel mode
     bool parallel;            // true -> running in parallel mode (we read AO1 and AO2 separately on each clock)
 };
  

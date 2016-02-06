@@ -21,21 +21,23 @@ public:
     // a pixel coordinate in the image.  But it's no longer the right word,
     // since we support sensor types that have nothing to do with imaging.
     // Even so, the function this serves is still applicable.  Abstractly,
-    // it represents the physical resolution of the sensor, by giving the
-    // total number of quanta that the sensor can resolve over the entire 
-    // range of travel of the plunger.  For devices that inherently quantize
-    // the position reading at the physical level, such as imaging sensors 
-    // and quadrature sensors, this should be set to the total number of
-    // quanta (resolvable position steps) over the range of travel.  For
-    // devices with physically analog outputs, such as potentiometers or
-    // LVDTs, the reading still has to be digitized for us to be able to
-    // work with it, but this happens invisibly in the ADC, so the "pixel" 
-    // scale is essentially arbitrary.  Analog sensor types should thus 
-    // simply use the maximum joystick report range, since that's the
-    // final scale we have to convert to - using a different scale would
-    // have no benefit and would just introduce rounding errors.
+    // it represents the physical resolution of the sensor in terms of
+    // the number of quanta over the full range of travel of the plunger.
+    // For sensors that inherently quantize the position reading at the 
+    // physical level, such as imaging sensors and quadrature sensors, 
+    // this should be set to the total number of position steps over the 
+    // range of travel.  For devices with physically analog outputs, such 
+    // as potentiometers or LVDTs, the reading still has to be digitized 
+    // for us to be able to work with it, which means it has to be turned
+    // into a value that's fundamentally an integer.  But this happens in
+    // the ADC, so the quantization scale is hidden in the mbed libraries.
+    // The normal KL25Z ADC configuration is 16-bit quantization, so the
+    // quantization factor is usually 65535.  But you might prefer to set
+    // this to the joystick maximum so that there are no more rounding
+    // errors in scale conversions after the point of initial conversion.
     //
-    // This value MUST be initialized in the constructor.
+    // IMPORTANT!  This value MUST be initialized in the constructor for
+    // each concrete subclass.
     int npix;
          
     // Initialize the physical sensor device.  This is called at startup

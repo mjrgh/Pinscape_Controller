@@ -141,6 +141,15 @@ struct Config
         plunger.enabled = false;
         plunger.sensorType = PlungerType_None;
         
+#if 1 // $$$
+        plunger.enabled = true;
+        plunger.sensorType = PlungerType_TSL1410RS;
+        plunger.sensorPin[0] = PTE20; // SI
+        plunger.sensorPin[1] = PTE21; // SCLK
+        plunger.sensorPin[2] = PTB0;  // AO1 = PTB0 = ADC0_SE8
+        plunger.sensorPin[3] = PTE22; // AO2 (parallel mode) = PTE22 = ADC0_SE3
+#endif
+        
         // assume that there's no calibration button
         plunger.cal.btn = NC;
         plunger.cal.led = NC;
@@ -153,23 +162,21 @@ struct Config
         plunger.zbLaunchBall.btn = 0;
         
         // assume no TV ON switch
-#if 1
+        TVON.statusPin = NC;
+        TVON.latchPin = NC;
+        TVON.relayPin = NC;
+        TVON.delayTime = 7;
+#if 0//$$$
         TVON.statusPin = PTD2;
         TVON.latchPin = PTE0;
         TVON.relayPin = PTD3;
         TVON.delayTime = 7;
-#else
-        TVON.statusPin = NC;
-        TVON.latchPin = NC;
-        TVON.relayPin = NC;
-        TVON.delayTime = 0;
 #endif
         
         // assume no TLC5940 chips
-#if 1 // $$$
-        tlc5940.nchips = 4;
-#else
         tlc5940.nchips = 0;
+#if 0 // $$$
+        //tlc5940.nchips = 4;
 #endif
 
         // default TLC5940 pin assignments
@@ -180,10 +187,9 @@ struct Config
         tlc5940.gsclk = PTA1;
         
         // assume no 74HC595 chips
-#if 1 // $$$
-        hc595.nchips = 1;
-#else
         hc595.nchips = 0;
+#if 0 // $$$
+        //hc595.nchips = 1;
 #endif
     
         // default 74HC595 pin assignments
@@ -249,7 +255,8 @@ struct Config
         
 #endif
         
-#if 1 // $$$
+
+#if 0 // $$$
         // CONFIGURE EXPANSION BOARD PORTS
         //
         // We have the following hardware attached:

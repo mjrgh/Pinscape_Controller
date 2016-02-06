@@ -685,7 +685,11 @@ static const float pwm_level[] = {
 class LwPwmOut: public LwOut
 {
 public:
-    LwPwmOut(PinName pin) : p(pin) { prv = 0; }
+    LwPwmOut(PinName pin, uint8_t initVal) : p(pin)
+    {
+         prv = initVal ^ 0xFF;
+         set(initVal);
+    }
     virtual void set(uint8_t val) 
     { 
         if (val != prv)
@@ -699,7 +703,7 @@ public:
 class LwDigOut: public LwOut
 {
 public:
-    LwDigOut(PinName pin) : p(pin) { prv = 0; }
+    LwDigOut(PinName pin, uint8_t initVal) : p(pin, initVal ? 1 : 0) { prv = initVal; }
     virtual void set(uint8_t val) 
     {
          if (val != prv)
@@ -759,12 +763,12 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
     {
     case PortTypeGPIOPWM:
         // PWM GPIO port
-        lwp = new LwPwmOut(wirePinName(pin));
+        lwp = new LwPwmOut(wirePinName(pin), activeLow ? 255 : 0);
         break;
     
     case PortTypeGPIODig:
         // Digital GPIO port
-        lwp = new LwDigOut(wirePinName(pin));
+        lwp = new LwDigOut(wirePinName(pin), activeLow ? 255 : 0);
         break;
     
     case PortTypeTLC5940:
@@ -814,6 +818,7 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
         break;
 
     case PortTypeVirtual:
+    case PortTypeDisabled:
     default:
         // virtual or unknown
         lwp = new LwVirtualOut();
@@ -2225,10 +2230,6 @@ PlungerSensor *plungerSensor = 0;
 // there's already a sensor object, we'll delete it.
 void createPlunger()
 {
-    // delete any existing sensor object
-    if (plungerSensor != 0)
-        delete plungerSensor;
-        
     // create the new sensor object according to the type
     switch (cfg.plunger.sensorType)
     {
@@ -2674,7 +2675,8 @@ int main(void)
     // clear the I2C bus (for the accelerometer)
     clear_i2c();
 
-    // load the saved configuration
+    // load the saved configuration (or set factory defaults if no flash
+    // configuration has ever been saved)
     loadConfigFromFlash();
     
     // initialize the diagnostic LEDs
@@ -2861,6 +2863,8 @@ int main(void)
 
     // start the first CCD integration cycle
     plungerSensor->init();
+    
+    Timer dbgTimer; dbgTimer.start(); // $$$  plunger debug report timer
     
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -3476,6 +3480,17 @@ int main(void)
                 }
             }
         }
+
+    // $$$
+        if (dbgTimer.read() > 10) {
+            dbgTimer.reset();
+            if (plungerSensor != 0 && (cfg.plunger.sensorType == PlungerType_TSL1410RS || cfg.plunger.sensorType == PlungerType_TSL1410RP))
+            {
+                PlungerSensorTSL1410R *ps = (PlungerSensorTSL1410R *)plungerSensor;
+                printf("average plunger read time: %f ms (total=%f, n=%d)\r\n", ps->ccd.totalTime*1000.0 / ps->ccd.nRuns, ps->ccd.totalTime, ps->ccd.nRuns);
+            }
+        }
+    // end $$$
         
         // provide a visual status indication on the on-board LED
         if (calBtnState < 2 && hbTimer.read_ms() > 1000) 
