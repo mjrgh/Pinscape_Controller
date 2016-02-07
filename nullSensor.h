@@ -14,8 +14,8 @@ public:
     PlungerSensorNull() { }
     
     virtual void init() { }
-    virtual bool lowResScan(int &pos) { return false; }
-    virtual bool highResScan(int &pos) { return false; }
+    virtual bool lowResScan(float &pos) { return false; }
+    virtual bool highResScan(float &pos) { return false; }
 };
 
 #endif /* NULLSENSOR_H */

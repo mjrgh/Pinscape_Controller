@@ -154,8 +154,8 @@ struct Config
         plunger.cal.btn = NC;
         plunger.cal.led = NC;
         
-        // clear the plunger calibration
-        plunger.cal.reset(4096);
+        // set the default plunger calibration
+        plunger.cal.setDefaults();
         
         // disable the ZB Launch Ball by default
         plunger.zbLaunchBall.port = 0;
@@ -409,17 +409,29 @@ struct Config
             // compressed by the user pushing on the plunger or by the momentum
             // of a release motion.  The minimum is the maximum forward point where
             // the barrel spring can't be compressed any further.
-            int min;
-            int zero;
-            int max;
+            float min;
+            float zero;
+            float max;
     
-            // reset the plunger calibration
-            void reset(int npix)
+            // Reset the plunger calibration
+            void setDefaults()
             {
-                calibrated = 0;          // not calibrated
-                min = 0;                 // assume we can go all the way forward...
-                max = npix;              // ...and all the way back
-                zero = npix/6;           // the rest position is usually around 1/2" back = 1/6 of total travel
+                calibrated = false;       // not calibrated
+                min = 0.0f;               // assume we can go all the way forward...
+                max = 1.0f;               // ...and all the way back
+                zero = 1.0/6.0f;          // the rest position is usually around 1/2" back = 1/6 of total travel
+            }
+            
+            // Begin calibration.  This sets each limit to the worst
+            // case point - for example, we set the retracted position
+            // to all the way forward.  Each actual reading that comes
+            // in is then checked against the current limit, and if it's
+            // outside of the limit, we reset the limit to the new reading.
+            void begin()
+            {
+                min = 0.0f;               // we don't calibrate the maximum forward position, so keep this at zero
+                zero = 1.0f;              // set the zero position all the way back
+                max = 0.0f;               // set the retracted position all the way forward
             }
 
         } cal;

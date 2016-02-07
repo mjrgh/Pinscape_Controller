@@ -23,20 +23,9 @@ public:
     
     virtual void init() 
     {
-        // The potentiometer doesn't have pixels, but we still need an
-        // integer range for normalizing our digitized voltage level values.
-        // The number here is fairly arbitrary; the higher it is, the finer
-        // the digitized steps.  A 40" 1080p HDTV has about 55 pixels per inch
-        // on its physical display, so if the on-screen plunger is displayed
-        // at roughly the true physical size, it's about 3" on screen or about
-        // 165 pixels.  So the minimum quantization size here should be about
-        // the same.  For the pot sensor, this is just a scaling factor, 
-        // so higher values don't cost us anything (unlike the CCD, where the
-        // read time is proportional to the number of pixels we sample).
-        npix = 4096;
     }
     
-    virtual bool highResScan(int &pos)
+    virtual bool highResScan(float &pos)
     {
         // Take a few readings and use the average, to reduce the effect
         // of analog voltage fluctuations.  The voltage range on the ADC
@@ -47,21 +36,21 @@ public:
         // So 1.5% noise is big enough to be visible in the joystick
         // reports.  Averaging several readings should help smooth out
         // random noise in the readings.
-        pos = int((pot.read() + pot.read() + pot.read())/3.0 * npix);
+        //
+        // Readings through the standard AnalogIn class take about 30us
+        // each, so 5 readings is about 150us.  This is plenty fast enough
+        // for even a low-res scan.
+        pos = (pot.read() + pot.read() + pot.read() + pot.read() + pot.read())/5.0;
         return true;
     }
     
-    virtual bool lowResScan(int &pos)
+    virtual bool lowResScan(float &pos)
     {
-        // Use an average of several readings.  Note that even though this
-        // is nominally a "low res" scan, we can still afford to take an
-        // average.  The point of the low res interface is to speed things
-        // up for the image sensor types, which have a large number of
-        // analog samples to read.  In our case, we only have the one
-        // input to sample, so our normal scan is already so fast that
-        // there's no need to do anything different here.
-        pos = int((pot.read() + pot.read() + pot.read())/3.0 * npix);
-        return true;
+        // Since we have only one analog input to sample, our read time is
+        // very fast compared to the image sensor alternatives, so there's no
+        // need to do anything different for a faster low-res scan.  Simply
+        // take a normal high-res reading.
+        return highResScan(pos);
     }
         
 private:

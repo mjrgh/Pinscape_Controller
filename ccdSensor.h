@@ -28,9 +28,14 @@
 class PlungerSensorCCD: public PlungerSensor
 {
 public:
-    PlungerSensorCCD(int nativePix, PinName si, PinName clock, PinName ao1, PinName ao2) 
+    PlungerSensorCCD(
+        int nativePix, int highResPix, int lowResPix, 
+        PinName si, PinName clock, PinName ao1, PinName ao2) 
         : ccd(nativePix, si, clock, ao1, ao2)
     {
+        this->highResPix = highResPix;
+        this->lowResPix = lowResPix;
+        this->pix = new uint16_t[highResPix];
     }
     
     // initialize
@@ -42,32 +47,42 @@ public:
     }
     
     // Perform a low-res scan of the sensor.  
-    virtual bool lowResScan(int &pos)
+    virtual bool lowResScan(float &pos)
     {
-        // read the pixels at low resolution
-        uint16_t pix[nlpix];
-        ccd.read(pix, nlpix);
-    
-        // determine which end is brighter
-        uint16_t p1 = pix[0];
-        uint16_t p2 = pix[nlpix-1];
-        int si = 0, di = 1;
-        if (p1 < p2)
-            si = nlpix - 1, di = -1;
+        // If we haven't sensed the direction yet, do a high-res scan
+        // first, so that we can get accurate direction data.  Return
+        // the result of the high-res scan if successful, since it 
+        // provides even better data than the caller requested from us.
+        // This will take longer than the caller wanted, but it should
+        // only be necessary to do this once after the system stabilizes
+        // after startup, so the timing difference won't affect normal
+        // operation.
+        if (dir == 0)
+            return highResScan(pos);
         
-        // figure the shadow edge threshold - just use the midpoint 
-        // of the levels at the bright and dark ends
-        uint16_t shadow = uint16_t((long(p1) + long(p2))/2);
+        // read the pixels at low resolution
+        ccd.read(pix, lowResPix);
+        
+        // set the loop variables for the sensor orientation
+        int si = 0;
+        if (dir < 0)
+            si = lowResPix - 1;
+            
+        // Figure the shadow edge threshold.  Use the midpoint between
+        // the average levels of a few pixels at each end.
+        uint16_t shadow = uint16_t(
+            (long(pix[0]) + long(pix[1]) + long(pix[2])
+             + long(pix[lowResPix-1]) + long(pix[lowResPix-2]) + long(pix[lowResPix-3])
+            )/6);
         
         // find the current tip position
-        for (int n = 0 ; n < nlpix ; ++n, si += di)
+        for (int n = 0 ; n < lowResPix ; ++n, si += dir)
         {
             // check to see if we found the shadow
             if (pix[si] <= shadow)
             {
-                // got it - normalize it to normal 'npix' resolution and
-                // return the result
-                pos = n*npix/nlpix;
+                // got it - normalize to the 0.0..1.0 range and return success
+                pos = float(n)/lowResPix;
                 return true;
             }
         }
@@ -77,24 +92,32 @@ public:
     }
 
     // Perform a high-res scan of the sensor.
-    virtual bool highResScan(int &pos)
+    virtual bool highResScan(float &pos)
     {
         // read the array
-        ccd.read(pix, npix);
+        ccd.read(pix, highResPix);
 
-        // get the brightness at each end of the sensor
-        long b1 = pix[0];
-        long b2 = pix[npix-1];
-        
+        // Sense the orientation of the sensor if we haven't already.  If 
+        // that fails, we must not have enough contrast to find a shadow edge 
+        // in the image, so there's no point in looking any further - just
+        // return failure.
+        if (dir == 0 && !senseOrientation(highResPix))
+            return false;
+            
+        // Get the average brightness for a few pixels at each end.
+        long b1 = (long(pix[0]) + long(pix[1]) + long(pix[2]) + long(pix[3]) + long(pix[4])) / 5;
+        long b2 = (long(pix[highResPix-1]) + long(pix[highResPix-2]) + long(pix[highResPix-3])
+            + long(pix[highResPix-4]) + long(pix[highResPix-5])) / 5;
+
         // Work from the bright end to the dark end.  VP interprets the
         // Z axis value as the amount the plunger is pulled: zero is the
         // rest position, and the axis maximum is fully pulled.  So we 
         // essentially want to report how much of the sensor is lit,
         // since this increases as the plunger is pulled back.
-        int si = 0, di = 1;
+        int si = 0;
         long hi = b1;
-        if (b1 < b2)
-            si = npix - 1, di = -1, hi = b2;
+        if (dir < 0)
+            si = highResPix - 1, hi = b2;
 
         // Figure the shadow threshold.  In practice, the portion of the
         // sensor that's not in shadow has all pixels consistently near
@@ -124,13 +147,13 @@ public:
         if (labs(b1 - b2) > 0x1000)
         {
             uint16_t *pixp = pix + si;           
-            for (int n = 0 ; n < npix ; ++n, pixp += di)
+            for (int n = 0 ; n < highResPix ; ++n, pixp += dir)
             {
                 // if we've crossed the midpoint, report this position
                 if (long(*pixp) < midpt)
                 {
-                    // note the new position
-                    pos = n;
+                    // normalize to the 0.0..1.0 range and return success
+                    pos = float(n)/highResPix;
                     return true;
                 }
             }
@@ -140,6 +163,43 @@ public:
         return false;
     }
     
+    // Infer the sensor orientation from the image data.  This determines 
+    // which end of the array has the brighter pixels.  In some cases it 
+    // might not be possible to tell: if the light source is turned off,
+    // or if the plunger is all the way to one extreme so that the entire
+    // pixel array is in shadow or in full light.  To sense the direction
+    // we need to have a sufficient difference in brightness between the
+    // two ends of the array to be confident that one end is in shadow
+    // and the other isn't.  On success, sets member variable 'dir' and
+    // returns true; on failure (i.e., we don't have sufficient contrast
+    // to sense the orientation), returns false and leaves 'dir' unset.
+    bool senseOrientation(int n)
+    {
+        // get the total brightness for the first few pixels at
+        // each end of the array (a proxy for the average - just
+        // save time by skipping the divide-by-N)
+        long a = long(pix[0]) + long(pix[1]) + long(pix[2]) 
+            + long(pix[3]) + long(pix[4]);
+        long b = long(pix[n-1]) + long(pix[n-2]) + long(pix[n-3])
+            + long(pix[n-4]) + long(pix[n-5]);
+            
+        // if the difference is too small, we can't tell
+        const long minPct = 10;
+        const long minDiff = 65535*5*minPct/100;
+        if (labs(a - b) < minDiff)
+            return false;
+            
+        // we now know the orientation - set the 'dir' member variable
+        // for future use
+        if (a > b)
+            dir = 1;
+        else
+            dir = -1;
+            
+        // success
+        return true;
+    }
+    
     // send an exposure report to the joystick interface
     virtual void sendExposureReport(USBJoystick &js)
     {
@@ -147,13 +207,13 @@ public:
         // gives us the shortest possible exposure for the sample we report,
         // which helps ensure that the user inspecting the data sees something
         // close to what we see when we calculate the plunger position.
-        ccd.read(pix, npix);
-        ccd.read(pix, npix);        
+        ccd.read(pix, highResPix);
+        ccd.read(pix, highResPix);
         
         // send reports for all pixels
         int idx = 0;
-        while (idx < npix)
-            js.updateExposure(idx, npix, pix);
+        while (idx < highResPix)
+            js.updateExposure(idx, highResPix, pix);
             
         // The pixel dump requires many USB reports, since each report
         // can only send a few pixel values.  An integration cycle has
@@ -162,20 +222,27 @@ public:
         // the integration won't be comparable to a normal cycle.  Throw
         // this one away by doing a read now, and throwing it away - that 
         // will get the timing of the *next* cycle roughly back to normal.
-        ccd.read(pix, npix);
+        ccd.read(pix, highResPix);
     }
     
 protected:
-    // pixel buffer - concrete subclasses must set to a buffer of the
-    // appropriate size
+    // pixel buffer - we allocate this to be big enough for a high-res scan
     uint16_t *pix;
+
+    // number of pixels in a high-res scan
+    int highResPix;
     
-    // number of pixels in low-res scan - concrete subclasses must set
-    // this to a value that evenly divides the native sensor size
-    int nlpix;
+    // number of pixels in a low-res scan
+    int lowResPix;
     
+    // Sensor orientation.  +1 means that the "tip" end - which is always
+    // the brighter end in our images - is at the 0th pixel in the array.
+    // -1 means that the tip is at the nth pixel in the array.  0 means
+    // that we haven't figured it out yet.
+    int dir;
+    
+public:
     // the low-level interface to the CCD hardware
-public://$$$
     TSL1410R ccd;
 };
 
@@ -185,21 +252,9 @@ class PlungerSensorTSL1410R: public PlungerSensorCCD
 {
 public:
     PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao1, PinName ao2) 
-        : PlungerSensorCCD(1280, si, clock, ao1, ao2)
+        : PlungerSensorCCD(1280, 320, 64, si, clock, ao1, ao2)
     {
-        // This sensor is 1x1280 pixels at 400dpi.  Sample every 8th
-        // pixel -> 160 pixels at 50dpi == 0.5mm spatial resolution.
-        npix = 320;
-        
-        // for the low-res scan, sample every 40th pixel -> 32 pixels
-        // at 10dpi == 2.54mm spatial resolution.
-        nlpix = 32;
-        
-        // set the pixel buffer
-        pix = pixbuf;
     }
-    
-    uint16_t pixbuf[320];
 };
 
 // TSL1412R
@@ -207,20 +262,7 @@ class PlungerSensorTSL1412R: public PlungerSensorCCD
 {
 public:
     PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao1, PinName ao2)
-        : PlungerSensorCCD(1536, si, clock, ao1, ao2)
+        : PlungerSensorCCD(1536, 384, 64, si, clock, ao1, ao2)
     {
-        // This sensor is 1x1536 pixels at 400dpi.  Sample every 8th
-        // pixel -> 192 pixels at 50dpi == 0.5mm spatial resolution.
-        npix = 192;
-        
-        // for the low-res scan, sample every 48 pixels -> 32 pixels
-        // at 8.34dpi = 3.05mm spatial resolution
-        nlpix = 32;
-        
-        // set the pixel buffer
-        pix = pixbuf;
     }
-    
-    uint16_t pixbuf[192];
 };
-

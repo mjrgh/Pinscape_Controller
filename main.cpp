@@ -2503,7 +2503,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
             // enter calibration mode
             calBtnState = 3;
             calBtnTimer.reset();
-            cfg.plunger.cal.reset(plungerSensor->npix);
+            cfg.plunger.cal.begin();
             break;
             
         case 3:
@@ -2765,8 +2765,8 @@ int main(void)
     // acceleration via the joystick x & y axes, per the VP convention)
     int x = 0, y = 0;
     
-    // last plunger report position, in 'npix' normalized pixel units
-    int pos = 0;
+    // last plunger report position, on the 0.0..1.0 normalized scale
+    float pos = 0;
     
     // last plunger report, in joystick units (we report the plunger as the
     // "z" axis of the joystick, per the VP convention)
@@ -2904,8 +2904,8 @@ int main(void)
                     calBtnState = 3;
                     calBtnTimer.reset();
                     
-                    // reset the plunger calibration limits
-                    cfg.plunger.cal.reset(plungerSensor->npix);
+                    // begin the plunger calibration limits
+                    cfg.plunger.cal.begin();
                 }
                 break;
                 
@@ -2978,32 +2978,35 @@ int main(void)
             }
         }
  
-        // If the plunger is enabled, and we're not already in a firing event,
-        // and the last plunger reading had the plunger pulled back at least
-        // a bit, watch for plunger release events until it's time for our next
-        // USB report.
-        if (!firing && cfg.plunger.enabled && z >= JOYMAX/6)
+        // If the plunger is enabled, and we're not in calibration mode, and 
+        // we're not already in a firing event, and the last plunger reading had 
+        // the plunger pulled back at least a bit, watch for plunger release 
+        // events until it's time for our next USB report.
+        if (!firing && calBtnState != 3 && cfg.plunger.enabled && z >= JOYMAX/6)
         {
             // monitor the plunger until it's time for our next report
-            while (jsReportTimer.read_ms() < 15)
+            for (int i = 0 ; i < 20 && jsReportTimer.read_ms() < 12 ; ++i)
             {
                 // do a fast low-res scan; if it's at or past the zero point,
                 // start a firing event
-                int pos0;
+                float pos0;
                 if (plungerSensor->lowResScan(pos0) && pos0 <= cfg.plunger.cal.zero)
+                {
                     firing = 1;
+                    break;
+                }
             }
         }
 
-        // read the plunger sensor, if it's enabled
-        if (cfg.plunger.enabled)
+        // read the plunger sensor, if it's enabled and we're not in firing mode
+        if (cfg.plunger.enabled && !firing)
         {
             // start with the previous reading, in case we don't have a
             // clear result on this frame
             int znew = z;
             if (plungerSensor->highResScan(pos))
             {
-                // We got a new reading.  If we're in calibration mode, use it
+                // We have a new reading.  If we're in calibration mode, use it
                 // to figure the new calibration, otherwise adjust the new reading
                 // for the established calibration.
                 if (calBtnState == 3)
@@ -3018,7 +3021,7 @@ int main(void)
                         cfg.plunger.cal.max = pos;
                         
                     // normalize to the full physical range while calibrating
-                    znew = int(round(float(pos)/plungerSensor->npix * JOYMAX));
+                    znew = int(round(pos * JOYMAX));
                 }
                 else
                 {
@@ -3032,8 +3035,10 @@ int main(void)
                     // values represent travel in the push direction.
                     if (pos > cfg.plunger.cal.max)
                         pos = cfg.plunger.cal.max;
-                    znew = int(round(float(pos - cfg.plunger.cal.zero)
-                        / (cfg.plunger.cal.max - cfg.plunger.cal.zero + 1) * JOYMAX));
+                    znew = int(round(
+                        (pos - cfg.plunger.cal.zero)
+                        / (cfg.plunger.cal.max - cfg.plunger.cal.zero) 
+                        * JOYMAX));
                 }
             }
 
@@ -3049,7 +3054,7 @@ int main(void)
                 // The plunger has moved forward since the previous report.
                 // Watch it for a few more ms to see if we can get a stable
                 // new position.
-                int pos0;
+                float pos0;
                 if (plungerSensor->lowResScan(pos0))
                 {
                     int pos1 = pos0;
@@ -3058,16 +3063,15 @@ int main(void)
                     while (tw.read_ms() < 6)
                     {
                         // read the new position
-                        int pos2;
+                        float pos2;
                         if (plungerSensor->lowResScan(pos2))
                         {
                             // If it's stable over consecutive readings, stop looping.
-                            // (Count it as stable if the position is within about 1/8".
-                            // pos1 and pos2 are reported in pixels, so they range from
-                            // 0 to npix.  The overall travel of a standard plunger is
-                            // about 3.2", so we have (npix/3.2) pixels per inch, hence
-                            // 1/8" is (npix/3.2)*(1/8) pixels.)
-                            if (abs(pos2 - pos1) < int(plungerSensor->npix/(3.2*8)))
+                            // Count it as stable if the position is within about 1/8".
+                            // The overall travel of a standard plunger is about 3.2", 
+                            // so on our normalized 0.0..1.0 scale, 1.0 equals 3.2",
+                            // thus 1" = .3125 and 1/8" = .0391.
+                            if (fabs(pos2 - pos1) < .0391f)
                                 break;
         
                             // If we've crossed the rest position, and we've moved by
@@ -3083,8 +3087,7 @@ int main(void)
                             // to the first reading of the loop - we don't require the
                             // threshold motion over consecutive readings, but any time
                             // over the stability wait loop.
-                            if (pos1 < cfg.plunger.cal.zero
-                                && abs(pos2 - pos0) > int(plungerSensor->npix/(3.2*8)))
+                            if (pos1 < cfg.plunger.cal.zero && fabs(pos2 - pos0) > .0391f)
                             {
                                 firing = 1;
                                 break;
