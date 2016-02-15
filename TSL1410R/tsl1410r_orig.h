@@ -1,45 +1,3 @@
-// DMA VERSION - NOT WORKING
-
-// I'm saving this code for now, since it was somewhat promising but doesn't
-// quite work.  The idea here was to read the ADC via DMA, operating the ADC
-// in continuous mode.  This speeds things up pretty impressively (by about 
-// a factor of 3 vs having the MCU read each result from the ADC sampling 
-// register), but I can't figure out how to get a stable enough signal out of 
-// it.  I think the problem is that the timing isn't precise enough in detecting 
-// when the DMA completes each write.  We have to clock the next pixel onto the 
-// CCD output each time we complete a sample, and we have to do so quickly so 
-// that the next pixel charge is stable at the ADC input pin by the time the 
-// ADC sample interval starts.  I'm seeing a ton of noise, which I think means 
-// that the new pixel isn't ready for the ADC in time. 
-//
-// I've tried a number of approaches, none of which works:
-//
-// - Skip every other sample, so that we can spend one whole sample just 
-// clocking in the next pixel.  We discard the "odds" samples that are taken
-// during pixel changes, and use only the "even" samples where the pixel is
-// stable the entire time.  I'd think the extra sample would give us plenty
-// of time to stabilize the next pixel, but it doesn't seem to work out that
-// way.  I think the problem might be that the latency of the MCU responding
-// to each sample completion is long enough relative to the sampling interval
-// that we can't reliably respond to the ADC done condition fast enough.  I've
-// tried basing the sample completion detection on the DMA byte counter and
-// the ADC interrupt.  The DMA byte counter is updated after the DMA transfer
-// is done, so that's probably just too late in the cycle.  The ADC interrupt
-// should be concurrent with the DMA transfer starting, but in practice it 
-// still doesn't give us good results.
-//
-// - Use DMA, but with the ADC in single-sample mode.  This bypasses the latency
-// problem by ensuring that the ADC doesn't start a new sample until we've
-// definitely finished clocking in the next pixel.  But it defeats the whole
-// purpose by eliminating the speed improvement - the speeds are comparable to
-// doing the transfers via the MCU.  This surprises me because I'd have expected
-// that the DMA would run concurrently with the MCU pixel clocking code, but
-// maybe there's enough bus contention between the MCU and DMA in this case that
-// there's no true overlapping of the operation.  Or maybe the interrupt dispatch
-// adds enough overhead to negate any overlapping.  I haven't actually been able
-// to get good data out of this mode, either, but I gave up early because of the
-// lack of any speed improvement.
-
 /*
  *  TSL1410R interface class.
  *
@@ -49,11 +7,9 @@
 #include "mbed.h"
 #include "config.h"
 #include "AltAnalogIn.h"
-#include "SimpleDMA.h"
  
 #ifndef TSL1410R_H
 #define TSL1410R_H
-#define TSL1410R_DMA
 
 // For faster GPIO on the clock pin, we write the IOPORT registers directly.
 // PORT_BASE gives us the memory mapped location of the IOPORT register set
@@ -93,29 +49,11 @@ public:
         clear();
         clear();
         
-        // set up our DMA channel for reading from our analog in pin
-        ao1.initDMA(&adc_dma);
-        
-        // Set up our DMA channel for writing the sensor SCLK - we use the PTOR
-        // (toggle) register to flip the bit on each write.  To pad the timing
-        // to the rate required by the CCD, do a no-op 0 write to PTOR after
-        // each toggle.  This gives us a 16-byte buffer, which we can make
-        // circular in the DMA controller.
-        static const uint32_t clkseq[] = { clockMask, 0, clockMask, 0 };
-        clk_dma.destination(&clockPort->PTOR, false, 32);
-        clk_dma.source(clkseq, true, 32, 16);   // set up our circular source buffer
-        clk_dma.trigger(Trigger_ADC0);          // software trigger
-        clk_dma.setCycleSteal(false);           // do the entire transfer on each trigger
-        
         totalTime = 0.0; nRuns = 0; // $$$
     }
     
     float totalTime; int nRuns; // $$$
-
-    // ADC interrupt handler - on each ADC event, 
-    static TSL1410R *instance;
-    static void _aiIRQ() { }
-
+    
     // Read the pixels.
     //
     // 'n' specifies the number of pixels to sample, and is the size of
@@ -153,10 +91,11 @@ public:
     // the current pixels and start a fresh integration cycle.
     void read(register uint16_t *pix, int n)
     {
-        Timer t; t.start(); //float tDMA, tPix; // $$$
+        Timer t; t.start();//$$$
         
         // get the clock pin pointers into local variables for fast access
-        register volatile uint32_t *clockPTOR = &clockPort->PTOR;
+        register volatile uint32_t *clockPSOR = &clockPort->PSOR;
+        register volatile uint32_t *clockPCOR = &clockPort->PCOR;
         register const uint32_t clockMask = this->clockMask;
         
         // start the next integration cycle by pulsing SI and one clock
@@ -184,7 +123,7 @@ if (done++ == 0) printf("nPixSensor=%d, n=%d, skip=%d, parallel=%d\r\n", nPixSen
                 // Take the clock high.  The TSL1410R will connect the next
                 // pixel pair's hold capacitors to the A01 and AO2 lines 
                 // (respectively) on the clock rising edge.
-                *clockPTOR = clockMask;
+                *clockPSOR = clockMask;
 
                 // Start the ADC sampler for AO1.  The TSL1410R sample 
                 // stabilization time per the data sheet is 120ns.  This is
@@ -194,7 +133,7 @@ if (done++ == 0) printf("nPixSensor=%d, n=%d, skip=%d, parallel=%d\r\n", nPixSen
                 ao1.start();
                 
                 // take the clock low while we're waiting for the reading
-                *clockPTOR = clockMask;
+                *clockPCOR = clockMask;
                 
                 // Read the first half-sensor pixel from AO1
                 pix[dst] = ao1.read_u16();
@@ -211,9 +150,8 @@ if (done++ == 0) printf("nPixSensor=%d, n=%d, skip=%d, parallel=%d\r\n", nPixSen
                 // Clock through the skipped pixels
                 for (int i = skip ; i > 0 ; --i) 
                 {
-                    *clockPTOR = clockMask;
-                    *clockPTOR = clockMask;
-                    *clockPTOR = 0;         // pad the timing with an extra nop write
+                    *clockPSOR = clockMask;
+                    *clockPCOR = clockMask;
                 }
             }
         }
@@ -222,48 +160,36 @@ if (done++ == 0) printf("nPixSensor=%d, n=%d, skip=%d, parallel=%d\r\n", nPixSen
             // serial mode - read all pixels in a single file
 
             // clock in the first pixel
-            clock = 1;
-            clock = 0;
+            *clockPSOR = clockMask;
+            *clockPCOR = clockMask;
             
-            // start the ADC DMA transfer
-            ao1.startDMA(pix, n, true);
-            
-            // We do 4 clock PTOR writes per clocked pixel (the skipped pixels 
-            // plus the pixel we actually want to sample), at 32 bits (4 bytes) 
-            // each, giving 16 bytes per pixel for the overall write.
-            int clk_dma_len = (skip+1)*16;
-            clk_dma.start(clk_dma_len);
-            
-            // start the first sample
-            ao1.start();
-            
-            // read all pixels
-            for (dst = n*2 ; dst > 0 ; dst -= 2)
+            // clock through the pixels            
+            for (dst = 0 ; dst < n ; ++dst)
             {
-                // wait for the current ADC sample to finish
-                while (adc_dma.remaining() >= dst) { }
-                
-                // start the next analog read while we're finishing the DMA transfers
+                // Read this sample
                 ao1.start();
+                pix[dst] = ao1.read_u16();
                 
-                // re-arm the clock DMA
-                //clk_dma.restart(clk_dma_len);
+                // clock in the next pixel
+                for (int i = skip ; i >= 0 ; --i) 
+                {
+                    *clockPSOR = clockMask;
+                    *clockPCOR = clockMask;
+                    *clockPCOR = clockMask;
+                }
             }
-            
-            // wait for the DMA transfer to finish
-            while (adc_dma.isBusy()) { }
-            
-            // apply the 12-bit to 16-bit rescaling to all values
-            for (int i = 0 ; i < n ; ++i)
-                pix[i] <<= 4;
+
+            // we're done - stop the ADC sampler            
+            ao1.stop();
         }
         
 //$$$
+//static int xxx = 0; xxx = (xxx+1)%2500; if (xxx==0) printf("tPix=%f, tDMA=%f, diff=%f\r\n", tPix*1000, tDMA*1000, (tDMA - tPix)*1000);
 if (done==1) printf(". done: dst=%d\r\n", dst);
         
         // clock out one extra pixel to leave A1 in the high-Z state
-        *clockPTOR = clockMask;
-        *clockPTOR = clockMask;
+        clock = 1;
+        clock = 0;
         
         if (n >= 64) { totalTime += t.read(); nRuns += 1; } // $$$
     }
@@ -296,8 +222,7 @@ if (done==1) printf(". done: dst=%d\r\n", dst);
     }
 
 private:
-    SimpleDMA adc_dma;        // DMA controller for reading the analog input
-    SimpleDMA clk_dma;        // DMA controller for the sensor SCLK (writes the PTOR register to toggle the clock bit)
+    SimpleDMA dma;            // DMA controller for reading the analog input
     char *dmabuf;             // buffer for DMA transfers
     int nPixSensor;           // number of pixels in physical sensor array
     DigitalOut si;            // GPIO pin for sensor SI (serial data) 

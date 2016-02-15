@@ -200,20 +200,23 @@ public:
         return true;
     }
     
-    // send an exposure report to the joystick interface
-    virtual void sendExposureReport(USBJoystick &js)
+    // Send an exposure report to the joystick interface.
+    // 
+    // Mode bits:
+    //    0x01  -> send processed pixels (default is raw pixels)
+    //    0x02  -> low res scan (default is high res scan)
+    virtual void sendExposureReport(USBJoystick &js, uint8_t mode)
     {
-        // Read a fresh high-res scan, then do another right away.  This
-        // gives us the shortest possible exposure for the sample we report,
-        // which helps ensure that the user inspecting the data sees something
-        // close to what we see when we calculate the plunger position.
-        ccd.read(pix, highResPix);
-        ccd.read(pix, highResPix);
+        // get the number of pixels according to the high res/low res mode
+        int npix = (mode & 0x02 ? lowResPix : highResPix);
+
+        // do a scan
+        ccd.read(pix, npix);
         
         // send reports for all pixels
         int idx = 0;
-        while (idx < highResPix)
-            js.updateExposure(idx, highResPix, pix);
+        while (idx < npix)
+            js.updateExposure(idx, npix, pix);
             
         // The pixel dump requires many USB reports, since each report
         // can only send a few pixel values.  An integration cycle has
@@ -226,7 +229,8 @@ public:
     }
     
 protected:
-    // pixel buffer - we allocate this to be big enough for a high-res scan
+    // Pixel buffer.  We allocate this to be big enough for the high-res scan,
+    // which is the most pixels we'll need to capture.
     uint16_t *pix;
 
     // number of pixels in a high-res scan
@@ -252,7 +256,7 @@ class PlungerSensorTSL1410R: public PlungerSensorCCD
 {
 public:
     PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao1, PinName ao2) 
-        : PlungerSensorCCD(1280, 320, 64, si, clock, ao1, ao2)
+        : PlungerSensorCCD(1280, 256, 80, si, clock, ao1, ao2)
     {
     }
 };
@@ -262,7 +266,7 @@ class PlungerSensorTSL1412R: public PlungerSensorCCD
 {
 public:
     PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao1, PinName ao2)
-        : PlungerSensorCCD(1536, 384, 64, si, clock, ao1, ao2)
+        : PlungerSensorCCD(1536, 256, 128, si, clock, ao1, ao2)
     {
     }
 };

@@ -2326,8 +2326,12 @@ void accelRotate(int &x, int &y)
 // to distinguish special request reply packets.
 uint16_t statusFlags;
     
-// flag: send a pixel dump after the next read
+// Pixel dump mode - the host requested a dump of image sensor pixels
+// (helpful for installing and setting up the sensor and light source)
 bool reportPix = false;
+uint8_t reportPixMode;  // pixel report mode bits: 
+                        // 0x01 -> raw pixels (0) / processed (1)
+                        // 0x02 -> high res scan (0) / low res (1)
 
 
 // ---------------------------------------------------------------------------
@@ -2508,8 +2512,11 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
             
         case 3:
             // 3 = pixel dump
-            // (No parameters)
+            //     data[2] = mode bits:
+            //               0x01  -> return processed pixels (default is raw pixels)
+            //               0x02  -> low res scan (default is high res scan)
             reportPix = true;
+            reportPixMode = data[2];
             
             // show purple until we finish sending the report
             diagLED(1, 0, 1);
@@ -3390,7 +3397,7 @@ int main(void)
         if (reportPix)
         {
             // send the report            
-            plungerSensor->sendExposureReport(js);
+            plungerSensor->sendExposureReport(js, reportPixMode);
 
             // we have satisfied this request
             reportPix = false;

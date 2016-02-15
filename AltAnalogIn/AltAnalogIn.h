@@ -23,65 +23,64 @@
  */
 #include "mbed.h"
 #include "pinmap.h"
+#include "SimpleDMA.h"
+
+// KL25Z definitions
+#if defined TARGET_KLXX
+
+// Maximum ADC clock for KL25Z in 12-bit mode - 18 MHz per the data sheet
+#define MAX_FADC_12BIT      18000000
+
+#define CHANNELS_A_SHIFT     5          // bit position in ADC channel number of A/B mux
+#define ADC_CFG1_ADLSMP      0x10       // long sample time mode
+#define ADC_SC1_AIEN         0x40       // interrupt enable
+#define ADC_SC2_ADLSTS(mode) (mode)     // long sample time select - bits 1:0 of CFG2
+#define ADC_SC2_DMAEN        0x04       // DMA enable
+#define ADC_SC3_CONTINUOUS   0x08       // continuous conversion mode
+
+#else
+    #error "This target is not currently supported"
+#endif
 
 #if !defined TARGET_LPC1768 && !defined TARGET_KLXX && !defined TARGET_LPC408X && !defined TARGET_LPC11UXX && !defined TARGET_K20D5M
     #error "Target not supported"
 #endif
 
- /** A class similar to AnalogIn, only faster, for LPC1768, LPC408X and KLxx
+ /** A class similar to AnalogIn, but much faster.  This class is optimized 
+ * for taking a string of readings from a single input.
  *
- * AnalogIn does a single conversion when you read a value (actually several conversions and it takes the median of that).
- * This library runns the ADC conversion automatically in the background.
- * When read is called, it immediatly returns the last sampled value.
+ * This is a heavily modified version of the popular FastAnalogIn class.
+ * Like FastAnalogIn, this class uses the continuous conversion mode to
+ * achieve faster read times.  It adds interrupt callbacks on each
+ * conversion, and DMA transfer of the input data to memory (or to another
+ * peripheral) using the SimpleDMA class.  DMA makes a huge difference -
+ * it speeds up the sampling time by about 3x and gets us fairly close to
+ * the speeds claimed by the manufacturer.  Reading through the MCU code
+ * seems to add at least a few microseconds per sample, which is significant
+ * when trying to get close to the theoretical speed limits for the ADC
+ * hardware, which are around 1.5us.
  *
- * LPC1768 / LPC4088
- * Using more ADC pins in continuous mode will decrease the conversion rate (LPC1768:200kHz/LPC4088:400kHz).
- * If you need to sample one pin very fast and sometimes also need to do AD conversions on another pin,
- * you can disable the continuous conversion on that ADC channel and still read its value.
+ * This class can be used with or without DMA.  By default, you take samples
+ * directly.  Call start() to initiate sampling, and call one of the
+ * read routines (read() or read_u16()) to wait for the sample to complete
+ * and fetch the value.  In this mode, samples are taken individually.
+ * The start() and read routines are separated so that the caller can
+ * perform other work, if desired, while the ADC hardware takes the sample.
  *
- * KLXX
- * Multiple Fast instances can be declared of which only ONE can be continuous (all others must be non-continuous).
+ * To use with DMA, set up a SimpleDMA object, and call initDMA() to tie
+ * it to the analog input.  Call startDMA() to initiate a transfer.  We'll
+ * start reading the analog input in continuous mode; each time a sample
+ * completes, it will trigger a DMA transfer to the destination.  startDMA()
+ * returns immediately, so the caller can continue with other tasks while
+ * the samples are taken.
  *
- * When continuous conversion is disabled, a read will block until the conversion is complete
- * (much like the regular AnalogIn library does).
- * Each ADC channel can be enabled/disabled separately.
- *
- * IMPORTANT : It does not play nicely with regular AnalogIn objects, so either use this library or AnalogIn, not both at the same time!!
- *
- * Example for the KLxx processors:
- * @code
- * // Print messages when the AnalogIn is greater than 50%
- *
- * #include "mbed.h"
- *
- * AltAnalogIn temperature(PTC2); //Fast continuous sampling on PTC2
- * AltAnalogIn speed(PTB3, 0);    //Fast non-continuous sampling on PTB3
- *
- * int main() {
- *     while(1) {
- *         if(temperature > 0.5) {
- *             printf("Too hot! (%f) at speed %f", temperature.read(), speed.read());
- *         }
- *     }
- * }
- * @endcode
- * Example for the LPC1768 processor:
- * @code
- * // Print messages when the AnalogIn is greater than 50%
- *
- * #include "mbed.h"
- *
- * AltAnalogIn temperature(p20);
- *
- * int main() {
- *     while(1) {
- *         if(temperature > 0.5) {
- *             printf("Too hot! (%f)", temperature.read());
- *         }
- *     }
- * }
- * @endcode
-*/
+ * IMPORTANT!  This class does not play nicely with regular AnalogIn objects,
+ * nor with the original FastAnalogIn, because all of these classes set global
+ * configuration registers in the ADC hardware at setup time and then will 
+ * assume that no one else is messing with them.  Each library requires
+ * exclusive access to and control over the hardware, so they can't be mixed
+ * in the same program.
+ */
 class AltAnalogIn {
 
 public:
@@ -90,11 +89,69 @@ public:
      * @param pin AnalogIn pin to connect to
      * @param enabled Enable the ADC channel (default = true)
      */
-    AltAnalogIn( PinName pin, bool enabled = true );
+    AltAnalogIn(PinName pin, bool continuous = false);
     
     ~AltAnalogIn( void )
     {
+#if 0//$$$
+        if (intInstance == this)
+            intInstance = 0;
+#endif
     }
+    
+    // Initialize DMA.  This connects the analog in port to the
+    // given DMA object.
+    //
+    // DMA transfers from the analog in port often use continuous
+    // conversion mode.  Note, however, that we don't automatically
+    // assume this - single sample mode is the default, which means
+    // that you must manually start each sample.  If you want to use
+    // continuous mode, you need to set that separately (via the 
+    // constructor).
+    void initDMA(SimpleDMA *dma);
+    
+    // Start a DMA transfer.  'nele' is the number of elements (not
+    // bytes) in the buffer.
+    template<typename T> void startDMA(T *buf, int nele, bool autoInc) 
+    {
+        // set the DMA destination buffer
+        dma->destination(buf, autoInc);
+        
+        // start the DMA transfer
+        dma->start(nele * sizeof(T));
+    }
+            
+#if 0 // $$$
+    // set up an interrupt callback and enable interrupt mode
+    template<typename T> void attach(T *object, void (T::*member)(void))
+    {
+        // attach the callback
+        _callback.attach(object, member);
+        
+        // set our internal interrupt handler
+        NVIC_SetVector(ADC0_IRQn, (uint32_t)&_aiIRQ);
+        NVIC_EnableIRQ(ADC0_IRQn);
+        
+        // enable interrupt mode
+        enableInterruptMode();
+    }
+#endif
+
+    // turn on interrupt mode
+    void enableInterruptMode()
+    {
+        // set interrupt mode
+        sc1 |= ADC_SC1_AIEN;        
+    }
+
+#if 0 // $$$    
+    // interrupt handler
+    static void _aiIRQ()
+    {
+        if (intInstance != 0)
+            intInstance->_callback.call();
+    }
+#endif
     
     /** Start a sample.  This sets the ADC multiplexer to read from
     * this input and activates the sampler.
@@ -115,11 +172,37 @@ public:
                 ADC0->CFG2 &= ~ADC_CFG2_MUXSEL_MASK;
         }
         
-        // select our ADC channel in the control register - this initiates sampling
-        // on the channel
-        ADC0->SC1[0] = startMask;
+        // update the SC2 and SC3 bits only if we're changing inputs
+        static uint32_t lastid = 0;
+        if (id != lastid) 
+        {
+            // set our ADC0 SC2 and SC3 configuration bits
+            ADC0->SC2 = sc2;
+            ADC0->SC3 = sc3;
+        
+            // we're the active one now
+            lastid = id;
+            
+            // handle any interrupts through this object
+//$$$            intInstance = this;
+        }
+        
+        // set our SC1 bits - this initiates the sample
+        ADC0->SC1[0] = sc1;
     }
  
+    // stop sampling
+    void stop()
+    {
+        // set the channel bits to binary 11111 to disable sampling
+        ADC0->SC1[0] = 0x1F;
+    }
+    
+    // wait for the current sample to complete
+    inline void wait()
+    {
+        while ((ADC0->SC1[0] & ADC_SC1_COCO_MASK) == 0);
+    }
 
     
     /** Returns the raw value
@@ -129,7 +212,7 @@ public:
     inline uint16_t read_u16()
     {
         // wait for the hardware to signal that the sample is completed
-        while ((ADC0->SC1[0] & ADC_SC1_COCO_MASK) == 0);
+        wait();
     
         // return the result register value
         return (uint16_t)ADC0->R[0] << 4;  // convert 12-bit to 16-bit, padding with zeroes
@@ -151,9 +234,17 @@ public:
 
     
 private:
-    char ADCnumber;         // ADC number of our input pin
-    char ADCmux;            // multiplexer for our input pin (0=A, 1=B)
-    uint32_t startMask;
+    uint32_t id;                // unique ID
+    SimpleDMA *dma;             // DMA controller, if used
+    FunctionPointer _callback;  // interrupt callback
+    char ADCnumber;             // ADC number of our input pin
+    char ADCmux;                // multiplexer for our input pin (0=A, 1=B)
+    uint32_t sc1;               // SC1 register settings for this input
+    uint32_t sc2;               // SC2 register settings for this input
+    uint32_t sc3;               // SC3 register settings for this input
+    
+    // interrupt handler instance
+    //$$$static AltAnalogIn *intInstance;
 };
 
 #endif

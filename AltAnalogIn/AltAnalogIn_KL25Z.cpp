@@ -3,17 +3,7 @@
 #include "AltAnalogIn.h"
 #include "clk_freqs.h"
 
-// Maximum ADC clock for KL25Z in 12-bit mode.  The data sheet says this is
-// limited to 18MHz, but we seem to get good results at higher rates.  The
-// data sheet is actually slightly vague on this because it's only in the
-// table for the 16-bit ADC, even though the ADC we're using is a 12-bit ADC,
-// which seems to have slightly different properties.  So there's room to
-// think the data sheet omits the data for the 12-bit ADC.
-#define MAX_FADC_12BIT      25000000
-
-#define CHANNELS_A_SHIFT     5          // bit position in ADC channel number of A/B mux
-#define ADC_CFG1_ADLSMP      0x10       // long sample time mode
-#define ADC_SC2_ADLSTS(mode) (mode)     // long sample time select - bits 1:0 of CFG2
+//$$$AltAnalogIn *AltAnalogIn::intInstance = 0;
 
 #ifdef TARGET_K20D50M
 static const PinMap PinMap_ADC[] = {
@@ -31,8 +21,15 @@ static const PinMap PinMap_ADC[] = {
 };
 #endif
 
-AltAnalogIn::AltAnalogIn(PinName pin, bool enabled)
+AltAnalogIn::AltAnalogIn(PinName pin, bool continuous)
 {
+    // set our unique ID
+    static uint32_t nextID = 1;
+    id = nextID++;
+    
+    // presume no DMA 
+    dma = 0;
+    
     // do nothing if explicitly not connected
     if (pin == NC)
         return;
@@ -57,38 +54,72 @@ AltAnalogIn::AltAnalogIn(PinName pin, bool enabled)
     // run the ADC at up to 18 MHz per the KL25Z data sheet.  (16-bit mode
     // is limited to 12 MHz.)
     int clkdiv = 0;
-    uint32_t ourfreq = bus_frequency();
-    for ( ; ourfreq > MAX_FADC_12BIT ; ourfreq /= 2, clkdiv += 1) ;
+    uint32_t adcfreq = bus_frequency();
+    for ( ; adcfreq > MAX_FADC_12BIT ; adcfreq /= 2, clkdiv += 1) ;
     
-    // Set the "high speed" configuration only if we're right at the bus speed
-    // limit.  This bit is somewhat confusingly named, in that it actually
-    // *slows down* the conversions.  "High speed" means that the *other*
-    // options are set right at the limits of the ADC, so this option adds
-    // a few extra cycle delays to every conversion to compensate for living
-    // on the edge.
-    uint32_t adhsc_bit = (ourfreq == MAX_FADC_12BIT ? ADC_CFG2_ADHSC_MASK : 0);
+    // The "high speed configuration" bit is required if the ADC clock 
+    // frequency is above a certain threshold.  The actual threshold is 
+    // poorly documented: the reference manual only says that it's required
+    // when running the ADC at "high speed" but doesn't define how high
+    // "high" is.  The only numerical figure I can find is in the Freescale
+    // ADC sample time calculator tool (a Windows program downloadable from
+    // the Freescale site), which has a little notation on the checkbox for
+    // the ADHSC bit that says to use it when the ADC clock is 8 MHz or
+    // higher.
+    //
+    // Note that this bit is somewhat confusingly named.  It doesn't mean
+    // "make the ADC go faster".  It actually means just the opposite.
+    // What it really means is that the external clock is running so fast 
+    // that the ADC has to pad out its sample time slightly to compensate,
+    // by adding a couple of extra clock cycles to each sampling interval.
+    const uint32_t ADHSC_SPEED_LIMIT = 8000000;
+    uint32_t adhsc_bit = (adcfreq >= ADHSC_SPEED_LIMIT ? ADC_CFG2_ADHSC_MASK : 0);
     
-    printf("ADCnumber=%d, cfg2_muxsel=%d, bus freq=%ld, clkdiv=%d\r\n", ADCnumber, ADCmux, bus_frequency(), clkdiv);
-
-    // set up the ADC control registers 
-
-    ADC0->CFG1 = ADC_CFG1_ADIV(clkdiv)  // Clock Divide Select (as calculated above)
-               | ADC_CFG1_MODE(1)       // Sample precision = 12-bit
-               | ADC_CFG1_ADICLK(0);    // Input Clock = bus clock
-
-    ADC0->CFG2 = adhsc_bit              // High-Speed Configuration, if needed
-               | ADC_CFG2_ADLSTS(3);    // Long sample time mode 3 -> 6 ADCK cycles total
-               
-    ADC0->SC2 = ADC_SC2_REFSEL(0);      // Default Voltage Reference
-    
-    ADC0->SC3 = 0;                      // Calibration mode off, single sample, averaging disabled
+    // $$$
+    printf("ADCnumber=%d, cfg2_muxsel=%d, bus freq=%ld, clkdiv=%d, adc freq=%d, high speed config=%s\r\n", 
+        ADCnumber, ADCmux, bus_frequency(), clkdiv, adcfreq, adhsc_bit ? "Y" : "N");//$$$
 
     // map the GPIO pin in the system multiplexer to the ADC
     pinmap_pinout(pin, PinMap_ADC);
     
-    // figure our 'start' mask - this is the value we write to the SC1A register
-    // to initiate a new sample
-    startMask = ADC_SC1_ADCH(ADCnumber & ~(1 << CHANNELS_A_SHIFT));
+    // set up the ADC control registers - these are common to all users of this class
+    
+    ADC0->CFG1 = ADC_CFG1_ADIV(clkdiv)  // Clock Divide Select (as calculated above)
+               //| ADC_CFG1_ADLSMP        // Long sample time
+               | ADC_CFG1_MODE(1)       // Sample precision = 12-bit
+               | ADC_CFG1_ADICLK(0);    // Input Clock = bus clock
+
+    ADC0->CFG2 = adhsc_bit              // High-Speed Configuration, if needed
+               //| ADC_CFG2_ADLSTS(0);    // Long sample time mode 0 -> 24 ADCK cycles total
+               //| ADC_CFG2_ADLSTS(1);    // Long sample time mode 1 -> 16 ADCK cycles total
+               //| ADC_CFG2_ADLSTS(2);    // Long sample time mode 2 -> 10 ADCK cycles total
+               | ADC_CFG2_ADLSTS(3);    // Long sample time mode 2 -> 6 ADCK cycles total
+               
+    // Figure our SC1 register bits
+    sc1 = ADC_SC1_ADCH(ADCnumber & ~(1 << CHANNELS_A_SHIFT));
+
+    // figure our SC2 register bits
+    sc2 = ADC_SC2_REFSEL(0);            // Default Voltage Reference
+
+    // Set our SC3 bits.  The defaults (0 bits) are calibration mode off,
+    // single sample, averaging disabled.
+    sc3 = (continuous ? ADC_SC3_CONTINUOUS : 0);    // enable continuous mode if desired
 }
+
+void AltAnalogIn::initDMA(SimpleDMA *dma)
+{
+    // remember the DMA interface object
+    this->dma = dma;
+    
+    // set to read from the ADC result register
+    dma->source(&ADC0->R[0], false, 16);
+    
+    // set to trigger on the ADC
+    dma->trigger(Trigger_ADC0);
+
+    // enable DMA in our SC2 bits
+    sc2 |= ADC_SC2_DMAEN;
+}
+
 
 #endif //defined TARGET_KLXX

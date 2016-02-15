@@ -50,7 +50,17 @@ public:
     // through special joystick reports.  This is used for PC-side testing tools
     // to let the user check the sensor installation by directly viewing its
     // pixel output.
-    virtual void sendExposureReport(class USBJoystick &js) { }
+    //
+    // Mode bits:
+    //   0x01  -> send processed pixels (default is raw pixels)
+    //   0x02  -> low res scan (default is high res scan)
+    //
+    // If processed mode is selected, the sensor should apply any pixel
+    // processing it normally does when taking a plunger position reading,
+    // such as exposure correction, noise reduction, etc.  In raw mode, we
+    // simply send the pixels as read from the sensor.  Both modes are useful
+    // in setting up the physical sensor.
+    virtual void sendExposureReport(class USBJoystick &js, uint8_t mode) { }
 };
 
 #endif /* PLUNGER_H */
