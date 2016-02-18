@@ -4,6 +4,7 @@
 #define DMA_IRQS            4
 
 enum SimpleDMA_Trigger {
+    Trigger_NONE = 0,
     Trigger_ALWAYS = 60,
     Trigger_UART0_RX = 2,
     Trigger_UART0_TX,

@@ -3,8 +3,6 @@
 #include "AltAnalogIn.h"
 #include "clk_freqs.h"
 
-//$$$AltAnalogIn *AltAnalogIn::intInstance = 0;
-
 #ifdef TARGET_K20D50M
 static const PinMap PinMap_ADC[] = {
     {PTC2, ADC0_SE4b, 0},
@@ -75,25 +73,21 @@ AltAnalogIn::AltAnalogIn(PinName pin, bool continuous)
     const uint32_t ADHSC_SPEED_LIMIT = 8000000;
     uint32_t adhsc_bit = (adcfreq >= ADHSC_SPEED_LIMIT ? ADC_CFG2_ADHSC_MASK : 0);
     
-    // $$$
-    printf("ADCnumber=%d, cfg2_muxsel=%d, bus freq=%ld, clkdiv=%d, adc freq=%d, high speed config=%s\r\n", 
-        ADCnumber, ADCmux, bus_frequency(), clkdiv, adcfreq, adhsc_bit ? "Y" : "N");//$$$
-
     // map the GPIO pin in the system multiplexer to the ADC
     pinmap_pinout(pin, PinMap_ADC);
     
     // set up the ADC control registers - these are common to all users of this class
     
-    ADC0->CFG1 = ADC_CFG1_ADIV(clkdiv)  // Clock Divide Select (as calculated above)
+    ADC0->CFG1 = ADC_CFG1_ADIV(clkdiv)    // Clock Divide Select (as calculated above)
                //| ADC_CFG1_ADLSMP        // Long sample time
-               | ADC_CFG1_MODE(1)       // Sample precision = 12-bit
-               | ADC_CFG1_ADICLK(0);    // Input Clock = bus clock
+               | ADC_CFG1_MODE(ADC_8BIT)  // Sample precision
+               | ADC_CFG1_ADICLK(0);      // Input Clock = bus clock
 
-    ADC0->CFG2 = adhsc_bit              // High-Speed Configuration, if needed
+    ADC0->CFG2 = adhsc_bit                // High-Speed Configuration, if needed
                //| ADC_CFG2_ADLSTS(0);    // Long sample time mode 0 -> 24 ADCK cycles total
                //| ADC_CFG2_ADLSTS(1);    // Long sample time mode 1 -> 16 ADCK cycles total
                //| ADC_CFG2_ADLSTS(2);    // Long sample time mode 2 -> 10 ADCK cycles total
-               | ADC_CFG2_ADLSTS(3);    // Long sample time mode 2 -> 6 ADCK cycles total
+               | ADC_CFG2_ADLSTS(3);      // Long sample time mode 2 -> 6 ADCK cycles total
                
     // Figure our SC1 register bits
     sc1 = ADC_SC1_ADCH(ADCnumber & ~(1 << CHANNELS_A_SHIFT));
@@ -112,7 +106,7 @@ void AltAnalogIn::initDMA(SimpleDMA *dma)
     this->dma = dma;
     
     // set to read from the ADC result register
-    dma->source(&ADC0->R[0], false, 16);
+    dma->source(&ADC0->R[0], false, 8);
     
     // set to trigger on the ADC
     dma->trigger(Trigger_ADC0);

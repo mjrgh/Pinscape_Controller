@@ -7,6 +7,9 @@
 
 // ------ OUTGOING MESSAGES (DEVICE TO HOST) ------
 //
+// General note: 16-bit and 32-bit fields in our reports are little-endian
+// unless otherwise specified.
+//
 // 1. Joystick reports
 // In most cases, our outgoing messages are HID joystick reports, using the
 // format defined in USBJoystick.cpp.  This allows us to be installed on
@@ -69,8 +72,8 @@
 //                example, 0x04 0x80 indicates index 4.  This is the 
 //                starting pixel number in the report.  The first report 
 //                will be 0x00 0x80 to indicate pixel #0.  
-//    bytes 2:3 = 16-bit unsigned int brightness level of pixel at index
-//    bytes 4:5 = brightness of pixel at index+1
+//    bytes 2   = 8-bit unsigned int brightness level of pixel at index
+//    bytes 3   = brightness of pixel at index+1
 //    etc for the rest of the packet
 //
 // 2B. Configuration query.
@@ -327,13 +330,17 @@
 //
 //         0 = none (disabled)
 //         1 = TSL1410R linear image sensor, 1280x1 pixels, serial mode
-//         2 = TSL1410R, parallel mode
+//        *2 = TSL1410R, parallel mode
 //         3 = TSL1412R linear image sensor, 1536x1 pixels, serial mode
-//         4 = TSL1412R, parallel mode
+//        *4 = TSL1412R, parallel mode
 //         5 = Potentiometer with linear taper, or any other device that
 //             represents the position reading with a single analog voltage
-//         6 = AEDR8300 optical quadrature sensor, 75lpi
-//         7 = AS5304 magnetic quadrature sensor, 160 steps per 2mm
+//        *6 = AEDR8300 optical quadrature sensor, 75lpi
+//        *7 = AS5304 magnetic quadrature sensor, 160 steps per 2mm
+//
+//       * The sensor types marked with asterisks (*) are planned but not 
+//       currently implemented.  Selecting these types will effectively
+//       disable the plunger.
 //
 // 6  -> Plunger pin assignments.  Bytes 3-6 give the pin assignments for
 //       pins 1, 2, 3, and 4.  These use the Pin Number Mappings listed

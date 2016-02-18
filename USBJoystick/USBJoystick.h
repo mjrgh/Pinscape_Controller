@@ -222,7 +222,7 @@ class USBJoystick: public USBHID {
          * @param npix number of pixels in the overall array
          * @param pix pixel array
          */
-         bool updateExposure(int &idx, int npix, const uint16_t *pix);
+         bool updateExposure(int &idx, int npix, const uint8_t *pix);
          
          /**
          * Write a configuration report.

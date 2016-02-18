@@ -104,6 +104,7 @@ void trigger(SimpleDMA_Trigger trig) {
 * @param chan - DMA channel to use, -1 = variable channel (highest priority channel which is available)
 */
 void channel(int chan);
+int getChannel() { return _channel; }
 
 /**
 * Start the transfer
@@ -145,6 +146,25 @@ template<typename T>
     void attach(T *object, void (T::*member)(void)) {
         _callback.attach(object, member);
     }
+    
+/**
+* Link to another channel.  This triggers the given destination
+* channel when a transfer on this channel is completed.  If 'all' 
+* is true, the link occurs after the entire transfer is complete 
+* (i.e., the byte count register in this channel reaches zero).
+* Otherwise, the link is triggered once for each transfer on this
+* channel.
+*/
+void link(SimpleDMA &dest, bool all = false);
+
+/**
+* Link to two other channels.  This triggers the 'dest1' channel
+* once for each transfer on this channel, and then triggers the
+* 'dest2' channel once when the entire transfer has been completed
+* (i.e., the byte count register on this channel reaches zero).
+*/
+void link(SimpleDMA &dest1, SimpleDMA &dest2);
+
 
 #ifdef RTOS_H
 /**
@@ -180,6 +200,9 @@ uint8_t destination_size;
 uint32_t source_mod;
 uint32_t destination_mod;
 bool cycle_steal;
+int linkChannel1;
+int linkChannel2;
+int linkMode;
 
 bool auto_channel;
 

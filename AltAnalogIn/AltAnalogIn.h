@@ -38,6 +38,11 @@
 #define ADC_SC2_DMAEN        0x04       // DMA enable
 #define ADC_SC3_CONTINUOUS   0x08       // continuous conversion mode
 
+#define ADC_8BIT             0          // 8-bit resolution
+#define ADC_12BIT            1          // 12-bit resolution
+#define ADC_10BIT            2          // 10-bit resolution
+#define ADC_16BIT            3          // 16-bit resolution
+
 #else
     #error "This target is not currently supported"
 #endif
@@ -93,10 +98,6 @@ public:
     
     ~AltAnalogIn( void )
     {
-#if 0//$$$
-        if (intInstance == this)
-            intInstance = 0;
-#endif
     }
     
     // Initialize DMA.  This connects the analog in port to the
@@ -109,50 +110,7 @@ public:
     // continuous mode, you need to set that separately (via the 
     // constructor).
     void initDMA(SimpleDMA *dma);
-    
-    // Start a DMA transfer.  'nele' is the number of elements (not
-    // bytes) in the buffer.
-    template<typename T> void startDMA(T *buf, int nele, bool autoInc) 
-    {
-        // set the DMA destination buffer
-        dma->destination(buf, autoInc);
         
-        // start the DMA transfer
-        dma->start(nele * sizeof(T));
-    }
-            
-#if 0 // $$$
-    // set up an interrupt callback and enable interrupt mode
-    template<typename T> void attach(T *object, void (T::*member)(void))
-    {
-        // attach the callback
-        _callback.attach(object, member);
-        
-        // set our internal interrupt handler
-        NVIC_SetVector(ADC0_IRQn, (uint32_t)&_aiIRQ);
-        NVIC_EnableIRQ(ADC0_IRQn);
-        
-        // enable interrupt mode
-        enableInterruptMode();
-    }
-#endif
-
-    // turn on interrupt mode
-    void enableInterruptMode()
-    {
-        // set interrupt mode
-        sc1 |= ADC_SC1_AIEN;        
-    }
-
-#if 0 // $$$    
-    // interrupt handler
-    static void _aiIRQ()
-    {
-        if (intInstance != 0)
-            intInstance->_callback.call();
-    }
-#endif
-    
     /** Start a sample.  This sets the ADC multiplexer to read from
     * this input and activates the sampler.
     */
@@ -182,9 +140,6 @@ public:
         
             // we're the active one now
             lastid = id;
-            
-            // handle any interrupts through this object
-//$$$            intInstance = this;
         }
         
         // set our SC1 bits - this initiates the sample
@@ -242,9 +197,6 @@ private:
     uint32_t sc1;               // SC1 register settings for this input
     uint32_t sc2;               // SC2 register settings for this input
     uint32_t sc3;               // SC3 register settings for this input
-    
-    // interrupt handler instance
-    //$$$static AltAnalogIn *intInstance;
 };
 
 #endif

@@ -242,7 +242,7 @@ private:
 // 
 // USB product version number
 //
-const uint16_t USB_VERSION_NO = 0x0009;
+const uint16_t USB_VERSION_NO = 0x000A;
 
 // --------------------------------------------------------------------------
 //
@@ -3497,7 +3497,10 @@ int main(void)
             if (plungerSensor != 0 && (cfg.plunger.sensorType == PlungerType_TSL1410RS || cfg.plunger.sensorType == PlungerType_TSL1410RP))
             {
                 PlungerSensorTSL1410R *ps = (PlungerSensorTSL1410R *)plungerSensor;
-                printf("average plunger read time: %f ms (total=%f, n=%d)\r\n", ps->ccd.totalTime*1000.0 / ps->ccd.nRuns, ps->ccd.totalTime, ps->ccd.nRuns);
+                uint32_t nRuns;
+                float totalTime;
+                ps->ccd.getTimingStats(totalTime, nRuns);
+                printf("average plunger read time: %f ms (total=%f, n=%d)\r\n", totalTime*1000.0/nRuns, totalTime, nRuns);
             }
         }
     // end $$$

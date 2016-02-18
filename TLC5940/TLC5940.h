@@ -67,6 +67,7 @@
 #include "mbed.h"
 #include "FastPWM.h"
 #include "SimpleDMA.h"
+#include "DMAChannels.h"
 
 /**
   * SPI speed used by the mbed to communicate with the TLC5940
@@ -154,7 +155,8 @@ public:
       *  @param nchips - The number of TLC5940s (if you are daisy chaining)
       */
     TLC5940(PinName SCLK, PinName MOSI, PinName GSCLK, PinName BLANK, PinName XLAT, int nchips)
-        : spi(MOSI, NC, SCLK),
+        : sdma(DMAch_TLC5940),
+          spi(MOSI, NC, SCLK),
           gsclk(GSCLK),
           blank(BLANK),
           xlat(XLAT),

@@ -88,7 +88,7 @@ bool USBJoystick::mediaUpdate(uint8_t data)
     return writeTO(EP4IN, report.data, report.length, MAX_PACKET_SIZE_EPINT, 100);
 }
  
-bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
+bool USBJoystick::updateExposure(int &idx, int npix, const uint8_t *pix)
 {
     HID_REPORT report;
     
@@ -108,13 +108,10 @@ bool USBJoystick::updateExposure(int &idx, int npix, const uint16_t *pix)
         ofs += 2;
     }
         
-    // now fill out the remaining words with exposure values
+    // now fill out the remaining bytes with exposure values
     report.length = reportLen;
-    for ( ; ofs + 1 < report.length ; ofs += 2)
-    {
-        uint16_t p = (idx < npix ? pix[idx++] : 0);
-        put(ofs, p);
-    }
+    for ( ; ofs < report.length ; ++ofs)
+        report.data[ofs] = (idx < npix ? pix[idx++] : 0);
     
     // send the report
     return sendTO(&report, 100);

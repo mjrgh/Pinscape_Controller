@@ -25,7 +25,7 @@ public:
     {
     }
     
-    virtual bool highResScan(float &pos)
+    virtual bool read(uint16_t &pos)
     {
         // Take a few readings and use the average, to reduce the effect
         // of analog voltage fluctuations.  The voltage range on the ADC
@@ -38,19 +38,17 @@ public:
         // random noise in the readings.
         //
         // Readings through the standard AnalogIn class take about 30us
-        // each, so 5 readings is about 150us.  This is plenty fast enough
-        // for even a low-res scan.
-        pos = (pot.read() + pot.read() + pot.read() + pot.read() + pot.read())/5.0;
+        // each, so taking 5 readings takes about 150us.  This is fast
+        // enough to resolve even the fastest plunger motiono with no
+        // aliasing.
+        pos = uint16_t((
+            uint32_t(pot.read_u16())
+            + uint32_t(pot.read_u16()) 
+            + uint32_t(pot.read_u16())
+            + uint32_t(pot.read_u16())
+            + uint32_t(pot.read_u16())
+            ) / 5U);
         return true;
-    }
-    
-    virtual bool lowResScan(float &pos)
-    {
-        // Since we have only one analog input to sample, our read time is
-        // very fast compared to the image sensor alternatives, so there's no
-        // need to do anything different for a faster low-res scan.  Simply
-        // take a normal high-res reading.
-        return highResScan(pos);
     }
         
 private:

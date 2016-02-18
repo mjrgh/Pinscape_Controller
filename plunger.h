@@ -19,37 +19,56 @@ public:
     // to set up the device for first use.
     virtual void init() = 0;
 
-    // Take a high-resolution reading.  Sets pos to the current position,
-    // on a scale from 0.0 to 1.0:  0.0 is the maximum forward plunger position,
-    // and 1.0 is the maximum retracted position, in terms of the sensor's
-    // extremes.  This is a raw reading in terms of the sensor range; the
-    // caller is responsible for applying calibration data and scaling the
-    // result to the the joystick report range.
+    // Read the sensor position.  Sets 'pos' to the current plunger
+    // position registered on the sensor, normalized to a 16-bit unsigned
+    // integer (0x0000 to 0xFFFF).  0x0000 represents the maximum forward
+    // position, and 0xFFFF represents the maximum retracted position.
+    // The result returned by this routing isn't calibrated; it simply
+    // reflects the raw sensor reading.
     //
-    // Returns true on success, false on failure.  Return false if it wasn't
-    // possible to take a good reading for any reason.
-    virtual bool highResScan(float &pos) = 0;
+    // Timing requirements:  for best results, readings should be taken
+    // in well under 5ms.  There are two factors that go into this limit.
+    // The first is the joystick report rate in the main loop.  We want
+    // to send those as fast as possible to avoid any perceptible control 
+    // input lag in the pinball emulation.  "As fast as possible" is about
+    // every 10ms - that's VP's approximate sampling rate, so any faster
+    // wouldn't do any good, and could even slow things down by adding CPU 
+    // load in the Windows drivers handling the extra messages.  The second
+    // is the speed of the plunger motion.  During release events, the
+    // plunger moves in a sinusoidal pattern (back and forth) as it reaches
+    // the extreme of its travel and bounces back off the spring.  To
+    // resolve this kind of cyclical motion accurately, we have to take
+    // samples much faster than the cycle period - otherwise we encounter
+    // an effect known as aliasing, where we mistake a bounce for a small
+    // forward motion.  Tests with real plungers indicate that the bounce
+    // period is on the order of 10ms, so ideally we'd like to take
+    // samples much faster than that.
+    //
+    // Returns true on success, false on failure.  Returning false means
+    // that it wasn't possible to take a valid reading.
+    virtual bool read(uint16_t &pos) = 0;
+    
+    // $$$ DEPRECATED - left in during transition to new design
+    bool lowResScan(float &pos) 
+    {
+        uint16_t fpos;
+        if (read(fpos)) 
+        {
+            pos = fpos / 65535.0;
+            return true;
+        }
+        else 
+            return false;
+    }
+    bool highResScan(float &pos) { return lowResScan(pos); }
 
-    // Take a low-resolution reading.  This reports the result on the same
-    // 0.0 to 1.0 scale as highResScan().  Returns true on success, false on
-    // failure.
-    //
-    // The difference between the high-res and low-res scans is the amount 
-    // of time it takes to complete the reading.  The high-res scan is allowed
-    // to take about 10ms; a low-res scan take less than 1ms.  For many
-    // sensors, either of these time scales would yield identical resolution;
-    // if that's the case, simply take a reading the same way in both functions.
-    // The distinction is for the benefit of sensors that need significantly
-    // longer to read at higher resolutions, such as image sensors that have
-    // to sample pixels serially.
-    virtual bool lowResScan(float &pos) = 0;
-        
-    // Send an exposure report to the joystick interface.  This is specifically
-    // for image sensors, and should be omitted by other sensor types.  For
+    // Send an exposure report to the host, via the joystick interface.  This
+    // is for image sensors, and can be omitted by other sensor types.  For
     // image sensors, this takes one exposure and sends all pixels to the host
-    // through special joystick reports.  This is used for PC-side testing tools
-    // to let the user check the sensor installation by directly viewing its
-    // pixel output.
+    // through special joystick reports.  This is used by tools on the host PC
+    // to let the user view the low-level sensor pixel data, which can be
+    // helpful during installation to adjust the sensor positioning and light
+    // source.
     //
     // Mode bits:
     //   0x01  -> send processed pixels (default is raw pixels)

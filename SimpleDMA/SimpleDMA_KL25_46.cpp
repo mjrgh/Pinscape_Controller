@@ -5,7 +5,8 @@
 
 SimpleDMA *SimpleDMA::irq_owner[4] = {NULL};
 
-SimpleDMA::SimpleDMA(int channel) {
+SimpleDMA::SimpleDMA(int channel) 
+{
     this->channel(channel);
        
     //Enable DMA
@@ -23,26 +24,17 @@ SimpleDMA::SimpleDMA(int channel) {
     NVIC_EnableIRQ(DMA2_IRQn);
     NVIC_EnableIRQ(DMA3_IRQn);
     
+    // presume no link channels
+    linkMode = 0;
+    linkChannel1 = 0;
+    linkChannel2 = 0;
+    
     // presume cycle-steal mode
     cycle_steal = true;
 }
 
-// Figure the circular buffer MOD bit pattern (SMOD or DMOD)
-// for a given circular buffer size.  The buffer size is
-// required to be a power of 2 from 16 to 256K.
-static uint32_t modsize_to_modbits(uint32_t siz)
-{
-    // The bit pattern is such that 2^(bits+3), so we basically
-    // need to take the base-2 log of the size.  Zero has the
-    // special meaning that the circular buffer is disabled.
-    uint32_t bits = 0;
-    for (bits = 0 ; siz >= 16 ; siz >>= 1, ++bits) ;
-    
-    // return the result, which can't be over binary 1111
-    return bits & 0xF;
-}
-
-int SimpleDMA::start(uint32_t length) {  
+int SimpleDMA::start(uint32_t length) 
+{  
     if (auto_channel)
         _channel = getFreeChannel();
     else
@@ -61,11 +53,14 @@ int SimpleDMA::start(uint32_t length) {
     uint32_t config = 
         DMA_DCR_EINT_MASK 
         | DMA_DCR_ERQ_MASK 
+        | DMA_DCR_EADREQ_MASK
         | (cycle_steal ? DMA_DCR_CS_MASK : 0)
         | (source_inc << DMA_DCR_SINC_SHIFT) 
-        | (modsize_to_modbits(source_mod) << DMA_DCR_SMOD_SHIFT)
         | (destination_inc << DMA_DCR_DINC_SHIFT)
-        | (modsize_to_modbits(destination_mod) << DMA_DCR_DMOD_SHIFT);
+        | ((linkChannel1 & 3) << DMA_DCR_LCH1_SHIFT)
+        | ((linkChannel2 & 3) << DMA_DCR_LCH2_SHIFT)
+        | ((linkMode & 3) << DMA_DCR_LINKCC_SHIFT);
+        
     switch (source_size) {
         case 8:
             config |= 1 << DMA_DCR_SSIZE_SHIFT;
@@ -84,12 +79,31 @@ int SimpleDMA::start(uint32_t length) {
     }
     
     DMA0->DMA[_channel].DCR = config;      
+    
+    //$$$
+    static int iii; if (iii++ < 3)
+        printf("DMA channel %d: mode %04x, source %08lx, dest %08lx, trigger %d, len %d\r\n", _channel, config, _source, _destination, _trigger, length);
            
-    //Start
+    //Start - set ENBL bit in the DMAMUX channel config register
     DMAMUX0->CHCFG[_channel] |= 1<<7;
     
     return 0;
 }
+
+void SimpleDMA::link(SimpleDMA &dest, bool all)
+{
+    linkChannel1 = dest._channel;
+    linkChannel2 = 0;
+    linkMode = all ? 3 : 2;
+}
+
+void SimpleDMA::link(SimpleDMA &dest1, SimpleDMA &dest2)
+{
+    linkChannel1 = dest1._channel;
+    linkChannel2 = dest2._channel;
+    linkMode = 1;
+}
+
 
 int SimpleDMA::restart(uint32_t length)
 {
@@ -100,7 +114,8 @@ int SimpleDMA::restart(uint32_t length)
     return 0;
 }
 
-bool SimpleDMA::isBusy( int channel ) {
+bool SimpleDMA::isBusy( int channel ) 
+{
     //Busy bit doesn't work as I expect it to do, so just check if counter is at zero
     //return (DMA0->DMA[_channel].DSR_BCR & (1<<25) == 1<<25);
     if (channel == -1)
@@ -121,28 +136,33 @@ uint32_t SimpleDMA::remaining(int channel)
 }
 
 /*****************************************************************/
-void SimpleDMA::irq_handler(void) {
+void SimpleDMA::irq_handler(void) 
+{
     DMAMUX0->CHCFG[_channel] = 0;
     DMA0->DMA[_channel].DSR_BCR |= DMA_DSR_BCR_DONE_MASK ; 
     _callback.call();
 }
 
-void SimpleDMA::irq_handler0( void ) {
+void SimpleDMA::irq_handler0( void ) 
+{
     if (irq_owner[0]!=NULL)
         irq_owner[0]->irq_handler();
 }
 
-void SimpleDMA::irq_handler1( void ) {
+void SimpleDMA::irq_handler1( void ) 
+{
     if (irq_owner[1]!=NULL)
         irq_owner[1]->irq_handler();
 }
 
-void SimpleDMA::irq_handler2( void ) {
+void SimpleDMA::irq_handler2( void ) 
+{
     if (irq_owner[2]!=NULL)
         irq_owner[2]->irq_handler();
 }
 
-void SimpleDMA::irq_handler3( void ) {
+void SimpleDMA::irq_handler3( void ) 
+{
     if (irq_owner[3]!=NULL)
         irq_owner[3]->irq_handler();
 }
