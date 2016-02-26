@@ -44,11 +44,10 @@ SimpleDMA(int channel = -1);
 * @return - 0 on success
 */
 template<typename Type>
-void source(Type* pointer, bool autoinc, int size = sizeof(Type) * 8, int mod = 0) {
+void source(Type* pointer, bool autoinc, int size = sizeof(Type) * 8) {
     _source = (uint32_t)pointer;
     source_inc = autoinc;
     source_size = size;
-    source_mod = mod;
 }
 
 /**
@@ -68,18 +67,12 @@ void source(Type* pointer, bool autoinc, int size = sizeof(Type) * 8, int mod = 
 * @return - 0 on success
 */
 template<typename Type>
-void destination(Type* pointer, bool autoinc, int size = sizeof(Type) * 8, int mod = 0) {
+void destination(Type* pointer, bool autoinc, int size = sizeof(Type) * 8) {
     _destination = (uint32_t)pointer;
     destination_inc = autoinc;
     destination_size = size;
-    destination_mod = mod;
 }
 
-/**
-* Set cycle-steal mode.  In cycle-steal mode, we do one DMA transfer per
-* trigger.  In continuous mode, we do the entire transfer on a single trigger.
-*/
-void setCycleSteal(bool f) { cycle_steal = f; }
 
 /**
 * Set the trigger for the DMA operation
@@ -189,22 +182,19 @@ void wait(int length) {
 #endif
 
 protected:
-int _channel;
+uint8_t _channel;
 SimpleDMA_Trigger _trigger;
 uint32_t _source;
 uint32_t _destination;
-bool source_inc;
-bool destination_inc;
 uint8_t source_size;
 uint8_t destination_size;
-uint32_t source_mod;
-uint32_t destination_mod;
-bool cycle_steal;
-int linkChannel1;
-int linkChannel2;
-int linkMode;
+uint8_t linkChannel1;
+uint8_t linkChannel2;
+bool source_inc : 1;
+bool destination_inc : 1;
+bool auto_channel : 1;
+uint8_t linkMode : 2;
 
-bool auto_channel;
 
 //IRQ handlers
 FunctionPointer _callback;
@@ -212,6 +202,7 @@ void irq_handler(void);
 
 static SimpleDMA *irq_owner[DMA_CHANNELS];
 
+static void class_init();
 static void irq_handler0( void ); 
 
 #if DMA_IRQS > 1

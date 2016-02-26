@@ -28,6 +28,12 @@
 // with the actual joystick report format sent in update().
 const int reportLen = 14;
 
+// Maximum report sizes
+const int MAX_REPORT_JS_TX = reportLen;
+const int MAX_REPORT_JS_RX = 8;
+const int MAX_REPORT_KB_TX = 8;
+const int MAX_REPORT_KB_RX = 4;
+
 bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status) 
 {
    _x = x;
@@ -116,6 +122,51 @@ bool USBJoystick::updateExposure(int &idx, int npix, const uint8_t *pix)
     // send the report
     return sendTO(&report, 100);
 }
+
+bool USBJoystick::updateExposureExt(
+    int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime)
+{
+    HID_REPORT report;
+    
+    // Set the special status bits to indicate it's an extended
+    // exposure report.
+    put(0, 0x87FF);
+    
+    // start at the second byte
+    int ofs = 2;
+    
+    // write the report subtype (0) to byte 2
+    report.data[ofs++] = 0;
+    
+    // write the shadow edge position to bytes 3-4
+    put(ofs, uint16_t(edgePos));
+    ofs += 2;
+    
+    // write the flags to byte 5:
+    //   0x01 -> standard orientation detected (dir == 1)
+    //   0x02 -> reverse orientation detected (dir == -1)
+    uint8_t flags = 0;
+    if (dir == 1) flags |= 0x01;
+    if (dir == -1) flags |= 0x02;
+    report.data[ofs++] = flags;
+    
+    // write the average scan time in 10us intervals to bytes 6-8
+    uint32_t t = uint32_t(avgScanTime / 10);
+    report.data[ofs++] = t & 0xff;
+    report.data[ofs++] = (t >> 8) & 0xff;
+    report.data[ofs++] = (t >> 16) & 0xff;
+    
+    // write the processing time to bytes 9-11
+    t = uint32_t(processingTime / 10);
+    report.data[ofs++] = t & 0xff;
+    report.data[ofs++] = (t >> 8) & 0xff;
+    report.data[ofs++] = (t >> 16) & 0xff;
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
 
 bool USBJoystick::reportID()
 {
@@ -217,7 +268,7 @@ void USBJoystick::_init() {
 //
 // USB HID Report Descriptor - Joystick
 //
-static uint8_t reportDescriptorJS[] = 
+static const uint8_t reportDescriptorJS[] = 
 {         
     USAGE_PAGE(1), 0x01,            // Generic desktop
     USAGE(1), 0x04,                 // Joystick
@@ -266,7 +317,7 @@ static uint8_t reportDescriptorJS[] =
 // 
 // USB HID Report Descriptor - Keyboard/Media Control
 //
-static uint8_t reportDescriptorKB[] = 
+static const uint8_t reportDescriptorKB[] = 
 {
     USAGE_PAGE(1), 0x01,                    // Generic Desktop
     USAGE(1), 0x06,                         // Keyboard
@@ -332,7 +383,7 @@ static uint8_t reportDescriptorKB[] =
 // USB HID Report Descriptor - LedWiz only, with no joystick or keyboard
 // input reporting
 //
-static uint8_t reportDescriptorLW[] = 
+static const uint8_t reportDescriptorLW[] = 
 {         
     USAGE_PAGE(1), 0x01,            // Generic desktop
     USAGE(1), 0x00,                 // Undefined
@@ -358,41 +409,47 @@ static uint8_t reportDescriptorLW[] =
 };
 
 
-uint8_t * USBJoystick::reportDescN(int idx) 
+const uint8_t *USBJoystick::reportDescN(int idx) 
 {    
-    if (enableJoystick)
+    switch (idx)
     {
-        // Joystick reports are enabled.  Use the full joystick report
-        // format, or full keyboard report format, depending on which
-        // interface is being requested.
-        switch (idx)
+    case 0:
+        // Interface 0 is either the joystick interface or the plain
+        // LedWiz emulator interface, depending on whether the joystick
+        // feature is enabled.
+        if (enableJoystick)
         {
-        case 0:
-            // joystick interface
             reportLength = sizeof(reportDescriptorJS);
             return reportDescriptorJS;
-            
-        case 1:
-            // keyboard interface
+        }
+        else
+        {
+            reportLength = sizeof(reportDescriptorLW);
+            return reportDescriptorLW;
+        }
+        
+    case 1:
+        // Interface 1 is the keyboard, only if it's enabled
+        if (useKB)
+        {
             reportLength = sizeof(reportDescriptorKB);
             return reportDescriptorKB;
-            
-        default:
-            // unknown interface
+        }
+        else
+        {
             reportLength = 0;
             return 0;
         }
-    }
-    else
-    {
-        // Joystick reports are disabled.  Use the LedWiz-only format.
-        reportLength = sizeof(reportDescriptorLW);
-        return reportDescriptorLW;
+        
+    default:
+        // Unknown interface ID
+        reportLength = 0;
+        return 0;
     }
 } 
  
- uint8_t * USBJoystick::stringImanufacturerDesc() {
-    static uint8_t stringImanufacturerDescriptor[] = {
+ const uint8_t *USBJoystick::stringImanufacturerDesc() {
+    static const uint8_t stringImanufacturerDescriptor[] = {
         0x10,                                            /*bLength*/
         STRING_DESCRIPTOR,                               /*bDescriptorType 0x03*/
         'm',0,'j',0,'r',0,'c',0,'o',0,'r',0,'p',0        /*bString iManufacturer - mjrcorp*/
@@ -400,8 +457,8 @@ uint8_t * USBJoystick::reportDescN(int idx)
     return stringImanufacturerDescriptor;
 }
 
-uint8_t * USBJoystick::stringIserialDesc() {
-    static uint8_t stringIserialDescriptor[] = {
+const uint8_t *USBJoystick::stringIserialDesc() {
+    static const uint8_t stringIserialDescriptor[] = {
         0x16,                                                           /*bLength*/
         STRING_DESCRIPTOR,                                              /*bDescriptorType 0x03*/
         '0',0,'1',0,'2',0,'3',0,'4',0,'5',0,'6',0,'7',0,'8',0,'9',0,    /*bString iSerial - 0123456789*/
@@ -409,8 +466,8 @@ uint8_t * USBJoystick::stringIserialDesc() {
     return stringIserialDescriptor;
 }
 
-uint8_t * USBJoystick::stringIproductDesc() {
-    static uint8_t stringIproductDescriptor[] = {
+const uint8_t *USBJoystick::stringIproductDesc() {
+    static const uint8_t stringIproductDescriptor[] = {
         0x28,                                                       /*bLength*/
         STRING_DESCRIPTOR,                                          /*bDescriptorType 0x03*/
         'P',0,'i',0,'n',0,'s',0,'c',0,'a',0,'p',0,'e',0,
@@ -422,17 +479,18 @@ uint8_t * USBJoystick::stringIproductDesc() {
 
 #define DEFAULT_CONFIGURATION (1)
 
-uint8_t * USBJoystick::configurationDesc() 
+const uint8_t *USBJoystick::configurationDesc() 
 {
     int rptlen0 = reportDescLengthN(0);
     int rptlen1 = reportDescLengthN(1);
     if (useKB)
     {
-        int cfglenKB = ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
-                        + (2 * INTERFACE_DESCRIPTOR_LENGTH)
-                        + (2 * HID_DESCRIPTOR_LENGTH)
-                        + (4 * ENDPOINT_DESCRIPTOR_LENGTH));
-        static uint8_t configurationDescriptorWithKB[] = 
+        const int cfglenKB = 
+            ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
+             + (2 * INTERFACE_DESCRIPTOR_LENGTH)
+             + (2 * HID_DESCRIPTOR_LENGTH)
+             + (4 * ENDPOINT_DESCRIPTOR_LENGTH));
+        static const uint8_t configurationDescriptorWithKB[] = 
         {
             CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
             CONFIGURATION_DESCRIPTOR,       // bDescriptorType
@@ -525,11 +583,12 @@ uint8_t * USBJoystick::configurationDesc()
     else
     {
         // No keyboard - joystick interface only
-        int cfglenNoKB = ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
-                          + (1 * INTERFACE_DESCRIPTOR_LENGTH)
-                          + (1 * HID_DESCRIPTOR_LENGTH)
-                          + (2 * ENDPOINT_DESCRIPTOR_LENGTH));
-        static uint8_t configurationDescriptorNoKB[] = 
+        const int cfglenNoKB = 
+            ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
+              + (1 * INTERFACE_DESCRIPTOR_LENGTH)
+              + (1 * HID_DESCRIPTOR_LENGTH)
+              + (2 * ENDPOINT_DESCRIPTOR_LENGTH));
+        static const uint8_t configurationDescriptorNoKB[] = 
         {
             CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
             CONFIGURATION_DESCRIPTOR,       // bDescriptorType
@@ -592,16 +651,16 @@ bool USBJoystick::USBCallback_setConfiguration(uint8_t configuration)
         
     // Configure endpoint 1 - we use this in all cases, for either
     // the combined joystick/ledwiz interface or just the ledwiz interface
-    addEndpoint(EPINT_IN, MAX_PACKET_SIZE_EPINT);
-    addEndpoint(EPINT_OUT, MAX_PACKET_SIZE_EPINT);
-    readStart(EPINT_OUT, MAX_HID_REPORT_SIZE);
+    addEndpoint(EPINT_IN, MAX_REPORT_JS_TX + 1);
+    addEndpoint(EPINT_OUT, MAX_REPORT_JS_RX + 1);
+    readStart(EPINT_OUT, MAX_REPORT_JS_TX + 1);
     
     // if the keyboard is enabled, configure endpoint 4 for the kb interface
     if (useKB)
     {
-        addEndpoint(EP4IN, MAX_PACKET_SIZE_EPINT);
-        addEndpoint(EP4OUT, MAX_PACKET_SIZE_EPINT);
-        readStart(EP4OUT, MAX_PACKET_SIZE_EPINT);
+        addEndpoint(EP4IN, MAX_REPORT_KB_TX + 1);
+        addEndpoint(EP4OUT, MAX_REPORT_KB_RX + 1);
+        readStart(EP4OUT, MAX_REPORT_KB_TX + 1);
     }
 
     // success
@@ -626,10 +685,6 @@ bool USBJoystick::EP1_OUT_callback()
     } buf;
     uint32_t bytesRead = 0;
     USBDevice::readEP(EP1OUT, buf.buf, &bytesRead, MAX_HID_REPORT_SIZE);
-    
-//    printf("joy.read len=%d [%2x %2x %2x %2x %2x %2x %2x %2x], msg=[%2x %2x %2x %2x %2x %2x %2x %2x]\r\n", bytesRead, 
-//        buf.buf[0], buf.buf[1], buf.buf[2], buf.buf[3], buf.buf[4], buf.buf[5], buf.buf[6], buf.buf[7],
-//        buf.msg.data[0], buf.msg.data[1], buf.msg.data[2], buf.msg.data[3], buf.msg.data[4], buf.msg.data[5], buf.msg.data[6], buf.msg.data[7]);
     
     // if it's the right length, queue it to our circular buffer
     if (bytesRead == 8)

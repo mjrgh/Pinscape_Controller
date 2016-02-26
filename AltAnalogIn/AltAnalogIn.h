@@ -1,22 +1,25 @@
 #ifndef ALTANALOGIN_H
 #define ALTANALOGIN_H
 
-// This is a slightly modified version of Scissors's FastAnalogIn.
-// 
-// This version is optimized for reading from multiple inputs.  The KL25Z has 
-// multiple ADC channels, but the multiplexer hardware only allows sampling one
-// at a time.  The entire sampling process from start to finish is serialized 
-// in the multiplexer, so we unfortunately can't overlap the sampling times
-// for multiple channels - we have to wait in sequence for the sampling period
-// on each channel, one after the other.
+// This is a modified version of Scissors's FastAnalogIn, customized 
+// for the needs of the Pinscape TSL1410R reader.  We use 8-bit samples
+// to save memory (since we need to collect 1280 or 1536 samples,
+// depending on the sensor subtype), and we use the fastest sampling
+// parameters (determined through testing).  For maximum throughput,
+// we put the ADC in continuous mode and read samples with a DMA
+// channel.
 //
-// The base version of FastAnalogIn uses the hardware's continuous conversion
-// feature to speed up sampling.  When sampling multiple inputs, that feature
-// becomes useless, and in fact the way FastAnalogIn uses it creates additional
-// overhead for multiple input sampling.  But FastAnalogIn still has some speed
-// advantages over the base mbed AnalogIn implementation, since it sets all of
-// the other conversion settings to the fastest options.  This version keeps the
-// other speed-ups from FastAnalogIn, but dispenses with the continuous sampling.
+// This modified version only works for the KL25Z.
+//
+// Important!  This class can't coexist in the same program with the 
+// standard mbed library version of AnalogIn, or with the original 
+// version of FastAnalogIn.  All of these classes program the ADC
+// configuration registers with their own custom settings.  These
+// registers are a global resource, and the different classes all
+// assume they have exclusive control, so they don't try to coordinate
+// with anyone else programming the registers.  A program that uses
+// AltAnalogIn in one place will have to use AltAnalogIn exclusively
+// throughout the program for all ADC interaction.
 
 /*
  * Includes
@@ -51,41 +54,7 @@
     #error "Target not supported"
 #endif
 
- /** A class similar to AnalogIn, but much faster.  This class is optimized 
- * for taking a string of readings from a single input.
- *
- * This is a heavily modified version of the popular FastAnalogIn class.
- * Like FastAnalogIn, this class uses the continuous conversion mode to
- * achieve faster read times.  It adds interrupt callbacks on each
- * conversion, and DMA transfer of the input data to memory (or to another
- * peripheral) using the SimpleDMA class.  DMA makes a huge difference -
- * it speeds up the sampling time by about 3x and gets us fairly close to
- * the speeds claimed by the manufacturer.  Reading through the MCU code
- * seems to add at least a few microseconds per sample, which is significant
- * when trying to get close to the theoretical speed limits for the ADC
- * hardware, which are around 1.5us.
- *
- * This class can be used with or without DMA.  By default, you take samples
- * directly.  Call start() to initiate sampling, and call one of the
- * read routines (read() or read_u16()) to wait for the sample to complete
- * and fetch the value.  In this mode, samples are taken individually.
- * The start() and read routines are separated so that the caller can
- * perform other work, if desired, while the ADC hardware takes the sample.
- *
- * To use with DMA, set up a SimpleDMA object, and call initDMA() to tie
- * it to the analog input.  Call startDMA() to initiate a transfer.  We'll
- * start reading the analog input in continuous mode; each time a sample
- * completes, it will trigger a DMA transfer to the destination.  startDMA()
- * returns immediately, so the caller can continue with other tasks while
- * the samples are taken.
- *
- * IMPORTANT!  This class does not play nicely with regular AnalogIn objects,
- * nor with the original FastAnalogIn, because all of these classes set global
- * configuration registers in the ADC hardware at setup time and then will 
- * assume that no one else is messing with them.  Each library requires
- * exclusive access to and control over the hardware, so they can't be mixed
- * in the same program.
- */
+
 class AltAnalogIn {
 
 public:
@@ -170,7 +139,7 @@ public:
         wait();
     
         // return the result register value
-        return (uint16_t)ADC0->R[0] << 4;  // convert 12-bit to 16-bit, padding with zeroes
+        return (uint16_t)ADC0->R[0] << 8;  // convert 16-bit to 16-bit, padding with zeroes
     }
     
     /** Returns the scaled value
@@ -191,7 +160,6 @@ public:
 private:
     uint32_t id;                // unique ID
     SimpleDMA *dma;             // DMA controller, if used
-    FunctionPointer _callback;  // interrupt callback
     char ADCnumber;             // ADC number of our input pin
     char ADCmux;                // multiplexer for our input pin (0=A, 1=B)
     uint32_t sc1;               // SC1 register settings for this input

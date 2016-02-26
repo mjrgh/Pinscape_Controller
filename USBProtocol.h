@@ -69,12 +69,31 @@
 // looks like this:
 //
 //    bytes 0:1 = 11-bit index, with high 5 bits set to 10000.  For 
-//                example, 0x04 0x80 indicates index 4.  This is the 
-//                starting pixel number in the report.  The first report 
-//                will be 0x00 0x80 to indicate pixel #0.  
+//                example, 0x8004 (encoded little endian as 0x04 0x80) 
+//                indicates index 4.  This is the starting pixel number 
+//                in the report.  The first report will be 0x00 0x80 to 
+//                indicate pixel #0.  
 //    bytes 2   = 8-bit unsigned int brightness level of pixel at index
 //    bytes 3   = brightness of pixel at index+1
 //    etc for the rest of the packet
+//
+// The pixel dump also sends a special final report, after all of the
+// pixel messages, with the "index" field set to 0x7FF (11 bits of 1's).  
+// It packs special fields instead of pixels:
+//
+//    bytes 0:1 = 0x87FF (pixel report flags + index 0x7FF)
+//    byte 2    = 0x00 -> special report subtype 0 (this is to leave
+//                room for adding more information via additional
+//                subtypes in the future)
+//    bytes 3:4 = pixel position of detected shadow edge in this image,
+//                or 0xFFFF if no edge was found in this image.  For
+//                raw pixel reports, no edge will be detected because
+//                we don't look for one.
+//    byte 5    = flags: 
+//                   0x01 = normal orientation detected
+//                   0x02 = reversed orientation detected
+//    bytes 6:7:8 = average time for a sensor scan, in 10us units
+//    byte 9:10:11 = time for processing this image, in 10us units
 //
 // 2B. Configuration query.
 // This is requested by sending custom protocol message 65 4 (see below).
@@ -231,6 +250,16 @@
 //             pixel dump reports, defined in USBJoystick.cpp; the device automatically
 //             resumes normal joystick messages after sending all pixels.  If the 
 //             plunger sensor isn't an image sensor type, no pixel messages are sent.
+//             Additional parameters:
+//
+//               third byte = bit flags:
+//                  0x01 = low res mode (for faster updates)
+//
+//               fourth byte = visualization mode:
+//                  0 = raw pixels
+//                  1 = pixels with noise reduction applied
+//                  2 = high contrast
+//                  3 = edge visualization (only detected edges are displayed)
 //
 //        4 -> Query configuration.  The device sends a special configuration report,
 //             (see above; see also USBJoystick.cpp), then resumes sending normal 

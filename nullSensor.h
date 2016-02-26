@@ -14,7 +14,7 @@ public:
     PlungerSensorNull() { }
     
     virtual void init() { }
-    virtual bool read(uint16_t &pos) { return false; }
+    virtual bool read(PlungerReading &r) { return false; }
 };
 
 #endif /* NULLSENSOR_H */

@@ -3,28 +3,52 @@
 // This module defines the abstract interface to the plunger sensors.
 // We support several different physical sensor types, so we need a
 // common interface for use in the main code.
-//
 
 #ifndef PLUNGER_H
 #define PLUNGER_H
 
+// Plunger reading with timestamp
+struct PlungerReading
+{
+    // Raw sensor reading, normalied to 0x0000..0xFFFF range
+    int pos;
+    
+    // Rimestamp of reading, in microseconds, relative to an arbitrary
+    // zero point.  Note that a 32-bit int can only represent about 71.5
+    // minutes worth of microseconds, so this value is only meaningful
+    // to compute a delta from other recent readings.  As long as two
+    // readings are within 71.5 minutes of each other, the time difference
+    // calculated from the timestamps using 32-bit math will be correct
+    // *even if a rollover occurs* between the two readings, since the
+    // calculation is done mod 2^32-1.
+    uint32_t t;
+};
+
 class PlungerSensor
 {
 public:
-
     PlungerSensor() { }
-    virtual ~PlungerSensor() { }
+
+    // ---------- Abstract sensor interface ----------
     
     // Initialize the physical sensor device.  This is called at startup
     // to set up the device for first use.
     virtual void init() = 0;
 
-    // Read the sensor position.  Sets 'pos' to the current plunger
-    // position registered on the sensor, normalized to a 16-bit unsigned
-    // integer (0x0000 to 0xFFFF).  0x0000 represents the maximum forward
-    // position, and 0xFFFF represents the maximum retracted position.
-    // The result returned by this routing isn't calibrated; it simply
-    // reflects the raw sensor reading.
+    // Read the sensor position, if possible.  Returns true on success,
+    // false if it wasn't possible to take a reading.  On success, fills
+    // in 'r' with the current reading.
+    //
+    // r.pos is set to the current raw sensor reading, normalized to the
+    // range 0x0000..0xFFFF.  r.t is set to the timestamp of the reading,
+    // in 
+    //
+    // Also sets 't' to the microsecond timestamp of the reading, if a
+    // reading was successfully taken.  This timestamp is relative to an
+    // arbitrary zero point and rolls over when it overflows its 32-bit
+    // container (every 71.58 minutes).  Callers can use this to calculate
+    // the interval between two readings (e.g., to figure the average 
+    // velocity of the plunger between readings).
     //
     // Timing requirements:  for best results, readings should be taken
     // in well under 5ms.  There are two factors that go into this limit.
@@ -46,22 +70,8 @@ public:
     //
     // Returns true on success, false on failure.  Returning false means
     // that it wasn't possible to take a valid reading.
-    virtual bool read(uint16_t &pos) = 0;
+    virtual bool read(PlungerReading &r) = 0;
     
-    // $$$ DEPRECATED - left in during transition to new design
-    bool lowResScan(float &pos) 
-    {
-        uint16_t fpos;
-        if (read(fpos)) 
-        {
-            pos = fpos / 65535.0;
-            return true;
-        }
-        else 
-            return false;
-    }
-    bool highResScan(float &pos) { return lowResScan(pos); }
-
     // Send an exposure report to the host, via the joystick interface.  This
     // is for image sensors, and can be omitted by other sensor types.  For
     // image sensors, this takes one exposure and sends all pixels to the host
@@ -70,16 +80,23 @@ public:
     // helpful during installation to adjust the sensor positioning and light
     // source.
     //
-    // Mode bits:
-    //   0x01  -> send processed pixels (default is raw pixels)
-    //   0x02  -> low res scan (default is high res scan)
+    // Flag bits:
+    //   0x01  -> low res scan (default is high res scan)
+    //
+    // Visualization modes:
+    //   0  -> raw pixels
+    //   1  -> processed pixels (noise reduction, etc)
+    //   2  -> exaggerated contrast mode
+    //   3  -> edge visualization
     //
     // If processed mode is selected, the sensor should apply any pixel
     // processing it normally does when taking a plunger position reading,
     // such as exposure correction, noise reduction, etc.  In raw mode, we
     // simply send the pixels as read from the sensor.  Both modes are useful
     // in setting up the physical sensor.
-    virtual void sendExposureReport(class USBJoystick &js, uint8_t mode) { }
+    virtual void sendExposureReport(class USBJoystick &js, uint8_t flags, uint8_t visMode) { }
+        
+protected:
 };
 
 #endif /* PLUNGER_H */

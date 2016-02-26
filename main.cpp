@@ -10,7 +10,7 @@
 * substantial portions of the Software.
 *
 * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
-* BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+* BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILIT Y, FITNESS FOR A PARTICULAR PURPOSE AND
 * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
@@ -20,12 +20,12 @@
 // The Pinscape Controller
 // A comprehensive input/output controller for virtual pinball machines
 //
-// This project implements an I/O controller for virtual pinball cabinets.  Its
-// function is to connect Windows pinball software, such as Visual Pinball, with
-// physical devices in the cabinet: buttons, sensors, and feedback devices that
-// create visual or mechanical effects during play.  
+// This project implements an I/O controller for virtual pinball cabinets.  The
+// controller's function is to connect Visual Pinball (and other Windows pinball 
+// emulators) with physical devices in the cabinet:  buttons, sensors, and 
+// feedback devices that create visual or mechanical effects during play.  
 //
-// The software can perform several different functions, which can be used 
+// The controller can perform several different functions, which can be used 
 // individually or in any combination:
 //
 //  - Nudge sensing.  This uses the KL25Z's on-board accelerometer to sense the
@@ -153,19 +153,19 @@
 // STATUS LIGHTS:  The on-board LED on the KL25Z flashes to indicate the current 
 // device status.  The flash patterns are:
 //
-//    two short red flashes = the device is powered but hasn't successfully
-//        connected to the host via USB (either it's not physically connected
-//        to the USB port, or there was a problem with the software handshake
-//        with the USB device driver on the computer)
+//    short yellow flash = waiting to connect
 //
-//    short red flash = the host computer is in sleep/suspend mode
+//    short red flash = the connection is suspended (the host is in sleep
+//        or suspend mode, the USB cable is unplugged after a connection
+//        has been established)
+//
+//    two short red flashes = connection lost (the device should immediately
+//        go back to short-yellow "waiting to reconnect" mode when a connection
+//        is lost, so this display shouldn't normally appear)
 //
 //    long red/yellow = USB connection problem.  The device still has a USB
-//        connection to the host, but data transmissions are failing.  This
-//        condition shouldn't ever occur; if it does, it probably indicates
-//        a bug in the device's USB software.  This display is provided to
-//        flag any occurrences for investigation.  You'll probably need to
-//        manually reset the device if this occurs.
+//        connection to the host (or so it appears to the device), but data 
+//        transmissions are failing.
 //
 //    long yellow/green = everything's working, but the plunger hasn't
 //        been calibrated.  Follow the calibration procedure described in
@@ -175,13 +175,27 @@
 //    alternating blue/green = everything's working normally, and plunger
 //        calibration has been completed (or there's no plunger attached)
 //
+//    fast red/purple = out of memory.  The controller halts and displays
+//        this diagnostic code until you manually reset it.  If this happens,
+//        it's probably because the configuration is too complex, in which
+//        case the same error will occur after the reset.  If it's stuck
+//        in this cycle, you'll have to restore the default configuration
+//        by re-installing the controller software (the Pinscape .bin file).
 //
-// USB PROTOCOL:  please refer to USBProtocol.h for details on the USB
-// message protocol.
+//
+// USB PROTOCOL:  Most of our USB messaging is through standard USB HID
+// classes (joystick, keyboard).  We also accept control messages on our
+// primary HID interface "OUT endpoint" using a custom protocol that's
+// not defined in any USB standards (we do have to provide a USB HID
+// Report Descriptor for it, but this just describes the protocol as
+// opaque vendor-defined bytes).  The control protocol incorporates the 
+// LedWiz protocol as a subset, and adds our own private extensions.
+// For full details, see USBProtocol.h.
 
 
 #include "mbed.h"
 #include "math.h"
+#include "pinscape.h"
 #include "USBJoystick.h"
 #include "MMA8451Q.h"
 #include "tsl1410r.h"
@@ -194,10 +208,37 @@
 #include "ccdSensor.h"
 #include "potSensor.h"
 #include "nullSensor.h"
+#include "TinyDigitalIn.h"
 
 #define DECL_EXTERNS
 #include "config.h"
 
+// --------------------------------------------------------------------------
+//
+// Custom memory allocator.  We use our own version of malloc() to provide
+// diagnostics if we run out of heap.
+//
+void *xmalloc(size_t siz)
+{
+    // allocate through the normal library malloc; if that succeeds,
+    // simply return the pointer we got from malloc
+    void *ptr = malloc(siz);
+    if (ptr != 0)
+        return ptr;
+
+    // failed - display diagnostics
+    for (;;)
+    {
+        diagLED(1, 0, 0);
+        wait(.2);
+        diagLED(1, 0, 1);
+        wait(.2);
+    }
+}
+
+// overload operator new to call our custom malloc
+void *operator new(size_t siz) { return xmalloc(siz); }
+void *operator new[](size_t siz) { return xmalloc(siz); }
 
 // ---------------------------------------------------------------------------
 //
@@ -208,9 +249,6 @@ void toggleNightMode();
 
 // ---------------------------------------------------------------------------
 // utilities
-
-// number of elements in an array
-#define countof(x) (sizeof(x)/sizeof((x)[0]))
 
 // floating point square of a number
 inline float square(float x) { return x*x; }
@@ -762,13 +800,19 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
     switch (typ)
     {
     case PortTypeGPIOPWM:
-        // PWM GPIO port
-        lwp = new LwPwmOut(wirePinName(pin), activeLow ? 255 : 0);
+        // PWM GPIO port - assign if we have a valid pin
+        if (pin != 0)
+            lwp = new LwPwmOut(wirePinName(pin), activeLow ? 255 : 0);
+        else
+            lwp = new LwVirtualOut();
         break;
     
     case PortTypeGPIODig:
         // Digital GPIO port
-        lwp = new LwDigOut(wirePinName(pin), activeLow ? 255 : 0);
+        if (pin != 0)
+            lwp = new LwDigOut(wirePinName(pin), activeLow ? 255 : 0);
+        else
+            lwp = new LwVirtualOut();
         break;
     
     case PortTypeTLC5940:
@@ -1125,17 +1169,17 @@ struct ButtonState
     }
     
     // DigitalIn for the button
-    DigitalIn *di;
+    TinyDigitalIn *di;
     
     // current PHYSICAL on/off state, after debouncing
-    uint8_t on;
+    uint8_t on : 1;
     
     // current LOGICAL on/off state as reported to the host.
-    uint8_t pressed;
+    uint8_t pressed : 1;
 
     // previous logical on/off state, when keys were last processed for USB 
     // reports and local effects
-    uint8_t prev;
+    uint8_t prev : 1;
     
     // Debounce history.  On each scan, we shift in a 1 bit to the lsb if
     // the physical key is reporting ON, and shift in a 0 bit if the physical
@@ -1188,7 +1232,7 @@ struct ButtonState
     uint8_t pulseState;
     float pulseTime;
     
-} buttonState[MAX_BUTTONS];
+} __attribute__((packed)) buttonState[MAX_BUTTONS];
 
 
 // Button data
@@ -1200,7 +1244,7 @@ uint32_t jsButtons = 0;
 struct
 {
     bool changed;       // flag: changed since last report sent
-    int nkeys;          // number of active keys in the list
+    uint8_t nkeys;      // number of active keys in the list
     uint8_t data[8];    // key state, in USB report format: byte 0 is the modifier key mask,
                         // byte 1 is reserved, and bytes 2-7 are the currently pressed key codes
 } kbState = { false, 0, { 0, 0, 0, 0, 0, 0, 0, 0 } };
@@ -1266,7 +1310,7 @@ void initButtons(Config &cfg, bool &kbKeys)
         if (pin != NC)
         {
             // set up the GPIO input pin for this button
-            bs->di = new DigitalIn(pin);
+            bs->di = new TinyDigitalIn(pin);
             
             // if it's a pulse mode button, set the initial pulse state to Off
             if (cfg.button[i].flags & BtnFlagPulse)
@@ -1641,7 +1685,7 @@ public:
          p->addAvg(ax, ay);
 
          // check for auto-centering every so often
-         if (tCenter_.read_ms() > 1000)
+         if (tCenter_.read_us() > 1000000)
          {
              // add the latest raw sample to the history list
              AccHist *prv = p;
@@ -1694,7 +1738,6 @@ public:
              // of making the system more fault-tolerant.
              if (tInt_.read() > 1.0f)
              {
-                 printf("unwedging the accelerometer\r\n");
                 float x, y, z;
                 mma_.getAccXYZ(x, y, z);
              }
@@ -2265,6 +2308,786 @@ void createPlunger()
     }
 }
 
+// Plunger reader
+class PlungerReader
+{
+public:
+    PlungerReader()
+    {
+        // not in a firing event yet
+        firing = 0;
+
+        // no history yet
+        histIdx = 0;
+        
+        // not in calibration mode
+        cal = false;
+    }
+
+    // Collect a reading from the plunger sensor.  The main loop calls
+    // this frequently to read the current raw position data from the
+    // sensor.  We analyze the raw data to produce the calibrated
+    // position that we report to the PC via the joystick interface.
+    void read()
+    {
+        // Read a sample from the sensor
+        PlungerReading r;
+        if (plungerSensor->read(r))
+        {
+            // if in calibration mode, apply it to the calibration
+            if (cal)
+            {
+                // if it's outside of the current calibration bounds,
+                // expand the bounds
+                if (r.pos < cfg.plunger.cal.min)
+                    cfg.plunger.cal.min = r.pos;
+                if (r.pos < cfg.plunger.cal.zero)
+                    cfg.plunger.cal.zero = r.pos;
+                if (r.pos > cfg.plunger.cal.max)
+                    cfg.plunger.cal.max = r.pos;
+                    
+                // As long as we're in calibration mode, return the raw
+                // sensor position as the joystick value, adjusted to the
+                // JOYMAX scale.
+                z = int16_t((long(r.pos) * JOYMAX)/65535);
+                return;
+            }
+            
+            // If the new reading is within 2ms of the previous reading,
+            // ignore it.  We require a minimum time between samples to
+            // ensure that we have a usable amount of precision in the
+            // denominator (the time interval) for calculating the plunger
+            // velocity.  (The CCD sensor can't take readings faster than
+            // this anyway, but other sensor types, such as potentiometers,
+            // can, so we have to throttle the rate artifically in case
+            // we're using a fast sensor like that.)
+            if (uint32_t(r.t - prv.t) < 2000UL)
+                return;
+                
+            // bounds-check the calibration data
+            checkCalBounds(r.pos);
+
+            // calibrate and rescale the value
+            int pos = int(
+                (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
+                / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
+
+            // Calculate the velocity from the previous reading to here,
+            // in joystick distance units per microsecond.
+            //
+            // For reference, the physical plunger velocity ranges up
+            // to about 100,000 joystick distance units/sec.  This is 
+            // based on empirical measurements.  The typical time for 
+            // a real plunger to travel the full distance when released 
+            // from full retraction is about 85ms, so the average velocity 
+            // covering this distance is about 56,000 units/sec.  The 
+            // peak is probably about twice that.  In real-world units, 
+            // this translates to an average speed of about .75 m/s and 
+            // a peak of about 1.5 m/s.
+            //
+            // Note that we actually calculate the value here in units
+            // per *microsecond* - the discussion above is in terms of
+            // units/sec because that's more on a human scale.  Our
+            // choice of internal units here really isn't important,
+            // since we only use the velocity for comparison purposes,
+            // to detect acceleration trends.  We therefore save ourselves
+            // a little CPU time by using the natural units of our inputs.
+            float v = float(pos - prv.pos)/float(r.t - prv.t);
+                
+            // presume we'll just report the latest reading
+            z = pos;
+            vz = v;
+            
+            // Check firing events
+            switch (firing)
+            {
+            case 0:
+                // Default state - not in a firing event.  
+                
+                // Check for a recent high water mark.  Keep the high point
+                // within a small window
+                
+                // If we have forward motion from a position that's retracted 
+                // beyond a threshold, enter phase 1.
+                if (v < 0 && pos > JOYMAX/6)
+                {
+                    // enter phase 1
+                    firingMode(1);
+                    
+                    // we don't have a freeze position yet, but note the start time
+                    f1.pos = 0;
+                    f1.t = r.t;
+                    
+                    // Figure the fake "bounce" position in case we complete the
+                    // firing event.  This is the barrel spring compression proportional
+                    // to the starting position.  The barrel spring is about 1/6 the
+                    // length of the main spring, so figure it compresses by 1/6 the
+                    // distance.
+                    f2.pos = -pos/6;
+                }
+                break;
+                
+            case 1:
+                // Phase 1 - acceleration.  If we cross the zero point, trigger
+                // the firing event.  Otherwise, continue monitoring as long as we
+                // see acceleration in the forward direction.
+                if (pos <= 0)
+                {
+                    // switch to the synthetic firing mode
+                    firingMode(2);
+                    
+                    // note the start time for the firing phase
+                    f2.t = r.t;
+                }
+                else if (v < vprv)
+                {
+                    // We're still accelerating, and we haven't crossed the zero
+                    // point yet - stay in phase 1.  (Note that forward motion is
+                    // negative velocity, so accelerating means that the new 
+                    // velocity is more negative than the previous one, which
+                    // is to say numerically less than - that's why the test
+                    // for acceleration is the seemingly backwards 'v < vprv'.)
+                }
+                else if (uint32_t(r.t - prv.t) < 5000UL)
+                {
+                    // We're not accelerating relative to the previous reading,
+                    // but we're within 5ms of it.  Throw out this reading to
+                    // collect more data.
+                    pos = prv.pos;
+                    r.t = prv.t;
+                    v = vprv;
+                }
+                else
+                {
+                    // We're not accelerating.  Cancel the firing event.
+                    firingMode(0);
+                }
+                
+                // If we've been in phase 1 for at least 25ms, we're probably
+                // really doing a release.  Jump back to the recent local
+                // maximum where the release *really* started.  This is always
+                // a bit before we started seeing sustained accleration, because
+                // the plunger motion for the first few milliseconds is too slow
+                // for our sensor precision to reliably detect acceleration.
+                if (firing == 1)
+                {
+                    if (f1.pos != 0)
+                    {
+                        // we have a reset point - freeze there
+                        z = f1.pos;
+                    }
+                    else if (uint32_t(r.t - f1.t) >= 25000UL)
+                    {
+                        // it's been long enough - set a reset point.
+                        f1.pos = z = histLocalMax(r.t, 50000UL);
+                    }
+                }
+                break;
+                
+            case 2:
+                // Phase 2 - start of synthetic firing event.  Report the fake
+                // bounce for 25ms.  VP polls the joystick about every 10ms, so 
+                // this should be enough time to guarantee that VP sees this
+                // report at least once.
+                if (uint32_t(r.t - f2.t) < 25000UL)
+                {
+                    // report the bounce position
+                    z = f2.pos;
+                }
+                else
+                {
+                    // it's been long enough - switch to phase 3, where we
+                    // report the park position until the real plunger comes
+                    // to rest
+                    firingMode(3);
+                    z = 0;
+                    
+                    // set the start of the "stability window" to the rest position
+                    f3s.t = r.t;
+                    f3s.pos = 0;
+                    
+                    // set the start of the "retraction window" to the actual position
+                    f3r = r;
+                }
+                break;
+                
+            case 3:
+                // Phase 3 - in synthetic firing event.  Report the park position
+                // until the plunger position stabilizes.  Left to its own devices, 
+                // the plunger will usualy bounce off the barrel spring several 
+                // times before coming to rest, so we'll see oscillating motion
+                // for a second or two.  In the simplest case, we can aimply wait
+                // for the plunger to stop moving for a short time.  However, the
+                // player might intervene by pulling the plunger back again, so
+                // watch for that motion as well.  If we're just bouncing freely,
+                // we'll see the direction change frequently.  If the player is
+                // moving the plunger manually, the direction will be constant
+                // for longer.
+                if (v >= 0)
+                {
+                    // We're moving back (or standing still).  If this has been
+                    // going on for a while, the user must have taken control.
+                    if (uint32_t(r.t - f3r.t) > 65000UL)
+                    {
+                        // user has taken control - cancel firing mode
+                        firingMode(0);
+                        break;
+                    }
+                }
+                else
+                {
+                    // forward motion - reset retraction window
+                    f3r.t = r.t;
+                }
+
+                // check if we've come to rest, or close enough
+                if (abs(r.pos - f3s.pos) < 200)
+                {
+                    // It's within an eighth inch of the last starting point. 
+                    // If it's been here for 30ms, consider it stable.
+                    if (uint32_t(r.t - f3s.t) > 30000UL)
+                    {
+                        // we're done with the firing event
+                        firingMode(0);
+                    }
+                    else
+                    {
+                        // it's close to the last position but hasn't been
+                        // here long enough; stay in firing mode and continue
+                        // to report the park position
+                        z = 0;
+                    }
+                }
+                else
+                {
+                    // It's not close enough to the last starting point, so use
+                    // this as a new starting point, and stay in firing mode.
+                    f3s = r;
+                    z = 0;
+                }
+                break;
+            }
+            
+            // save the new reading for next time
+            prv.pos = pos;
+            prv.t = r.t;
+            vprv = v;
+            
+            // add it to the circular history buffer as well
+            hist[histIdx++] = prv;
+            histIdx %= countof(hist);
+        }
+    }
+    
+    // Get the current value to report through the joystick interface
+    int16_t getPosition() const { return z; }
+    
+    // Get the current velocity (joystick distance units per microsecond)
+    float getVelocity() const { return vz; }
+    
+    // get the timestamp of the current joystick report (microseconds)
+    uint32_t getTimestamp() const { return prv.t; }
+
+    // Set calibration mode on or off
+    void calMode(bool f) 
+    {
+        // if entering calibration mode, reset the saved calibration data
+        if (f && !cal)
+            cfg.plunger.cal.begin();
+
+        // remember the new mode
+        cal = f; 
+    }
+    
+    // is a firing event in progress?
+    bool isFiring() { return firing > 3; }
+
+private:
+    // set a firing mode
+    inline void firingMode(int m) 
+    {
+        firing = m;
+    
+        // $$$
+        lwPin[3]->set(0);
+        lwPin[4]->set(0);
+        lwPin[5]->set(0);
+        switch (m)
+        {
+        case 1: lwPin[3]->set(255); break;       // red
+        case 2: lwPin[4]->set(255); break;       // green
+        case 3: lwPin[5]->set(255); break;       // blue
+        case 4: lwPin[3]->set(255); lwPin[5]->set(255); break;   // purple
+        }
+        //$$$
+    }
+    
+    // Find the most recent local maximum in the history data, up to
+    // the given time limit.
+    int histLocalMax(uint32_t tcur, uint32_t dt)
+    {
+        // start with the prior entry
+        int idx = (histIdx == 0 ? countof(hist) : histIdx) - 1;
+        int hi = hist[idx].pos;
+        
+        // scan backwards for a local maximum
+        for (int n = countof(hist) - 1 ; n > 0 ; idx = (idx == 0 ? countof(hist) : idx) - 1)
+        {
+            // if this isn't within the time window, stop
+            if (uint32_t(tcur - hist[idx].t) > dt)
+                break;
+                
+            // if this isn't above the current hith, stop
+            if (hist[idx].pos < hi)
+                break;
+                
+            // this is the new high
+            hi = hist[idx].pos;
+        }
+        
+        // return the local maximum
+        return hi;
+    }
+
+    // Adjust the calibration bounds for a new reading.  This is used
+    // while NOT in calibration mode to ensure that a reading doesn't
+    // violate the calibration limits.  If it does, we'll readjust the
+    // limits to incorporate the new value.
+    void checkCalBounds(int pos)
+    {
+        // If the value is beyond the calibration maximum, increase the
+        // calibration point.  This ensures that our joystick reading
+        // is always within the valid joystick field range.
+        if (pos > cfg.plunger.cal.max)
+            cfg.plunger.cal.max = pos;
+            
+        // make sure we don't overflow in the opposite direction
+        if (pos < cfg.plunger.cal.zero
+            && cfg.plunger.cal.zero - pos > cfg.plunger.cal.max)
+        {
+            // we need to raise 'max' by this much to keep things in range
+            int adj = cfg.plunger.cal.zero - pos - cfg.plunger.cal.max;
+            
+            // we can raise 'max' at most this much before overflowing
+            int lim = 0xffff - cfg.plunger.cal.max;
+            
+            // if we have headroom to raise 'max' by 'adj', do so, otherwise
+            // raise it as much as we can and apply the excess to lowering the
+            // zero point
+            if (adj > lim)
+            {
+                cfg.plunger.cal.zero -= adj - lim;
+                adj = lim;
+            }
+            cfg.plunger.cal.max += adj;
+        }
+            
+        // If the calibration max isn't higher than the calibration
+        // zero, we have a negative or zero scale range, which isn't
+        // physically meaningful.  Fix it by forcing the max above
+        // the zero point (or the zero point below the max, if they're
+        // both pegged at the datatype maximum).
+        if (cfg.plunger.cal.max <= cfg.plunger.cal.zero)
+        {
+            if (cfg.plunger.cal.zero != 0xFFFF)
+                cfg.plunger.cal.max = cfg.plunger.cal.zero + 1;
+            else
+                cfg.plunger.cal.zero -= 1;
+        }
+    }
+    
+    // Previous reading
+    PlungerReading prv;
+    
+    // velocity at previous reading
+    float vprv;
+    
+    // Circular buffer of recent readings.  We keep a short history
+    // of readings to analyze during firing events.  We can only identify
+    // a firing event once it's somewhat under way, so we need a little
+    // retrospective information to accurately determine after the fact
+    // exactly when it started.  We throttle our readings to no more
+    // than one every 2ms, so we have at least N*2ms of history in this
+    // array.
+    PlungerReading hist[25];
+    int histIdx;
+
+    // Firing event state.
+    //
+    // A "firing event" happens when we detect that the physical plunger
+    // is moving forward fast enough that it was probably released.  When
+    // we detect a firing event, we momentarily disconnect the joystick
+    // readings from the physical sensor, and instead feed in a series of
+    // synthesized readings that simulate an idealized release motion.
+    //
+    // The reason we create these synthetic readings is that they give us
+    // better results in VP and other PC pinball players.  The joystick
+    // interface only lets us report the instantaneous plunger position.
+    // VP only reads the position at certain intervals, so it picks up
+    // a series of snapshots of the position, which it uses to infer the
+    // plunger velocity.  But the plunger release motion is so fast that
+    // VP's sampling rate creates a classic digital "aliasing" problem.
+    //
+    // Our synthesized report structure is designed to overcome the
+    // aliasing problem by removing the intermediate position reports 
+    // and only reporting the starting and ending positions.  This
+    // allows the PC side to reliably read the extremes of the travel
+    // and work entirely in the simulation domain to simulate a plunger
+    // release of the detected distance.  This produces more realistic
+    // results than feeding VP the real data, ironically.
+    //
+    // DETECTING A RELEASE MOTION
+    //
+    // How do we tell when the plunger is being released?  The basic
+    // idea is to monitor the sensor data and look for a series of
+    // readings that match the profile of a release motion.  For an
+    // idealized, mathematical model of a plunger, a release causes
+    // the plunger to start accelerating under the spring force.
+    //
+    // The real system has a couple of complications.  First, there
+    // are some mechanical effects that make the motion less than
+    // ideal (in the sense of matching the mathematical model),
+    // like friction and wobble.  This seems to be especially
+    // significant for the first 10-20ms of the release, probably
+    // because friction is a bigger factor at slow speeds, and
+    // also because of the uneven forces as the user lets go.
+    // Second, our sensor doesn't have infinite precision, and
+    // our clock doesn't either, and these error bars compound
+    // when we combine position and time to compute velocity.
+    //
+    // To deal with these real-world complications, we have a couple
+    // of strategies.  First, we tolerate a little bit of non-uniformity
+    // in the acceleration, by waiting a little longer if we get a
+    // reading that doesn't appear to be accelerating.  We still
+    // insist on continuous acceleration, but we basically double-check
+    // a reading by extending the time window when necessary.  Second,
+    // when we detect a series of accelerating readings, we go back
+    // to prior readings from before the sustained acceleration
+    // began to find out when the motion really began.
+    //
+    // PROCESSING A RELEASE MOTION
+    //
+    // We continuously monitor the sensor data.  When we see the position
+    // moving forward, toward the zero point, we start watching for
+    // sustained acceleration .  If we see acceleration for more than a 
+    // minimum threshold time (about 20ms), we freeze the reported 
+    // position at the recent local maximum (from the recent history of 
+    // readings) and wait for the acceleration to stop or for the plunger
+    // to cross the zero position.  If it crosses the zero position
+    // while still accelerating, we initiate a firing event.  Otherwise
+    // we return to instantaneous reporting of the actual position.
+    //
+    // HOW THIS LOOKS TO THE USER
+    // 
+    // The typical timing to reach the zero point during a release
+    // is about 60-80ms.  This is essentially the longest that we can
+    // stay in phase 1, so it's the longest that the readings will be
+    // frozen while we try to decide about a firing event.  This is
+    // fast enough that it should be barely perceptible to the user.
+    // The synthetic firing event should trigger almost immediately
+    // upon releasing the plunger, from the user's perspective.
+    //
+    // The big danger with this approach is "false positives":
+    // mistaking manual motion under the user's control for a possible 
+    // firing event.  A false positive would produce a highly visible 
+    // artifact, namely the on-screen plunger freezing in place while 
+    // the player moves the real plunger.  The strategy we use makes it 
+    // almost impossible for this to happen long enough to be 
+    // perceptible.  To fool the system, you have to accelerate the 
+    // plunger very steadily - with about 5ms granularity.  It's
+    // really hard to do this, and especially unlikely that a user
+    // would do so accidentally.
+    //
+    // FIRING STATE VARIABLE
+    //
+    // The firing states are:
+    //
+    //   0 - Default state.  We report the real instantaneous plunger 
+    //       position to the joystick interface.
+    //
+    //   1 - Phase 1 - acceleration
+    //
+    //   2 - Firing event started.  We report the "bounce" position for
+    //       a minimum time.
+    //
+    //   3 - Firing event hold.  We report the rest position for a
+    //       minimum interval, or until the real plunger comes to rest
+    //       somewhere, whichever comes first.
+    //
+    int firing;
+    
+    // Position/timestamp at start of firing phase 1.  We freeze the
+    // joystick reports at this position until we decide whether or not 
+    // we're actually in a firing event.  This isn't set until we're
+    // confident that we've been in the accleration phase for long
+    // enough; pos is non-zero when this is valid.
+    PlungerReading f1;
+    
+    // Position/timestamp at start of firing phase 2.  The position is
+    // the fake "bounce" position we report during this phase, and the
+    // timestamp tells us when the phase began so that we can end it
+    // after enough time elapses.
+    PlungerReading f2;
+    
+    // Position/timestamp of start of stability window during phase 3.
+    // We use this to determine when the plunger comes to rest.  We set
+    // this at the beginning of phase 4, and then reset it when the 
+    // plunger moves too far from the last position.
+    PlungerReading f3s;
+    
+    // Position/timestamp of start of retraction window during phase 3.
+    // We use this to determine if the user is drawing the plunger back.
+    // If we see retraction motion for more than about 65ms, we assume
+    // that the user has taken over, because we should see forward
+    // motion within this timeframe if the plunger is just bouncing
+    // freely.
+    PlungerReading f3r;
+    
+    // flag: we're in calibration mode
+    bool cal;
+    
+    // next Z value to report to the joystick interface (in joystick 
+    // distance units)
+    int z;
+    
+    // velocity of this reading (joystick distance units per microsecond)
+    float vz;
+};
+
+// plunger reader singleton
+PlungerReader plungerReader;
+
+// ---------------------------------------------------------------------------
+//
+// Handle the ZB Launch Ball feature.
+//
+// The ZB Launch Ball feature, if enabled, lets the mechanical plunger
+// serve as a substitute for a physical Launch Ball button.  When a table
+// is loaded in VP, and the table has the ZB Launch Ball LedWiz port
+// turned on, we'll disable mechanical plunger reports through the
+// joystick interface and instead use the plunger only to simulate the
+// Launch Ball button.  When the mode is active, pulling back and 
+// releasing the plunger causes a brief simulated press of the Launch
+// button, and pushing the plunger forward of the rest position presses
+// the Launch button as long as the plunger is pressed forward.
+//
+// This feature has two configuration components:
+//
+//   - An LedWiz port number.  This port is a "virtual" port that doesn't
+//     have to be attached to any actual output.  DOF uses it to signal 
+//     that the current table uses a Launch button instead of a plunger.
+//     DOF simply turns the port on when such a table is loaded and turns
+//     it off at all other times.  We use it to enable and disable the
+//     plunger/launch button connection.
+//
+//   - A joystick button ID.  We simulate pressing this button when the
+//     launch feature is activated via the LedWiz port and the plunger is
+//     either pulled back and releasd, or pushed forward past the rest
+//     position.
+//
+class ZBLaunchBall
+{
+public:
+    ZBLaunchBall()
+    {
+        // start in the default state
+        lbState = 0;
+        
+        // get the button bit for the ZB Launch Ball button
+        lbButtonBit = (1 << (cfg.plunger.zbLaunchBall.btn - 1));
+        
+        // start the state transition timer
+        lbTimer.start();
+    }
+
+    // Update state.  This checks the current plunger position and
+    // the timers to see if the plunger is in a position that simulates
+    // a Launch Ball button press via the ZB Launch Ball feature.
+    // Updates the simulated button vector according to the current
+    // launch ball state.  The main loop calls this before each 
+    // joystick update to figure the new simulated button state.
+    void update(uint32_t &simButtons)
+    {
+        // Check for a simulated Launch Ball button press, if enabled
+        if (cfg.plunger.zbLaunchBall.port != 0)
+        {                
+            int znew = plungerReader.getPosition();
+            const int cockThreshold = JOYMAX/3;
+            const uint16_t pushThreshold = uint16_t(-JOYMAX/3.0 * cfg.plunger.zbLaunchBall.pushDistance/1000.0 * 65535.0);
+            int newState = lbState;
+            switch (lbState)
+            {
+            case 0:
+                // Base state.  If the plunger is pulled back by an inch
+                // or more, go to "cocked" state.  If the plunger is pushed
+                // forward by 1/4" or more, go to "pressed" state.
+                if (znew >= cockThreshold)
+                    newState = 1;
+                else if (znew <= pushThreshold)
+                    newState = 5;
+                break;
+                
+            case 1:
+                // Cocked state.  If a firing event is now in progress,
+                // go to "launch" state.  Otherwise, if the plunger is less
+                // than 1" retracted, go to "uncocked" state - the player
+                // might be slowly returning the plunger to rest so as not
+                // to trigger a launch.
+                if (plungerReader.isFiring() || znew <= 0)
+                    newState = 3;
+                else if (znew < cockThreshold)
+                    newState = 2;
+                break;
+                
+            case 2:
+                // Uncocked state.  If the plunger is more than an inch
+                // retracted, return to cocked state.  If we've been in
+                // the uncocked state for more than half a second, return
+                // to the base state.  This allows the user to return the
+                // plunger to rest without triggering a launch, by moving
+                // it at manual speed to the rest position rather than
+                // releasing it.
+                if (znew >= cockThreshold)
+                    newState = 1;
+                else if (lbTimer.read_us() > 500000)
+                    newState = 0;
+                break;
+                
+            case 3:
+                // Launch state.  If the plunger is no longer pushed
+                // forward, switch to launch rest state.
+                if (znew >= 0)
+                    newState = 4;
+                break;    
+                
+            case 4:
+                // Launch rest state.  If the plunger is pushed forward
+                // again, switch back to launch state.  If not, and we've
+                // been in this state for at least 200ms, return to the
+                // default state.
+                if (znew <= pushThreshold)
+                    newState = 3;
+                else if (lbTimer.read_us() > 200000)
+                    newState = 0;                    
+                break;
+                
+            case 5:
+                // Press-and-Hold state.  If the plunger is no longer pushed
+                // forward, AND it's been at least 50ms since we generated
+                // the simulated Launch Ball button press, return to the base 
+                // state.  The minimum time is to ensure that VP has a chance
+                // to see the button press and to avoid transient key bounce
+                // effects when the plunger position is right on the threshold.
+                if (znew > pushThreshold && lbTimer.read_us() > 50000)
+                    newState = 0;
+                break;
+            }
+            
+            // change states if desired
+            if (newState != lbState)
+            {
+                // If we're entering Launch state OR we're entering the
+                // Press-and-Hold state, AND the ZB Launch Ball LedWiz signal 
+                // is turned on, simulate a Launch Ball button press.
+                if (((newState == 3 && lbState != 4) || newState == 5)
+                    && wizOn[cfg.plunger.zbLaunchBall.port-1])
+                {
+                    lbBtnTimer.reset();
+                    lbBtnTimer.start();
+                    simButtons |= lbButtonBit;
+                }
+                
+                // if we're switching to state 0, release the button
+                if (newState == 0)
+                    simButtons &= ~(1 << (cfg.plunger.zbLaunchBall.btn - 1));
+                
+                // switch to the new state
+                lbState = newState;
+                
+                // start timing in the new state
+                lbTimer.reset();
+            }
+            
+            // If the Launch Ball button press is in effect, but the
+            // ZB Launch Ball LedWiz signal is no longer turned on, turn
+            // off the button.
+            //
+            // If we're in one of the Launch states (state #3 or #4),
+            // and the button has been on for long enough, turn it off.
+            // The Launch mode is triggered by a pull-and-release gesture.
+            // From the user's perspective, this is just a single gesture
+            // that should trigger just one momentary press on the Launch
+            // Ball button.  Physically, though, the plunger usually
+            // bounces back and forth for 500ms or so before coming to
+            // rest after this gesture.  That's what the whole state
+            // #3-#4 business is all about - we stay in this pair of
+            // states until the plunger comes to rest.  As long as we're
+            // in these states, we won't send duplicate button presses.
+            // But we also don't want the one button press to continue 
+            // the whole time, so we'll time it out now.
+            //
+            // (This could be written as one big 'if' condition, but
+            // I'm breaking it out verbosely like this to make it easier
+            // for human readers such as myself to comprehend the logic.)
+            if ((simButtons & lbButtonBit) != 0)
+            {
+                int turnOff = false;
+                
+                // turn it off if the ZB Launch Ball signal is off
+                if (!wizOn[cfg.plunger.zbLaunchBall.port-1])
+                    turnOff = true;
+                    
+                // also turn it off if we're in state 3 or 4 ("Launch"),
+                // and the button has been on long enough
+                if ((lbState == 3 || lbState == 4) && lbBtnTimer.read_us() > 250000)
+                    turnOff = true;
+                    
+                // if we decided to turn off the button, do so
+                if (turnOff)
+                {
+                    lbBtnTimer.stop();
+                    simButtons &= ~lbButtonBit;
+                }
+            }
+        }
+    }
+  
+private:
+    // Simulated Launch Ball button state.  If a "ZB Launch Ball" port is
+    // defined for our LedWiz port mapping, any time that port is turned ON,
+    // we'll simulate pushing the Launch Ball button if the player pulls 
+    // back and releases the plunger, or simply pushes on the plunger from
+    // the rest position.  This allows the plunger to be used in lieu of a
+    // physical Launch Ball button for tables that don't have plungers.
+    //
+    // States:
+    //   0 = default
+    //   1 = cocked (plunger has been pulled back about 1" from state 0)
+    //   2 = uncocked (plunger is pulled back less than 1" from state 1)
+    //   3 = launching, plunger is forward beyond park position
+    //   4 = launching, plunger is behind park position
+    //   5 = pressed and holding (plunger has been pressed forward beyond 
+    //       the park position from state 0)
+    int lbState;
+    
+    // button bit for ZB launch ball button
+    uint32_t lbButtonBit;
+    
+    // Time since last lbState transition.  Some of the states are time-
+    // sensitive.  In the "uncocked" state, we'll return to state 0 if
+    // we remain in this state for more than a few milliseconds, since
+    // it indicates that the plunger is being slowly returned to rest
+    // rather than released.  In the "launching" state, we need to release 
+    // the Launch Ball button after a moment, and we need to wait for 
+    // the plunger to come to rest before returning to state 0.
+    Timer lbTimer;
+    
+    // Launch Ball simulated push timer.  We start this when we simulate
+    // the button push, and turn off the simulated button when enough time
+    // has elapsed.
+    Timer lbBtnTimer;
+};
+
 // ---------------------------------------------------------------------------
 //
 // Reboot - resets the microcontroller
@@ -2329,9 +3152,8 @@ uint16_t statusFlags;
 // Pixel dump mode - the host requested a dump of image sensor pixels
 // (helpful for installing and setting up the sensor and light source)
 bool reportPix = false;
-uint8_t reportPixMode;  // pixel report mode bits: 
-                        // 0x01 -> raw pixels (0) / processed (1)
-                        // 0x02 -> high res scan (0) / low res (1)
+uint8_t reportPixFlags;    // pixel report flag bits (see ccdSensor.h)
+uint8_t reportPixVisMode;  // pixel report visualization mode (see ccdSensor.h)
 
 
 // ---------------------------------------------------------------------------
@@ -2384,7 +3206,7 @@ int calBtnLit = false;
 // Handle an input report from the USB host.  Input reports use our extended
 // LedWiz protocol.
 //
-void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
+void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
 {
     // LedWiz commands come in two varieties:  SBA and PBA.  An
     // SBA is marked by the first byte having value 64 (0x40).  In
@@ -2487,10 +3309,6 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
                 // update the status flags
                 statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
                 
-                // if the plunger is no longer enabled, use 0 for z reports
-                if (!cfg.plunger.enabled)
-                    z = 0;
-                
                 // save the configuration
                 saveConfigToFlash();
                 
@@ -2506,17 +3324,17 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
             
             // enter calibration mode
             calBtnState = 3;
+            plungerReader.calMode(true);
             calBtnTimer.reset();
-            cfg.plunger.cal.begin();
             break;
             
         case 3:
             // 3 = pixel dump
-            //     data[2] = mode bits:
-            //               0x01  -> return processed pixels (default is raw pixels)
-            //               0x02  -> low res scan (default is high res scan)
+            //     data[2] = flag bits
+            //     data[3] = visualization mode
             reportPix = true;
-            reportPixMode = data[2];
+            reportPixFlags = data[2];
+            reportPixVisMode = data[3];
             
             // show purple until we finish sending the report
             diagLED(1, 0, 1);
@@ -2660,7 +3478,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, int &z)
 //
 void preConnectFlasher()
 {
-    diagLED(1, 0, 0);
+    diagLED(1, 1, 0);
     wait(0.05);
     diagLED(0, 0, 0);
 }
@@ -2712,14 +3530,14 @@ int main(void)
     // controllers will need to address their respective controller objects,
     // which don't exit until we initialize those subsystems.
     initLwOut(cfg);
-    
+
     // start the TLC5940 clock
     if (tlc5940 != 0)
         tlc5940->start();
         
     // start the TV timer, if applicable
     startTVTimer(cfg);
-    
+
     // initialize the button input ports
     bool kbKeys = false;
     initButtons(cfg, kbKeys);
@@ -2737,6 +3555,8 @@ int main(void)
     Timer jsReportTimer;
     jsReportTimer.start();
     
+    Timer plungerIntervalTimer; plungerIntervalTimer.start(); // $$$
+
     // Time since we successfully sent a USB report.  This is a hacky workaround
     // for sporadic problems in the USB stack that I haven't been able to figure
     // out.  If we go too long without successfully sending a USB report, we'll
@@ -2767,62 +3587,10 @@ int main(void)
     
     // create the accelerometer object
     Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, MMA8451_INT_PIN);
-    
+   
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
     int x = 0, y = 0;
-    
-    // last plunger report position, on the 0.0..1.0 normalized scale
-    float pos = 0;
-    
-    // last plunger report, in joystick units (we report the plunger as the
-    // "z" axis of the joystick, per the VP convention)
-    int z = 0;
-    
-    // most recent prior plunger readings, for tracking release events(z0 is
-    // reading just before the last one we reported, z1 is the one before that, 
-    // z2 the next before that)
-    int z0 = 0, z1 = 0, z2 = 0;
-    
-    // Simulated "bounce" position when firing.  We model the bounce off of
-    // the barrel spring when the plunger is released as proportional to the
-    // distance it was retracted just before being released.
-    int zBounce = 0;
-    
-    // Simulated Launch Ball button state.  If a "ZB Launch Ball" port is
-    // defined for our LedWiz port mapping, any time that port is turned ON,
-    // we'll simulate pushing the Launch Ball button if the player pulls 
-    // back and releases the plunger, or simply pushes on the plunger from
-    // the rest position.  This allows the plunger to be used in lieu of a
-    // physical Launch Ball button for tables that don't have plungers.
-    //
-    // States:
-    //   0 = default
-    //   1 = cocked (plunger has been pulled back about 1" from state 0)
-    //   2 = uncocked (plunger is pulled back less than 1" from state 1)
-    //   3 = launching, plunger is forward beyond park position
-    //   4 = launching, plunger is behind park position
-    //   5 = pressed and holding (plunger has been pressed forward beyond 
-    //       the park position from state 0)
-    int lbState = 0;
-    
-    // button bit for ZB launch ball button
-    const uint32_t lbButtonBit = (1 << (cfg.plunger.zbLaunchBall.btn - 1));
-    
-    // Time since last lbState transition.  Some of the states are time-
-    // sensitive.  In the "uncocked" state, we'll return to state 0 if
-    // we remain in this state for more than a few milliseconds, since
-    // it indicates that the plunger is being slowly returned to rest
-    // rather than released.  In the "launching" state, we need to release 
-    // the Launch Ball button after a moment, and we need to wait for 
-    // the plunger to come to rest before returning to state 0.
-    Timer lbTimer;
-    lbTimer.start();
-    
-    // Launch Ball simulated push timer.  We start this when we simulate
-    // the button push, and turn off the simulated button when enough time
-    // has elapsed.
-    Timer lbBtnTimer;
     
     // Simulated button states.  This is a vector of button states
     // for the simulated buttons.  We combine this with the physical
@@ -2832,44 +3600,11 @@ int main(void)
     // simulated Launch Ball button.
     uint32_t simButtons = 0;
     
-    // Firing in progress: we set this when we detect the start of rapid 
-    // plunger movement from a retracted position towards the rest position.
-    //
-    // When we detect a firing event, we send VP a series of synthetic
-    // reports simulating the idealized plunger motion.  The actual physical
-    // motion is much too fast to report to VP; in the time between two USB
-    // reports, the plunger can shoot all the way forward, rebound off of
-    // the barrel spring, bounce back part way, and bounce forward again,
-    // or even do all of this more than once.  This means that sampling the 
-    // physical motion at the USB report rate would create a misleading 
-    // picture of the plunger motion, since our samples would catch the 
-    // plunger at random points in this oscillating motion.  From the 
-    // user's perspective, the physical action that occurred is simply that 
-    // the plunger was released from a particular distance, so it's this 
-    // high-level event that we want to convey to VP.  To do this, we
-    // synthesize a series of reports to convey an idealized version of
-    // the release motion that's perfectly synchronized to the VP reports.  
-    // Essentially we pretend that our USB position samples are exactly 
-    // aligned in time with (1) the point of retraction just before the 
-    // user released the plunger, (2) the point of maximum forward motion 
-    // just after the user released the plunger (the point of maximum 
-    // compression as the plunger bounces off of the barrel spring), and 
-    // (3) the plunger coming to rest at the park position.  This series
-    // of reports is synthetic in the sense that it's not what we actually
-    // see on the CCD at the times of these reports - the true plunger
-    // position is oscillating at high speed during this period.  But at
-    // the same time it conveys a more faithful picture of the true physical
-    // motion to VP, and allows VP to reproduce the true physical motion 
-    // more faithfully in its simulation model, by correcting for the
-    // relatively low sampling rate in the communication path between the
-    // real plunger and VP's model plunger.
-    //
-    // If 'firing' is non-zero, it's the index of our current report in
-    // the synthetic firing report series.
-    int firing = 0;
-
-    // start the first CCD integration cycle
+    // initialize the plunger sensor
     plungerSensor->init();
+    
+    // set up the ZB Launch Ball monitor
+    ZBLaunchBall zbLaunchBall;
     
     Timer dbgTimer; dbgTimer.start(); // $$$  plunger debug report timer
     
@@ -2877,11 +3612,15 @@ int main(void)
     // host requests
     for (;;)
     {
-        // Process incoming reports on the joystick interface.  This channel
-        // is used for LedWiz commands are our extended protocol commands.
+        // Process incoming reports on the joystick interface.  The joystick
+        // "out" (receive) endpoint is used for LedWiz commands and our 
+        // extended protocol commands.  Limit processing time to 5ms to
+        // ensure we don't starve the input side.
         LedWizMsg lwm;
-        while (js.readLedWizMsg(lwm))
-            handleInputMsg(lwm, js, z);
+        Timer lwt;
+        lwt.start();
+        while (js.readLedWizMsg(lwm) && lwt.read_us() < 5000)
+            handleInputMsg(lwm, js);
        
         // check for plunger calibration
         if (calBtn != 0 && !calBtn->read())
@@ -2898,21 +3637,21 @@ int main(void)
             case 1:
                 // pushed, not yet debounced - if the debounce time has
                 // passed, start the hold period
-                if (calBtnTimer.read_ms() > 50)
+                if (calBtnTimer.read_us() > 50000)
                     calBtnState = 2;
                 break;
                 
             case 2:
                 // in the hold period - if the button has been held down
                 // for the entire hold period, move to calibration mode
-                if (calBtnTimer.read_ms() > 2050)
+                if (calBtnTimer.read_us() > 2050000)
                 {
                     // enter calibration mode
                     calBtnState = 3;
                     calBtnTimer.reset();
                     
                     // begin the plunger calibration limits
-                    cfg.plunger.cal.begin();
+                    plungerReader.calMode(true);
                 }
                 break;
                 
@@ -2932,10 +3671,11 @@ int main(void)
             // Otherwise, return to the base state without saving anything.
             // If the button is released before we make it to calibration
             // mode, it simply cancels the attempt.
-            if (calBtnState == 3 && calBtnTimer.read_ms() > 15000)
+            if (calBtnState == 3 && calBtnTimer.read_us() > 15000000)
             {
                 // exit calibration mode
                 calBtnState = 0;
+                plungerReader.calMode(false);
                 
                 // save the updated configuration
                 cfg.plunger.cal.calibrated = 1;
@@ -2954,7 +3694,7 @@ int main(void)
         {
         case 2:
             // in the hold period - flash the light
-            newCalBtnLit = ((calBtnTimer.read_ms()/250) & 1);
+            newCalBtnLit = ((calBtnTimer.read_us()/250000) & 1);
             break;
             
         case 3:
@@ -2984,357 +3724,16 @@ int main(void)
                 diagLED(0, 0, 0);       // off
             }
         }
- 
-        // If the plunger is enabled, and we're not in calibration mode, and 
-        // we're not already in a firing event, and the last plunger reading had 
-        // the plunger pulled back at least a bit, watch for plunger release 
-        // events until it's time for our next USB report.
-        if (!firing && calBtnState != 3 && cfg.plunger.enabled && z >= JOYMAX/6)
-        {
-            // monitor the plunger until it's time for our next report
-            for (int i = 0 ; i < 20 && jsReportTimer.read_ms() < 12 ; ++i)
-            {
-                // do a fast low-res scan; if it's at or past the zero point,
-                // start a firing event
-                float pos0;
-                if (plungerSensor->lowResScan(pos0) && pos0 <= cfg.plunger.cal.zero)
-                {
-                    firing = 1;
-                    break;
-                }
-            }
-        }
-
-        // read the plunger sensor, if it's enabled and we're not in firing mode
-        if (cfg.plunger.enabled && !firing)
-        {
-            // start with the previous reading, in case we don't have a
-            // clear result on this frame
-            int znew = z;
-            if (plungerSensor->highResScan(pos))
-            {
-                // We have a new reading.  If we're in calibration mode, use it
-                // to figure the new calibration, otherwise adjust the new reading
-                // for the established calibration.
-                if (calBtnState == 3)
-                {
-                    // Calibration mode.  If this reading is outside of the current
-                    // calibration bounds, expand the bounds.
-                    if (pos < cfg.plunger.cal.min)
-                        cfg.plunger.cal.min = pos;
-                    if (pos < cfg.plunger.cal.zero)
-                        cfg.plunger.cal.zero = pos;
-                    if (pos > cfg.plunger.cal.max)
-                        cfg.plunger.cal.max = pos;
-                        
-                    // normalize to the full physical range while calibrating
-                    znew = int(round(pos * JOYMAX));
-                }
-                else
-                {
-                    // Not in calibration mode, so normalize the new reading to the 
-                    // established calibration range.  
-                    //
-                    // Note that negative values are allowed.  Zero represents the
-                    // "park" position, where the plunger sits when at rest.  A mechanical 
-                    // plunger has a small amount of travel in the "push" direction,
-                    // since the barrel spring can be compressed slightly.  Negative
-                    // values represent travel in the push direction.
-                    if (pos > cfg.plunger.cal.max)
-                        pos = cfg.plunger.cal.max;
-                    znew = int(round(
-                        (pos - cfg.plunger.cal.zero)
-                        / (cfg.plunger.cal.max - cfg.plunger.cal.zero) 
-                        * JOYMAX));
-                }
-            }
-
-            // If we're not already in a firing event, check to see if the
-            // new position is forward of the last report.  If it is, a firing
-            // event might have started during the high-res scan.  This might
-            // seem unlikely given that the scan only takes about 5ms, but that
-            // 5ms represents about 25-30% of our total time between reports,
-            // there's about a 1 in 4 chance that a release starts during a
-            // scan.  
-            if (!firing && z0 > 0 && znew < z0)
-            {
-                // The plunger has moved forward since the previous report.
-                // Watch it for a few more ms to see if we can get a stable
-                // new position.
-                float pos0;
-                if (plungerSensor->lowResScan(pos0))
-                {
-                    int pos1 = pos0;
-                    Timer tw;
-                    tw.start();
-                    while (tw.read_ms() < 6)
-                    {
-                        // read the new position
-                        float pos2;
-                        if (plungerSensor->lowResScan(pos2))
-                        {
-                            // If it's stable over consecutive readings, stop looping.
-                            // Count it as stable if the position is within about 1/8".
-                            // The overall travel of a standard plunger is about 3.2", 
-                            // so on our normalized 0.0..1.0 scale, 1.0 equals 3.2",
-                            // thus 1" = .3125 and 1/8" = .0391.
-                            if (fabs(pos2 - pos1) < .0391f)
-                                break;
         
-                            // If we've crossed the rest position, and we've moved by
-                            // a minimum distance from where we starting this loop, begin
-                            // a firing event.  (We require a minimum distance to prevent
-                            // spurious firing from random analog noise in the readings
-                            // when the plunger is actually just sitting still at the 
-                            // rest position.  If it's at rest, it's normal to see small
-                            // random fluctuations in the analog reading +/- 1% or so
-                            // from the 0 point, especially with a sensor like a
-                            // potentionemeter that reports the position as a single 
-                            // analog voltage.)  Note that we compare the latest reading
-                            // to the first reading of the loop - we don't require the
-                            // threshold motion over consecutive readings, but any time
-                            // over the stability wait loop.
-                            if (pos1 < cfg.plunger.cal.zero && fabs(pos2 - pos0) > .0391f)
-                            {
-                                firing = 1;
-                                break;
-                            }
-                                                    
-                            // the new reading is now the prior reading
-                            pos1 = pos2;
-                        }
-                    }
-                }
-            }
-            
-            // Check for a simulated Launch Ball button press, if enabled
-            if (cfg.plunger.zbLaunchBall.port != 0)
-            {
-                const int cockThreshold = JOYMAX/3;
-                const int pushThreshold = int(-JOYMAX/3.0 * cfg.plunger.zbLaunchBall.pushDistance/1000.0);
-                int newState = lbState;
-                switch (lbState)
-                {
-                case 0:
-                    // Base state.  If the plunger is pulled back by an inch
-                    // or more, go to "cocked" state.  If the plunger is pushed
-                    // forward by 1/4" or more, go to "pressed" state.
-                    if (znew >= cockThreshold)
-                        newState = 1;
-                    else if (znew <= pushThreshold)
-                        newState = 5;
-                    break;
-                    
-                case 1:
-                    // Cocked state.  If a firing event is now in progress,
-                    // go to "launch" state.  Otherwise, if the plunger is less
-                    // than 1" retracted, go to "uncocked" state - the player
-                    // might be slowly returning the plunger to rest so as not
-                    // to trigger a launch.
-                    if (firing || znew <= 0)
-                        newState = 3;
-                    else if (znew < cockThreshold)
-                        newState = 2;
-                    break;
-                    
-                case 2:
-                    // Uncocked state.  If the plunger is more than an inch
-                    // retracted, return to cocked state.  If we've been in
-                    // the uncocked state for more than half a second, return
-                    // to the base state.  This allows the user to return the
-                    // plunger to rest without triggering a launch, by moving
-                    // it at manual speed to the rest position rather than
-                    // releasing it.
-                    if (znew >= cockThreshold)
-                        newState = 1;
-                    else if (lbTimer.read_ms() > 500)
-                        newState = 0;
-                    break;
-                    
-                case 3:
-                    // Launch state.  If the plunger is no longer pushed
-                    // forward, switch to launch rest state.
-                    if (znew >= 0)
-                        newState = 4;
-                    break;    
-                    
-                case 4:
-                    // Launch rest state.  If the plunger is pushed forward
-                    // again, switch back to launch state.  If not, and we've
-                    // been in this state for at least 200ms, return to the
-                    // default state.
-                    if (znew <= pushThreshold)
-                        newState = 3;
-                    else if (lbTimer.read_ms() > 200)
-                        newState = 0;                    
-                    break;
-                    
-                case 5:
-                    // Press-and-Hold state.  If the plunger is no longer pushed
-                    // forward, AND it's been at least 50ms since we generated
-                    // the simulated Launch Ball button press, return to the base 
-                    // state.  The minimum time is to ensure that VP has a chance
-                    // to see the button press and to avoid transient key bounce
-                    // effects when the plunger position is right on the threshold.
-                    if (znew > pushThreshold && lbTimer.read_ms() > 50)
-                        newState = 0;
-                    break;
-                }
-                
-                // change states if desired
-                if (newState != lbState)
-                {
-                    // If we're entering Launch state OR we're entering the
-                    // Press-and-Hold state, AND the ZB Launch Ball LedWiz signal 
-                    // is turned on, simulate a Launch Ball button press.
-                    if (((newState == 3 && lbState != 4) || newState == 5)
-                        && wizOn[cfg.plunger.zbLaunchBall.port-1])
-                    {
-                        lbBtnTimer.reset();
-                        lbBtnTimer.start();
-                        simButtons |= lbButtonBit;
-                    }
-                    
-                    // if we're switching to state 0, release the button
-                    if (newState == 0)
-                        simButtons &= ~(1 << (cfg.plunger.zbLaunchBall.btn - 1));
-                    
-                    // switch to the new state
-                    lbState = newState;
-                    
-                    // start timing in the new state
-                    lbTimer.reset();
-                }
-                
-                // If the Launch Ball button press is in effect, but the
-                // ZB Launch Ball LedWiz signal is no longer turned on, turn
-                // off the button.
-                //
-                // If we're in one of the Launch states (state #3 or #4),
-                // and the button has been on for long enough, turn it off.
-                // The Launch mode is triggered by a pull-and-release gesture.
-                // From the user's perspective, this is just a single gesture
-                // that should trigger just one momentary press on the Launch
-                // Ball button.  Physically, though, the plunger usually
-                // bounces back and forth for 500ms or so before coming to
-                // rest after this gesture.  That's what the whole state
-                // #3-#4 business is all about - we stay in this pair of
-                // states until the plunger comes to rest.  As long as we're
-                // in these states, we won't send duplicate button presses.
-                // But we also don't want the one button press to continue 
-                // the whole time, so we'll time it out now.
-                //
-                // (This could be written as one big 'if' condition, but
-                // I'm breaking it out verbosely like this to make it easier
-                // for human readers such as myself to comprehend the logic.)
-                if ((simButtons & lbButtonBit) != 0)
-                {
-                    int turnOff = false;
-                    
-                    // turn it off if the ZB Launch Ball signal is off
-                    if (!wizOn[cfg.plunger.zbLaunchBall.port-1])
-                        turnOff = true;
-                        
-                    // also turn it off if we're in state 3 or 4 ("Launch"),
-                    // and the button has been on long enough
-                    if ((lbState == 3 || lbState == 4) && lbBtnTimer.read_ms() > 250)
-                        turnOff = true;
-                        
-                    // if we decided to turn off the button, do so
-                    if (turnOff)
-                    {
-                        lbBtnTimer.stop();
-                        simButtons &= ~lbButtonBit;
-                    }
-                }
-            }
-                
-            // If a firing event is in progress, generate synthetic reports to 
-            // describe an idealized version of the plunger motion to VP rather 
-            // than reporting the actual physical plunger position.
-            //
-            // We use the synthetic reports during a release event because the
-            // physical plunger motion when released is too fast for VP to track.
-            // VP only syncs its internal physics model with the outside world 
-            // about every 10ms.  In that amount of time, the plunger moves
-            // fast enough when released that it can shoot all the way forward,
-            // bounce off of the barrel spring, and rebound part of the way
-            // back.  The result is the classic analog-to-digital problem of
-            // sample aliasing.  If we happen to time our sample during the
-            // release motion so that we catch the plunger at the peak of a
-            // bounce, the digital signal incorrectly looks like the plunger
-            // is moving slowly forward - VP thinks we went from fully
-            // retracted to half retracted in the sample interval, whereas
-            // we actually traveled all the way forward and half way back,
-            // so the speed VP infers is about 1/3 of the actual speed.
-            //
-            // To correct this, we take advantage of our ability to sample 
-            // the CCD image several times in the course of a VP report.  If
-            // we catch the plunger near the origin after we've seen it
-            // retracted, we go into Release Event mode.  During this mode,
-            // we stop reporting the true physical plunger position, and
-            // instead report an idealized pattern: we report the plunger
-            // immediately shooting forward to a position in front of the
-            // park position that's in proportion to how far back the plunger
-            // was just before the release, and we then report it stationary
-            // at the park position.  We continue to report the stationary
-            // park position until the actual physical plunger motion has
-            // stabilized on a new position.  We then exit Release Event
-            // mode and return to reporting the true physical position.
-            if (firing)
-            {
-                // Firing in progress.  Keep reporting the park position
-                // until the physical plunger position comes to rest.
-                const int restTol = JOYMAX/24;
-                if (firing == 1)
-                {
-                    // For the first couple of frames, show the plunger shooting
-                    // forward past the zero point, to simulate the momentum carrying
-                    // it forward to bounce off of the barrel spring.  Show the 
-                    // bounce as proportional to the distance it was retracted
-                    // in the prior report.
-                    z = zBounce = -z0/6;
-                    ++firing;
-                }
-                else if (firing == 2)
-                {
-                    // second frame - keep the bounce a little longer
-                    z = zBounce;
-                    ++firing;
-                }
-                else if (firing > 4
-                    && abs(znew - z0) < restTol
-                    && abs(znew - z1) < restTol 
-                    && abs(znew - z2) < restTol)
-                {
-                    // The physical plunger has come to rest.  Exit firing
-                    // mode and resume reporting the actual position.
-                    firing = false;
-                    z = znew;
-                }
-                else
-                {
-                    // until the physical plunger comes to rest, simply 
-                    // report the park position
-                    z = 0;
-                    ++firing;
-                }
-            }
-            else
-            {
-                // not in firing mode - report the true physical position
-                z = znew;
-            }
-
-            // shift the new reading into the recent history buffer
-            z2 = z1;
-            z1 = z0;
-            z0 = znew;
-        }
-
+        // read the plunger sensor
+        plungerReader.read();
+        
         // process button updates
         processButtons();
         
+        // handle the ZB Launch Ball feature
+        zbLaunchBall.update(simButtons);
+
         // send a keyboard report if we have new data
         if (kbState.changed)
         {
@@ -3360,7 +3759,7 @@ int main(void)
         // VP only wants to sync with the real world in 10ms intervals,
         // so reporting more frequently creates I/O overhead without 
         // doing anything to improve the simulation.
-        if (cfg.joystickEnabled && jsReportTimer.read_ms() > 10)
+        if (cfg.joystickEnabled /* $$$ && jsReportTimer.read_us() > 10000 */)
         {
             // read the accelerometer
             int xa, ya;
@@ -3376,15 +3775,27 @@ int main(void)
             x = xa;
             y = ya;
             
-            // Report the current plunger position UNLESS the ZB Launch Ball 
-            // signal is on, in which case just report a constant 0 value.  
-            // ZB Launch Ball turns off the plunger position because it
+            // Report the current plunger position unless the plunger is
+            // disabled, or the ZB Launch Ball signal is on.  In either of
+            // those cases, just report a constant 0 value.  ZB Launch Ball 
+            // temporarily disables mechanical plunger reporting because it 
             // tells us that the table has a Launch Ball button instead of
-            // a traditional plunger.
-            int zrep = (cfg.plunger.zbLaunchBall.port != 0 && wizOn[cfg.plunger.zbLaunchBall.port-1] ? 0 : z);
+            // a traditional plunger, so we don't want to confuse VP with
+            // regular plunger inputs.
+            int z = plungerReader.getPosition();
+            int zrep = (!cfg.plunger.enabled ? 0 :
+                        cfg.plunger.zbLaunchBall.port != 0 
+                          && wizOn[cfg.plunger.zbLaunchBall.port-1] ? 0 :
+                        z);
             
             // rotate X and Y according to the device orientation in the cabinet
             accelRotate(x, y);
+
+#if 0
+            // $$$ report velocity in x axis and timestamp in y axis
+            x = int(plungerReader.getVelocity() * 1.0 * JOYMAX);
+            y = (plungerReader.getTimestamp() / 1000) % JOYMAX;
+#endif
 
             // send the joystick report
             jsOK = js.update(x, y, zrep, jsButtons | simButtons, statusFlags);
@@ -3397,7 +3808,7 @@ int main(void)
         if (reportPix)
         {
             // send the report            
-            plungerSensor->sendExposureReport(js, reportPixMode);
+            plungerSensor->sendExposureReport(js, reportPixFlags, reportPixVisMode);
 
             // we have satisfied this request
             reportPix = false;
@@ -3405,7 +3816,7 @@ int main(void)
         
         // If joystick reports are turned off, send a generic status report
         // periodically for the sake of the Windows config tool.
-        if (!cfg.joystickEnabled && jsReportTimer.read_ms() > 200)
+        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 200000)
         {
             jsOK = js.updateStatus(0);
             jsReportTimer.reset();
@@ -3490,23 +3901,39 @@ int main(void)
                 }
             }
         }
+        
+        // if we're disconnected, initiate a new connection
+        if (!connected && !js.isConnected())
+        {
+            // show connect-wait diagnostics
+            diagLED(0, 0, 0);
+            preConnectTicker.attach(preConnectFlasher, 3);
+            
+            // wait for the connection
+            js.connect(true);
+            
+            // remove the connection diagnostic ticker
+            preConnectTicker.detach();
+        }
 
     // $$$
+#if 0
         if (dbgTimer.read() > 10) {
             dbgTimer.reset();
             if (plungerSensor != 0 && (cfg.plunger.sensorType == PlungerType_TSL1410RS || cfg.plunger.sensorType == PlungerType_TSL1410RP))
             {
                 PlungerSensorTSL1410R *ps = (PlungerSensorTSL1410R *)plungerSensor;
                 uint32_t nRuns;
-                float totalTime;
+                uint64_t totalTime;
                 ps->ccd.getTimingStats(totalTime, nRuns);
-                printf("average plunger read time: %f ms (total=%f, n=%d)\r\n", totalTime*1000.0/nRuns, totalTime, nRuns);
+                printf("average plunger read time: %f ms (total=%f, n=%d)\r\n", totalTime / 1000.0f / nRuns, totalTime, nRuns);
             }
         }
+#endif
     // end $$$
         
         // provide a visual status indication on the on-board LED
-        if (calBtnState < 2 && hbTimer.read_ms() > 1000) 
+        if (calBtnState < 2 && hbTimer.read_us() > 1000000) 
         {
             if (!newConnected)
             {

@@ -225,6 +225,17 @@ class USBJoystick: public USBHID {
          bool updateExposure(int &idx, int npix, const uint8_t *pix);
          
          /**
+         * Write the special extended exposure report with additional data about the 
+         * scan.
+         *
+         * @param edgePos the pixel position of the detected edge in this image, or -1 if none detected
+         * @param dir detected sensor orientation: 1 for standard, -1 for reversed, 0 for unknown
+         * @param avgScanTime average sensor scan time in microseconds
+         * @param processingTime time in microseconds to process the current frame
+         */
+         bool updateExposureExt(int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime);
+         
+         /**
          * Write a configuration report.
          *
          * @param numOutputs the number of configured output channels
@@ -272,13 +283,13 @@ class USBJoystick: public USBHID {
          bool buttons(uint32_t buttons);
 
          /* USB descriptor overrides */
-         virtual uint8_t * configurationDesc();
-         virtual uint8_t * reportDescN(int n);
+         virtual const uint8_t *configurationDesc();
+         virtual const uint8_t *reportDescN(int n);
  
          /* USB descriptor string overrides */
-         virtual uint8_t *stringImanufacturerDesc();
-         virtual uint8_t *stringIserialDesc();
-         virtual uint8_t *stringIproductDesc();
+         virtual const uint8_t *stringImanufacturerDesc();
+         virtual const uint8_t *stringIserialDesc();
+         virtual const uint8_t *stringIproductDesc();
          
          /* set/get idle time */
          virtual void setIdleTime(int ifc, int rptid, int t)

@@ -19,14 +19,20 @@ class PlungerSensorPot: public PlungerSensor
 public:
     PlungerSensorPot(PinName ao) : pot(ao)
     {
+        // start our sample timer with an arbitrary zero point of now
+        timer.start();
     }
     
     virtual void init() 
     {
     }
     
-    virtual bool read(uint16_t &pos)
+    // read the sensor
+    virtual bool read(PlungerReading &r)
     {
+        // get the starting time of the sampling
+        uint32_t t0 = timer.read_us();
+        
         // Take a few readings and use the average, to reduce the effect
         // of analog voltage fluctuations.  The voltage range on the ADC
         // is 0-3.3V, and empirically it looks like we can expect random
@@ -41,16 +47,30 @@ public:
         // each, so taking 5 readings takes about 150us.  This is fast
         // enough to resolve even the fastest plunger motiono with no
         // aliasing.
-        pos = uint16_t((
+        r.pos = uint16_t((
             uint32_t(pot.read_u16())
             + uint32_t(pot.read_u16()) 
             + uint32_t(pot.read_u16())
             + uint32_t(pot.read_u16())
             + uint32_t(pot.read_u16())
             ) / 5U);
+            
+        // Get the ending time of the sample, and figure the indicated
+        // sample time as the midpoint between the start and end times.
+        // (Note that the timer might overflow the uint32_t between t0 
+        // and now, in which case it will appear that now < t0.  The
+        // calculation will always work out right anyway, because it's 
+        // effectively performed mod 2^32-1.)
+        r.t = t0 + (timer.read_us() - t0)/2;        
+            
+        // success
         return true;
     }
         
 private:
+    // analog input for the pot wiper
     AnalogIn pot;
+    
+    // timer for input timestamps
+    Timer timer;
 };

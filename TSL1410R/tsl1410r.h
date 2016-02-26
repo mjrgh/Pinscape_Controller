@@ -6,26 +6,54 @@
  *  identical except for the pixel array size, which the caller 
  *  provides as a parameter when instantiating the class.)
  *
- *  For fast reads of the pixel file from the sensor, we use the KL25Z's 
- *  DMA capability.  The method we use is very specific to the KL25Z 
- *  hardware and is pretty tricky.  These are attributes I don't normally 
- *  like, but the speedup is amazing, enough to justify the complex 
- *  design.  I don't think there's any other way to even get close to 
- *  this kind of read speed for this sensor with this MCU.  (And I've 
- *  tried!)  Reading the sensor quickly is more than just academic,
- *  too: the plunger moves very fast during a release motion, so we 
- *  have to be able to take correspondingly fast pictures to get 
- *  clean images without motion blur.  Before the speedup of this DMA
- *  approach, images captured during release motions had a lot of 
- *  motion blur, and even aliasing from the sinusoidal motion when
- *  the plunger bounces back and forth off the springs.  The speedup
- *  gets us over the threshold where we can capture images with very
- *  little blur, so we can track the motion much more precisely even
- *  at release speeds.  This lets us determine the plunger position
- *  more precisely and more quickly, which improves responsiveness in
- *  the pinball simulator on the PC.
+ *  The TSL141xR sensors can take images very quickly.  The minimum
+ *  integration time (the time it takes to collect photoelectric
+ *  charge on the pixels - roughly equal to the shutter speed for
+ *  a film camera) is less than a millisecond, per the data sheet.
+ *  The sensor is flexible about timing, though, and allows for
+ *  much longer integration periods than the minimum.  It simply
+ *  gathers more light (more photoelectric charge) as the integration
+ *  period increases.  However, for our purposes in the Pinscape
+ *  Controller, we want the highest possible frame rate, as we're
+ *  trying to capture the motion of a fast-moving object (the plunger).
+ *  The KL25Z can't actually keep up with the fastest frame rate the
+ *  sensor can achieve, the limiting factor being its ADC.  The
+ *  sensor transfers pixels to the MCU serially, and each pixel is
+ *  transferred as an analog voltage level, so we have to collect
+ *  one ADC sample per pixel.  Our maximum frame rate is therefore
+ *  determined by the product of the minimum ADC sample time and 
+ *  the number of pixels.  
  *
- *  Here's our approach.  
+ *  The fastest operating mode for the KL25Z ADC is its "continuous"
+ *  mode, where it automatically starts taking a new sample every time
+ *  it completes the previous one.  The fastest way to transfer the
+ *  samples to memory in this mode is via the hardware DMA controller.
+ *  
+ *  It takes a pretty tricky setup to make this work.  I don't like 
+ *  tricky setups - I prefer something easy to understand - but in
+ *  this case it's justified because of the dramatic speed improvement
+ *  and the importance to the application of maximizing the speed.  
+ *  I'm pretty sure there's no other way to even get close to the
+ *  speed we can achieve with the continuous ADC/DMA combination.
+ *  The ADC/DMA mode gives us pixel read times of about 2us, vs a
+ *  minimum of about 14us for the next best method I've found.
+ *  Using this mode, we can read TSL1410R's 1280 pixels at full
+ *  resolution in about 2.5ms.  That's a frame rate of 400 frames
+ *  per second, which is fast enough to capture a fast-moving
+ *  plunger with minimal motion blur.
+ *
+ *  (Note that the TSL141xR sensors have a "parallel" that lets
+ *  them physically deliver two pixels at once to the MCU.  This
+ *  could potentially provide a 2x speedup by halving all of the
+ *  clock counts.  Unfortunately, the KL25Z can't take advantage
+ *  of this, because its ADC hardware is only capable of taking one
+ *  sample at a time.  The ADC has multiple channels that can connect
+ *  to multiple GPIO pins, but internally it has only one physical
+ *  sampler.  Using the parallel mode would paradoxically be slower
+ *  than our continuous ADC/DMA method because it would preclude use 
+ *  of the continuous sampling mode.)
+ *
+ *  Here's the tricky approach we use:
  * 
  *  First, we put the analog input port (the ADC == Analog-to-Digital 
  *  Converter) in "continuous" mode, at the highest clock speed we can 
@@ -77,10 +105,13 @@
  *  Putting it all together, the cascade of linked DMA channels
  *  works like this:
  *
- *   - The ADC sample completes, which triggers channel 1, the 
- *     "Clock Up" channel.  This performs one transfer of the 
- *     clock GPIO bit to the clock PSOR register, taking the clock
- *     high, which causes the CCD to move the next pixel onto AO.
+ *   - We kick off the first ADC sample.
+ *
+ *   - When the ADC sample completes, the ADC DMA trigger fires,
+ *     which triggers channel 1, the "Clock Up" channel.  This 
+ *     performs one transfer of the clock GPIO bit to the clock 
+ *     PSOR register, taking the clock high, which causes the CCD 
+ *     to move the next pixel onto AO.
  *
  *   - After the Clock Up channel does its transfer, it triggers
  *     its link to channel 2, the ADC transfer channel.  This
@@ -93,55 +124,62 @@
  *     clock low.
  *
  *  Note that the order of the channels - Clock Up, ADC, Clock Down -
- *  is important, because it ensures that we don't toggle the clock
- *  bit too fast.  The CCD has a minimum pulse duration of 50ns for
- *  the clock signal.  The DMA controller is so fast that we could
+ *  is important.  It ensures that we don't toggle the clock line
+ *  too quickly.  The CCD has a minimum pulse duration of 50ns for
+ *  the clock signal.  The DMA controller is so fast that it might
  *  toggle the clock faster than this limit if we did the Up and 
- *  Down transfers adjacently.  
+ *  Down transfers back-to-back.
  *
- *  Note also that it's important that Clock Up be the first operation,
- *  because the ADC is in continuous mode, meaning that it starts
- *  taking a new sample immediately upon finishing the previous one.
- *  So when the ADC DMA signal fires, the new sample is just starting.
- *  We therefore have to get the next pixel onto the sampling pin as
- *  quickly as possible.  The CCD sensor's "analog output settling
- *  time" is 120ns - this is the time for a new pixel voltage to 
- *  stabilize on AO after a clock rising edge.  So assuming that the
- *  ADC raises the DMA signal immediately, and the DMA controller
- *  responds within a couple of MCU clock cycles, we should have the
- *  new pixel voltage stable on the sampling pin by about 200ns after
- *  the new ADC sample cycle starts.  The sampling cycle with our
- *  current parameters is about 2us, so the voltage level is stable
- *  for 90% of the cycle.  
+ *  Note also that it's important for Clock Up to be the very first
+ *  operation after the DMA trigger.  The ADC is in continuous mode, 
+ *  meaning that it starts taking a new sample immediately upon 
+ *  finishing the previous one.  So when the ADC DMA signal fires, 
+ *  the new sample is already starting.  We therefore have to get 
+ *  the next pixel onto the sampling pin immediately, or as close
+ *  to immediately as possible.  The sensor's "analog output 
+ *  settling time" is 120ns - this is the time for a new pixel 
+ *  voltage to stabilize on AO after a clock rising edge.  So 
+ *  assuming that the ADC raises the DMA signal immediately on
+ *  sample completion, and the DMA controller responds within a 
+ *  couple of MCU clock cycles, we should have the new pixel voltage 
+ *  stable on the sampling pin by about 200ns after the new ADC 
+ *  sample cycle starts.  The sampling cycle with our current 
+ *  parameters is about 2us, so the voltage level is stable for 
+ *  90% of the cycle.  
  *
- *  Also, it's okay that the ADC sample transfer doesn't happen until 
- *  after the Clock Up DMA transfer.  The ADC output register holds the 
- *  last result until the next sample completes, so we have about 2us 
- *  to grab it.  The first Clock Up DMA transfer only takes a couple 
- *  of clocks - order of 100ns - so we get to it with time to spare.
+ *  Also, note that it's okay that the ADC sample transfer doesn't
+ *  happen until after the Clock Up DMA transfer.  The ADC output 
+ *  register holds the last result until the next sample completes, 
+ *  so we have about 2us to grab it.  The first Clock Up DMA 
+ *  transfer only takes a couple of clocks - order of 100ns - so 
+ *  we get to it with time to spare.
  *
- *  (Note that it's tempting to try to handle the clock with a single 
- *  DMA channel, by using the PTOR "toggle output" to do TWO writes:
- *  one to toggle the clock up and another to toggle it down.  But
- *  I haven't found a good way to do this.  The problem is that the
- *  DMA controller can only do one transfer per trigger in the fully
- *  autonomous mode we're using, and we need to do two writes.  In
- *  fact, we'd really need to do three or four writes: we'd have to
- *  throw in one or two no-op writes (of all zeroes) between the two
- *  toggles, for time padding to ensure that we meet the minimum 50ns
- *  pulse width for the TSL1410R clock signal.  But it's the same
- *  issue whether it's two writes or four.  The DMA controller does
- *  have a "continuous" mode that does an entire transfer on a single
- *  trigger, but it can't reset itself after such a transfer, so CPU
- *  intervention would be required on every ADC cycle to set up the
- *  next clock write.  We could do that with an interrupt, but given
- *  the 2us cycle time, an interrupt would create a ton of CPU load, 
- *  and probably isn't even enough time to reliably complete each
- *  interrupt service call before the next cycle.  Fortunately, at
- *  the moment we only have one other module in the whole system
- *  using DMA at all - the TLC5940 PWM controller interface, which
- *  only needs one channel.  So with the four available channels in
- *  the hardware, we can afford to use three of them here.)
+ *  (Note that it would nicer to handle the clock with a single DMA
+ *  channel, since DMA channels are a limited resource.  We could
+ *  conceivably consolidate the clock generator one DMA channel by
+ *  switching the DMA destination to the PTOR "toggle" register, and
+ *  writing *two* times per trigger - once to toggle the clock up, 
+ *  and a second time to toggle it down.  But I haven't found a way 
+ *  to make this work.  The obstacle is that the DMA controller can 
+ *  only do one transfer per trigger in the fully autonomous mode 
+ *  we're using, and to make this toggle scheme work, we'd have to do 
+ *  two writes per trigger.  Maybe even three or four:  I think we'd
+ *  have to throw in one or two no-op writes (of all zeroes) between 
+ *  the two toggles, to pad the timing to ensure that the clock pulse 
+ *  width is over the sensor's 50ns minimum.  But it's the same issue 
+ *  whether it's two writes or four.  The DMA controller does have a 
+ *  "continuous" mode that does an entire transfer on a single trigger,
+ *  but it can't reset itself after such a transfer; CPU intervention 
+ *  is required to do that, which means we'd have to service an 
+ *  interrupt on every ADC cycle to set up the next clock write.  
+ *  Given the 2us cycle time, an interrupt would create a ton of CPU 
+ *  load, and I don't think the CPU is fast enough to reliably complete
+ *  the work we'd have to do on each 2us cycle.  Fortunately, at
+ *  the moment we can afford to dedicate three channels to this
+ *  module.  We only have one other module using the DMA at all
+ *  (the TLC5940 PWM controller interface), and it only needs one
+ *  channel.  So the KL25Z's complement of four DMA channels is just
+ *  enough for all of our needs for the moment.)
  */
  
 #include "mbed.h"
@@ -192,12 +230,16 @@ public:
           ao1(ao1Pin, true),
           nPixSensor(nPixSensor)
     {
+        // start the sample timer with an arbitrary zero point of 'now'
+        t.start();
+        
         // allocate our double pixel buffers
         pix1 = new uint8_t[nPixSensor*2];
         pix2 = pix1 + nPixSensor;
         
         // put the first DMA transfer into the first buffer (pix1)
         pixDMA = 0;
+        running = false;
 
         // remember the clock pin port base and pin mask for fast access
         clockPort = GPIO_PORT_BASE(clockPin);
@@ -256,43 +298,57 @@ public:
         // clock out one extra pixel to leave A1 in the high-Z state
         clock = 1;
         clock = 0;
-
-        // stop the clock
-        t.stop();
-        
-        // count the statistics
-        totalTime += t.read();
+    
+        // add this sample to the timing statistics (we collect the data
+        // merely to report to the config tool, for diagnostic purposes)
+        totalTime += (t.read_us() - t0);
         nRuns += 1;
+        
+        // the sampler is no long running
+        running = false;
     }
     
     // Get the stable pixel array.  This is the image array from the
     // previous capture.  It remains valid until the next startCapture()
     // call, at which point this buffer will be reused for the new capture.
-    void getPix(uint8_t * &pix, int &n)
+    void getPix(uint8_t * &pix, int &n, uint32_t &t)
     {
         // return the pixel array that ISN'T assigned to the DMA
-        pix = pixDMA ? pix1 : pix2;
+        if (pixDMA)
+        {
+            // DMA owns pix2, so the stable array is pix1
+            pix = pix1;
+            t = t1;
+        }
+        else
+        {
+            // DMA owns pix1, so the stable array is pix2
+            pix = pix2;
+            t = t2;
+        }
+        
+        // return the pixel count
         n = nPixSensor;
     }
     
-    // Start an image capture from the sensor.  This waits for any previous 
-    // capture to finish, then starts a new one and returns immediately.  The
-    // new capture proceeds autonomously via the DMA hardware, so the caller
-    // can continue with other processing during the capture.
+    // Start an image capture from the sensor.  Waits the previous
+    // capture to finish if it's still running, then starts a new one
+    // and returns immediately.  The new capture proceeds autonomously 
+    // via the DMA hardware, so the caller can continue with other 
+    // processing during the capture.
     void startCapture()
     {
-        // wait for the previous transfer to finish
-        while (adc_dma.isBusy())  { }
+        // wait for the current capture to finish
+        while (running) { }
         
-        // swap to the other DMA buffer
+        // swap to the other DMA buffer for reading the new pixel samples
         pixDMA ^= 1;
         
-        // start timing this transfer
-        t.reset();
-        t.start();
+        // note the start time of this transfer
+        t0 = t.read_us();
         
-        // set up the active pixel array as the destination buffer for 
-        // the ADC DMA channel
+        // Set up the active pixel array as the destination buffer for 
+        // the ADC DMA channel. 
         adc_dma.destination(pixDMA ? pix2 : pix1, true);
 
         // start the DMA transfers
@@ -306,6 +362,24 @@ public:
         si = 0;
         clock = 0;
         
+        // Set the timestamp for the current active buffer.  The SI pulse
+        // we just did performed the HOLD operation, which transfers the 
+        // current integration cycle's pixel charges to the output 
+        // capacitors in the sensor.  We noted the start of the current
+        // integration cycle in tInt when we started it during the previous
+        // scan.  The image we're about to transfer therefore represents 
+        // the photons collected between tInt and right now (actually, the
+        // SI pulse above, but close enough).  Set the timestamp to the 
+        // midpoint between tInt and now.
+        uint32_t tmid = tInt + (t0 - tInt)/2;
+        if (pixDMA)
+            t2 = tmid;
+        else
+            t1 = tmid;
+
+        // pad the timing slightly       
+        clock = 0;
+
         // clock in the first pixel
         clock = 1;
         clock = 0;
@@ -316,7 +390,26 @@ public:
         // pixel array and pulse the CCD serial data clock to load the next
         // pixel onto the analog sampler pin.  This will all happen without
         // any CPU involvement, so we can continue with other work.
+        running = true;
         ao1.start();
+        
+        // The new integration cycle starts with the 19th clock pulse
+        // after the SI pulse.  We offload all of the transfer work (including
+        // the clock pulse generation) to the DMA controller, so we won't
+        // be notified of exactly when that 19th clock occurs.  To keep things 
+        // simple, aproximate it as now plus 19 2us sample times.  This isn't 
+        // exact, since it will vary according to the ADC spin-up time and the
+        // actual sampling time, but 19*2us is close enough given that the 
+        // overall integration time we're measuring will be about 64x longer
+        // (around 2.5ms), so even if the 19*2us estimate is off by 100%, our
+        // overall time estimate will still be accurate to about 1.5%.
+        tInt = t.read_us() + 38;
+    }
+    
+    // Wait for the current capture to finish
+    void wait()
+    {
+        while (running) { }
     }
     
     // Clock through all pixels to clear the array.  Pulses SI at the
@@ -325,25 +418,52 @@ public:
     // integrated while the clear() was taking place.
     void clear()
     {
+        // get the clock toggle register
+        volatile uint32_t *ptor = &clockPort->PTOR;
+        
         // clock in an SI pulse
         si = 1;
+        *ptor = clockMask;
         clockPort->PSOR = clockMask;
         si = 0;
-        clockPort->PCOR = clockMask;
+        *ptor = clockMask;
         
-        // clock out all pixels
-        for (int i = 0 ; i < nPixSensor + 1 ; ++i) 
+        // This starts a new integration period.  Or more precisely, the
+        // 19th clock pulse will start the new integration period.  We're
+        // going to blast the clock signal as fast as we can, at about
+        // 100ns intervals (50ns up and 50ns down), so the 19th clock
+        // will be about 2us from now.
+        tInt = t.read_us() + 2;
+        
+        // clock out all pixels, plus an extra one to clock past the last
+        // pixel and reset the last pixel's internal sampling switch in
+        // the sensor
+        for (int i = 0 ; i < nPixSensor + 1 ; ) 
         {
-            clock = 1;
-            clock = 0;
+            // toggle the clock to take it high
+            *ptor = clockMask;
+            
+            // increment our loop variable here to pad the timing, to
+            // keep our pulse width long enough for the sensor
+            ++i;
+            
+            // toggle the clock to take it low
+            *ptor = clockMask;
         }
     }
     
-    // get the timing statistics
-    void getTimingStats(float &totalTime, uint32_t &nRuns)
+    // get the timing statistics - sum of scan time for all scans so far 
+    // in microseconds, and total number of scans so far
+    void getTimingStats(uint64_t &totalTime, uint32_t &nRuns) const
     {
         totalTime = this->totalTime;
         nRuns = this->nRuns;
+    }
+    
+    // get the average scan time in microseconds
+    uint32_t getAvgScanTime() const
+    {
+        return uint32_t(totalTime / nRuns);
     }
 
 private:
@@ -368,14 +488,24 @@ private:
     uint8_t *pix1;            // pixel array 1
     uint8_t *pix2;            // pixel array 2
     
+    // Timestamps of pix1 and pix2 arrays, in microseconds, in terms of the 
+    // ample timer (this->t).
+    uint32_t t1;
+    uint32_t t2;
+    
     // DMA target buffer.  This is the buffer for the next DMA transfer.
     // 0 means pix1, 1 means pix2.  The other buffer contains the stable 
     // data from the last transfer.
     uint8_t pixDMA;
+    
+    // flag: sample is running
+    volatile bool running;
 
     // timing statistics
-    Timer t;                  // timer - started when we start a DMA transfer
-    float totalTime;          // total time consumed by all reads so far
+    Timer t;                  // sample timer
+    uint32_t t0;              // start time (us) of current sample
+    uint32_t tInt;            // start time (us) of current integration period
+    uint64_t totalTime;       // total time consumed by all reads so far
     uint32_t nRuns;           // number of runs so far
 };
  

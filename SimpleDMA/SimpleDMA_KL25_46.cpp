@@ -5,8 +5,27 @@
 
 SimpleDMA *SimpleDMA::irq_owner[4] = {NULL};
 
+void SimpleDMA::class_init()
+{
+    static bool inited = false;
+    if (!inited)
+    {
+        NVIC_SetVector(DMA0_IRQn, (uint32_t)&irq_handler0);
+        NVIC_SetVector(DMA1_IRQn, (uint32_t)&irq_handler1);
+        NVIC_SetVector(DMA2_IRQn, (uint32_t)&irq_handler2);
+        NVIC_SetVector(DMA3_IRQn, (uint32_t)&irq_handler3);
+        NVIC_EnableIRQ(DMA0_IRQn);
+        NVIC_EnableIRQ(DMA1_IRQn);
+        NVIC_EnableIRQ(DMA2_IRQn);
+        NVIC_EnableIRQ(DMA3_IRQn);
+        inited = true;
+    }
+}
+
 SimpleDMA::SimpleDMA(int channel) 
 {
+    class_init();
+    
     this->channel(channel);
        
     //Enable DMA
@@ -15,26 +34,14 @@ SimpleDMA::SimpleDMA(int channel)
     
     trigger(Trigger_ALWAYS);
    
-    NVIC_SetVector(DMA0_IRQn, (uint32_t)&irq_handler0);
-    NVIC_SetVector(DMA1_IRQn, (uint32_t)&irq_handler1);
-    NVIC_SetVector(DMA2_IRQn, (uint32_t)&irq_handler2);
-    NVIC_SetVector(DMA3_IRQn, (uint32_t)&irq_handler3);
-    NVIC_EnableIRQ(DMA0_IRQn);
-    NVIC_EnableIRQ(DMA1_IRQn);
-    NVIC_EnableIRQ(DMA2_IRQn);
-    NVIC_EnableIRQ(DMA3_IRQn);
-    
     // presume no link channels
     linkMode = 0;
     linkChannel1 = 0;
     linkChannel2 = 0;
-    
-    // presume cycle-steal mode
-    cycle_steal = true;
 }
 
 int SimpleDMA::start(uint32_t length) 
-{  
+{
     if (auto_channel)
         _channel = getFreeChannel();
     else
@@ -44,17 +51,14 @@ int SimpleDMA::start(uint32_t length)
         return -1;
 
     irq_owner[_channel] = this;
-    
-    DMA0->DMA[_channel].SAR = _source;
-    DMA0->DMA[_channel].DAR = _destination;
-    DMA0->DMA[_channel].DSR_BCR = length;
-    DMAMUX0->CHCFG[_channel] = _trigger;
-    
+
+    // disable the channel while we're setting it up
+    DMAMUX0->CHCFG[_channel] = 0;
+
     uint32_t config = 
         DMA_DCR_EINT_MASK 
         | DMA_DCR_ERQ_MASK 
-        | DMA_DCR_EADREQ_MASK
-        | (cycle_steal ? DMA_DCR_CS_MASK : 0)
+        | DMA_DCR_CS_MASK
         | (source_inc << DMA_DCR_SINC_SHIFT) 
         | (destination_inc << DMA_DCR_DINC_SHIFT)
         | ((linkChannel1 & 3) << DMA_DCR_LCH1_SHIFT)
@@ -79,10 +83,14 @@ int SimpleDMA::start(uint32_t length)
     }
     
     DMA0->DMA[_channel].DCR = config;      
+    DMA0->DMA[_channel].SAR = _source;
+    DMA0->DMA[_channel].DAR = _destination;
+    DMAMUX0->CHCFG[_channel] = _trigger;
+    DMA0->DMA[_channel].DSR_BCR = length;
     
     //$$$
-    static int iii; if (iii++ < 3)
-        printf("DMA channel %d: mode %04x, source %08lx, dest %08lx, trigger %d, len %d\r\n", _channel, config, _source, _destination, _trigger, length);
+ //   static int iii; if (_channel != 0 && iii++ < 3)
+ //       printf("DMA channel %d: mode %04x, source %08lx, dest %08lx, trigger %d, len %d\r\n", _channel, config, _source, _destination, _trigger, length);
            
     //Start - set ENBL bit in the DMAMUX channel config register
     DMAMUX0->CHCFG[_channel] |= 1<<7;

@@ -17,6 +17,11 @@
 // that weren't anticipated in the original design. 
 //
 
+// $$$ TESTING CONFIGURATIONS
+#define TEST_CONFIG_EXPAN     0
+#define TEST_CONFIG_CAB       1
+#define TEST_KEEP_PRINTF      1
+
 
 #ifndef CONFIG_H
 #define CONFIG_H
@@ -91,7 +96,7 @@ const uint8_t PortFlagNoisemaker = 0x02; // noisemaker device - disable when nig
 const uint8_t PortFlagGamma      = 0x04; // apply gamma correction to this output
 
 // maximum number of output ports
-const int MAX_OUT_PORTS = 203;
+const int MAX_OUT_PORTS = 128;
 
 // port configuration data
 struct LedWizPortCfg
@@ -124,11 +129,11 @@ struct Config
         // for a different setting.  It seems rare for anyone to use more than one unit
         // in a pin cab, but for the few who do, the others will probably be numbered
         // sequentially as #2, #3, etc.  It seems safe to assume that no one out there
-        // has a unit #8, so we'll use that as our default starting number.  This can
-        // be changed from the config tool, but for the sake of convenience we want the
-        // default to be a value that most people won't have to change.
+        // has a unit #8, so we'll use that as our default.  This can be changed from 
+        // the config tool, but for the sake of convenience, it's better to pick a
+        // default that most people won't have to change.
         usbVendorID = 0xFAFA;      // LedWiz vendor code
-        usbProductID = 0x00F0;     // LedWiz product code for unit #1
+        usbProductID = 0x00F7;     // LedWiz product code for unit #8
         psUnitNo = 8;
         
         // enable joystick reports
@@ -141,7 +146,7 @@ struct Config
         plunger.enabled = false;
         plunger.sensorType = PlungerType_None;
         
-#if 1 // $$$
+#if TEST_CONFIG_EXPAN || TEST_CONFIG_CAB // $$$
         plunger.enabled = true;
         plunger.sensorType = PlungerType_TSL1410RS;
         plunger.sensorPin[0] = PTE20; // SI
@@ -150,9 +155,9 @@ struct Config
         plunger.sensorPin[3] = PTE22; // AO2 (parallel mode) = PTE22 = ADC0_SE3
 #endif
         
-        // assume that there's no calibration button
-        plunger.cal.btn = NC;
-        plunger.cal.led = NC;
+        // default plunger calibration button settings
+        plunger.cal.btn = PTE29;
+        plunger.cal.led = PTE23;
         
         // set the default plunger calibration
         plunger.cal.setDefaults();
@@ -166,7 +171,7 @@ struct Config
         TVON.latchPin = NC;
         TVON.relayPin = NC;
         TVON.delayTime = 7;
-#if 0//$$$
+#if TEST_CONFIG_EXPAN //$$$
         TVON.statusPin = PTD2;
         TVON.latchPin = PTE0;
         TVON.relayPin = PTD3;
@@ -175,8 +180,8 @@ struct Config
         
         // assume no TLC5940 chips
         tlc5940.nchips = 0;
-#if 0 // $$$
-        //tlc5940.nchips = 4;
+#if TEST_CONFIG_EXPAN // $$$
+        tlc5940.nchips = 4;
 #endif
 
         // default TLC5940 pin assignments
@@ -188,8 +193,8 @@ struct Config
         
         // assume no 74HC595 chips
         hc595.nchips = 0;
-#if 0 // $$$
-        //hc595.nchips = 1;
+#if TEST_CONFIG_EXPAN // $$$
+        hc595.nchips = 1;
 #endif
     
         // default 74HC595 pin assignments
@@ -207,7 +212,7 @@ struct Config
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
             button[i].pin = 0;   // 0 == index of NC in USB-to-PinName mapping
 
-#if 1            
+#if TEST_CONFIG_EXPAN | TEST_CONFIG_CAB
         for (int i = 0 ; i < 24 ; ++i) {
             static int bp[] = {
                 21, // 1 = PTC2
@@ -215,7 +220,11 @@ struct Config
                 11, // 3 = PTB2
                 10, // 4 = PTB1
                 54, // 5 = PTE30
+#if TEST_CONFIG_EXPAN
                 30, // 6 = PTC11
+#elif TEST_CONFIG_CAG
+                51, // 6 = PTE22
+#endif
                 48, // 7 = PTE5
                 47, // 8 = PTE4
                 46, // 9 = PTE3
@@ -235,7 +244,13 @@ struct Config
                 42, // 23 = PTD7
                 44  // 24 = PTE1
             };               
-            button[i].set(bp[i], BtnTypeKey, i+4); // A, B, C... 
+            button[i].set(bp[i], 
+#if TEST_CONFIG_EXPAN
+                BtnTypeKey, i+4);       // keyboard key A, B, C... 
+#elif TEST_CONFIG_CAB
+                BtnTypeJoystick, i);    // joystick button 0, 1, ...
+#endif
+
         }
 #endif
         
@@ -256,7 +271,7 @@ struct Config
 #endif
         
 
-#if 0 // $$$
+#if TEST_CONFIG_EXPAN // $$$
         // CONFIGURE EXPANSION BOARD PORTS
         //
         // We have the following hardware attached:
@@ -300,6 +315,37 @@ struct Config
             outPort[n].typ = PortTypeDisabled;
         }
 #endif
+
+#if TEST_CONFIG_CAB
+#if TEST_KEEP_PRINTF
+        outPort[ 0].set(PortTypeGPIOPWM, 0);     // port 1  = PTA1 -> NC to keep debug printf
+        outPort[ 1].set(PortTypeGPIOPWM, 0);     // port 2  = PTA2 -> NC to keep debug printf
+#else
+        outPort[ 0].set(PortTypeGPIOPWM, 1);     // port 1  = PTA1
+        outPort[ 1].set(PortTypeGPIOPWM, 2);     // port 2  = PTA2
+#endif
+        outPort[ 2].set(PortTypeGPIOPWM, 39);    // port 3  = PTD4
+        outPort[ 3].set(PortTypeGPIOPWM, 5);     // port 4  = PTA12
+        outPort[ 4].set(PortTypeGPIOPWM, 3);     // port 5  = PTA4
+        outPort[ 5].set(PortTypeGPIOPWM, 4);     // port 6  = PTA5
+        outPort[ 6].set(PortTypeGPIOPWM, 6);     // port 7  = PTA13
+        outPort[ 7].set(PortTypeGPIOPWM, 40);    // port 8  = PTD5
+        outPort[ 8].set(PortTypeGPIOPWM, 35);    // port 9  = PTD0
+        outPort[ 9].set(PortTypeGPIOPWM, 38);    // port 10 = PTD3
+        outPort[10].set(PortTypeGPIODig, 37);    // port 11 = PTD2
+        outPort[11].set(PortTypeGPIODig, 27);    // port 12 = PCT8
+        outPort[12].set(PortTypeGPIODig, 28);    // port 13 = PCT9
+        outPort[13].set(PortTypeGPIODig, 26);    // port 14 = PTC7
+        outPort[14].set(PortTypeGPIODig, 19);    // port 15 = PTC0
+        outPort[15].set(PortTypeGPIODig, 22);    // port 16 = PTC3
+        outPort[16].set(PortTypeGPIODig, 23);    // port 17 = PTC4
+        outPort[17].set(PortTypeGPIODig, 24);    // port 18 = PTC5
+        outPort[18].set(PortTypeGPIODig, 25);    // port 19 = PTC6
+        outPort[19].set(PortTypeGPIODig, 29);    // port 20 = PTC10
+        outPort[20].set(PortTypeGPIODig, 30);    // port 21 = PTC11
+        outPort[21].set(PortTypeGPIODig, 43);    // port 22 = PTE0
+#endif
+
 #if 0
         // configure the on-board RGB LED as outputs 1,2,3
         outPort[0].set(PortTypeGPIOPWM, 17, PortFlagActiveLow);     // PTB18 = LED1 = Red LED
@@ -402,24 +448,27 @@ struct Config
             // calibration button indicator light pin
             PinName led;
             
-            // Plunger calibration min, zero, and max.  The zero point is the 
-            // rest position (aka park position), where it's in equilibrium between 
-            // the main spring and the barrel spring.  It can travel a small distance
-            // forward of the rest position, because the barrel spring can be
-            // compressed by the user pushing on the plunger or by the momentum
-            // of a release motion.  The minimum is the maximum forward point where
-            // the barrel spring can't be compressed any further.
-            float min;
-            float zero;
-            float max;
+            // Plunger calibration min, zero, and max.  These are in terms of the
+            // unsigned 16-bit scale (0x0000..0xffff) that we use for the raw sensor
+            // readings.
+            //
+            // The zero point is the rest position (aka park position), where the
+            // plunger is in equilibrium between the main spring and the barrel 
+            // spring.  In the standard setup, the plunger can travel a small 
+            // distance forward of the rest position, because the barrel spring 
+            // can be compressed a bit.  The minimum is the maximum forward point 
+            // where the barrel spring can't be compressed any further.
+            uint16_t min;
+            uint16_t zero;
+            uint16_t max;
     
             // Reset the plunger calibration
             void setDefaults()
             {
                 calibrated = false;       // not calibrated
-                min = 0.0f;               // assume we can go all the way forward...
-                max = 1.0f;               // ...and all the way back
-                zero = 1.0/6.0f;          // the rest position is usually around 1/2" back = 1/6 of total travel
+                min = 0;                  // assume we can go all the way forward...
+                max = 0xffff;             // ...and all the way back
+                zero = max/6;             // the rest position is usually around 1/2" back = 1/6 of total travel
             }
             
             // Begin calibration.  This sets each limit to the worst
@@ -429,9 +478,9 @@ struct Config
             // outside of the limit, we reset the limit to the new reading.
             void begin()
             {
-                min = 0.0f;               // we don't calibrate the maximum forward position, so keep this at zero
-                zero = 1.0f;              // set the zero position all the way back
-                max = 0.0f;               // set the retracted position all the way forward
+                min = 0;                  // we don't calibrate the maximum forward position, so keep this at zero
+                zero = 0xffff;            // set the zero position all the way back
+                max = 0;                  // set the retracted position all the way forward
             }
 
         } cal;
@@ -506,6 +555,7 @@ struct Config
     // --- LedWiz Output Port Setup ---
     LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 
     LedWizPortCfg specialPort[1];          // special ports (Night Mode indicator, etc)
+
 };
 
 #endif
