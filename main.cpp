@@ -1,3 +1,47 @@
+// NEW PLUNGER PROCESSING 1 - 26 Feb 2016
+// This version takes advantage of the new, faster TSL1410R DMA processing
+// to implement better firing event detection.  This attempt works basically
+// like the old version, but uses the higher time resolution to detect firing
+// events more reliably.  The scheme here watches for accelerations (the old
+// TSL1410R code wasn't fast enough to do that).  We observed that a release
+// takes about 65ms from the maximum retraction point to crossing the zero
+// point.  Our 2.5ms snapshots allow us to see about 25 frames over this
+// span.  The first 5-10 frames will show the position moving forward, but
+// we don't see a clear acceleration trend in that first section.  After
+// that we see almost perfectly uniform acceleration for the rest of the
+// release until we cross the zero point.  "Almost" in that we often have
+// one or two frames where the velocity is just slightly lower than the
+// previous frame's.  I think this is probably imprecision in the sensor;
+// realistically, our time base is probably good to only +/- 1ms or so,
+// since the shutter time for each frame is about 2.3ms.  We assume that
+// each frame captures the midpoint time of the shutter span, but that's
+// a crude approximation; the scientifically right way to look at this is
+// that our snapshot times have an uncertainty on the order of the shutter
+// time.  Those error bars of course propagate into the velocity readings.
+// Fortunately, the true acceleration is high enough that it overwhelms
+// the error bars on almost every sample.  It appears to solve this
+// entirely if we simply skip a sample where we don't see acceleration
+// once we think a release has started - this takes our time between
+// samples up to about 5ms, at which point the acceleration does seem to
+// overwhelm the error bars 100% of the time.
+//
+// I'm capturing a snapshot of this implementation because I'm going to
+// try something different.  It would be much simpler if we could put our
+// readings on a slight time delay, and identify firing events
+// retrospectively when we actually cross the zero point.  I'm going to
+// experiment first with a time delay to see what the maximum acceptable
+// delay time is.  I expect that I can go up to about 30ms without it
+// becoming noticeable, but I need to try it out.  If we can go up to
+// 70ms, we can capture firing events perfectly because we can delay
+// reports long enough to have an entire firing event in history before
+// we report anything.  That will let us fix up the history to report an
+// idealized firing event to VP every time, with no false positives.
+// But I suspect a 70ms delay is going to be way too noticeable.  If
+// a 30ms delay works, I think we can still do a pretty good job - that
+// gets us about halfway into a release motion, at which point it's
+// pretty certain that it's really a release.
+
+
 /* Copyright 2014, 2015 M J Roberts, MIT License
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
@@ -2319,33 +2363,9 @@ public:
 
         // no history yet
         histIdx = 0;
-        histR = 0;
         
         // not in calibration mode
-        cal = false;   
-    }
-    
-    // prime the history
-    void prime()
-    {
-        // fill the initial history buffer, timing out if it takes too long
-        plungerSensor->read(prv);
-        Timer t;
-        t.start();
-        const uint32_t timeout = 1000000UL;
-        for (int i = 0 ; i < countof(hist) && t.read_us() < timeout ; ++i)
-        {
-            // take a new reading that's at least 2ms newer than the last
-            PlungerReading r;
-            while (t.read_us() < timeout)
-            {
-                if (plungerSensor->read(r) && uint32_t(r.t - prv.t) > 2000UL)
-                    break;
-            }
-            addHist(r);
-            prv = r;
-        }
-        histR = 0;
+        cal = false;
     }
 
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -2374,17 +2394,12 @@ public:
                 // sensor position as the joystick value, adjusted to the
                 // JOYMAX scale.
                 z = int16_t((long(r.pos) * JOYMAX)/65535);
+                return;
             }
-            else
-            {
-                // bounds-check the calibration data
-                checkCalBounds(r.pos);
-    
-                // calibrate and rescale the value
-                r.pos = int(
-                    (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
-                    / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
-            }
+            
+            // Pull the last two readings from the history
+            const PlungerReading &prv = nthHist(0);
+            const PlungerReading &prv2 = nthHist(1);
             
             // If the new reading is within 2ms of the previous reading,
             // ignore it.  We require a minimum time between samples to
@@ -2397,46 +2412,225 @@ public:
             if (uint32_t(r.t - prv.t) < 2000UL)
                 return;
                 
-            // Save it as the previous sample
-            prv = r;
+            // bounds-check the calibration data
+            checkCalBounds(r.pos);
+
+            // calibrate and rescale the value
+            r.pos = int(
+                (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
+                / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
+
+            // Calculate the velocity from the second-to-last reading
+            // to here, in joystick distance units per microsecond.
+            // Note that we use the second-to-last reading rather than
+            // the very last reading to give ourselves a little longer
+            // time base.  The time base is so short between consecutive
+            // readings that the error bars in the position would be too
+            // large.
+            //
+            // For reference, the physical plunger velocity ranges up
+            // to about 100,000 joystick distance units/sec.  This is 
+            // based on empirical measurements.  The typical time for 
+            // a real plunger to travel the full distance when released 
+            // from full retraction is about 85ms, so the average velocity 
+            // covering this distance is about 56,000 units/sec.  The 
+            // peak is probably about twice that.  In real-world units, 
+            // this translates to an average speed of about .75 m/s and 
+            // a peak of about 1.5 m/s.
+            //
+            // Note that we actually calculate the value here in units
+            // per *microsecond* - the discussion above is in terms of
+            // units/sec because that's more on a human scale.  Our
+            // choice of internal units here really isn't important,
+            // since we only use the velocity for comparison purposes,
+            // to detect acceleration trends.  We therefore save ourselves
+            // a little CPU time by using the natural units of our inputs.
+            float v = float(r.pos - prv2.pos)/float(r.t - prv2.t);
             
-            // Add it to our history
-            addHist(r);
+            // presume we'll report the latest instantaneous reading
+            z = r.pos;
+            vz = v;
+            
+            // Check firing events
+            switch (firing)
+            {
+            case 0:
+                // Default state - not in a firing event.  
+                
+                // If we have forward motion from a position that's retracted 
+                // beyond a threshold, enter phase 1.  If we're not pulled back
+                // far enough, don't bother with this, as a release wouldn't
+                // be strong enough to require the synthetic firing treatment.
+                if (v < 0 && r.pos > JOYMAX/6)
+                {
+                    // enter phase 1
+                    firingMode(1);
+                    
+                    // we don't have a freeze position yet, but note the start time
+                    f1.pos = 0;
+                    f1.t = r.t;
+                    
+                    // Figure the barrel spring "bounce" position in case we complete 
+                    // the firing event.  This is the amount that the forward momentum
+                    // of the plunger will compress the barrel spring at the peak of
+                    // the forward travel during the release.  Assume that this is
+                    // linearly proportional to the starting retraction distance.  
+                    // The barrel spring is about 1/6 the length of the main spring, 
+                    // so figure it compresses by 1/6 the distance.  (This is overly
+                    // simplistic and inaccurate, but it seems to give perfectly good
+                    // visual results, and that's all it's for.)
+                    f2.pos = -r.pos/6;
+                }
+                break;
+                
+            case 1:
+                // Phase 1 - acceleration.  If we cross the zero point, trigger
+                // the firing event.  Otherwise, continue monitoring as long as we
+                // see acceleration in the forward direction.
+                if (r.pos <= 0)
+                {
+                    // switch to the synthetic firing mode
+                    firingMode(2);
+                    z = f2.pos;
+                    
+                    // note the start time for the firing phase
+                    f2.t = r.t;
+                }
+                else if (v < vprv2)
+                {
+                    // We're still accelerating, and we haven't crossed the zero
+                    // point yet - stay in phase 1.  (Note that forward motion is
+                    // negative velocity, so accelerating means that the new 
+                    // velocity is more negative than the previous one, which
+                    // is to say numerically less than - that's why the test
+                    // for acceleration is the seemingly backwards 'v < vprv'.)
+
+                    // If we've been accelerating for at least 20ms, we're probably
+                    // really doing a release.  Jump back to the recent local
+                    // maximum where the release *really* started.  This is always
+                    // a bit before we started seeing sustained accleration, because
+                    // the plunger motion for the first few milliseconds is too slow
+                    // for our sensor precision to reliably detect acceleration.
+                    if (f1.pos != 0)
+                    {
+                        // we have a reset point - freeze there
+                        z = f1.pos;
+                    }
+                    else if (uint32_t(r.t - f1.t) >= 20000UL)
+                    {
+                        // it's been long enough - set a reset point.
+                        f1.pos = z = histLocalMax(r.t, 50000UL);
+                    }
+                }
+                else
+                {
+                    // We're not accelerating.  Cancel the firing event.
+                    firingMode(0);
+                }
+                break;
+                
+            case 2:
+                // Phase 2 - start of synthetic firing event.  Report the fake
+                // bounce for 25ms.  VP polls the joystick about every 10ms, so 
+                // this should be enough time to guarantee that VP sees this
+                // report at least once.
+                if (uint32_t(r.t - f2.t) < 25000UL)
+                {
+                    // report the bounce position
+                    z = f2.pos;
+                }
+                else
+                {
+                    // it's been long enough - switch to phase 3, where we
+                    // report the park position until the real plunger comes
+                    // to rest
+                    firingMode(3);
+                    z = 0;
+                    
+                    // set the start of the "stability window" to the rest position
+                    f3s.t = r.t;
+                    f3s.pos = 0;
+                    
+                    // set the start of the "retraction window" to the actual position
+                    f3r = r;
+                }
+                break;
+                
+            case 3:
+                // Phase 3 - in synthetic firing event.  Report the park position
+                // until the plunger position stabilizes.  Left to its own devices, 
+                // the plunger will usualy bounce off the barrel spring several 
+                // times before coming to rest, so we'll see oscillating motion
+                // for a second or two.  In the simplest case, we can aimply wait
+                // for the plunger to stop moving for a short time.  However, the
+                // player might intervene by pulling the plunger back again, so
+                // watch for that motion as well.  If we're just bouncing freely,
+                // we'll see the direction change frequently.  If the player is
+                // moving the plunger manually, the direction will be constant
+                // for longer.
+                if (v >= 0)
+                {
+                    // We're moving back (or standing still).  If this has been
+                    // going on for a while, the user must have taken control.
+                    if (uint32_t(r.t - f3r.t) > 65000UL)
+                    {
+                        // user has taken control - cancel firing mode
+                        firingMode(0);
+                        break;
+                    }
+                }
+                else
+                {
+                    // forward motion - reset retraction window
+                    f3r.t = r.t;
+                }
+
+                // check if we've come to rest, or close enough
+                if (abs(r.pos - f3s.pos) < 200)
+                {
+                    // It's within an eighth inch of the last starting point. 
+                    // If it's been here for 30ms, consider it stable.
+                    if (uint32_t(r.t - f3s.t) > 30000UL)
+                    {
+                        // we're done with the firing event
+                        firingMode(0);
+                    }
+                    else
+                    {
+                        // it's close to the last position but hasn't been
+                        // here long enough; stay in firing mode and continue
+                        // to report the park position
+                        z = 0;
+                    }
+                }
+                else
+                {
+                    // It's not close enough to the last starting point, so use
+                    // this as a new starting point, and stay in firing mode.
+                    f3s = r;
+                    z = 0;
+                }
+                break;
+            }
+            
+            // save the velocity reading for next time
+            vprv2 = vprv;
+            vprv = v;
+            
+            // add the new reading to the history
+            hist[histIdx++] = r;
+            histIdx %= countof(hist);
         }
     }
     
     // Get the current value to report through the joystick interface
-    int16_t getPosition()
-    {
-        // advance the read pointer until it's not too old
-        const uint32_t dtmax = 100000UL;
-        for (;;)
-        {
-            // if this one isn't too old, use it
-            if (uint32_t(prv.t - hist[histR].t) <= dtmax)
-                break;
-
-            // It's too old.  Figure the next read index.
-            int i = (histR + 1) % countof(hist);
-                
-            // if discarding this one would empty the history, keep
-            // it and stop here
-            if (i == histIdx)
-                break;
-                
-            // discard this item by advancing the read pointer
-            histR = i;
-        }
-        
-        // return the position at the current read index
-        return hist[histR].pos;
-    }
+    int16_t getPosition() const { return z; }
     
     // Get the current velocity (joystick distance units per microsecond)
     float getVelocity() const { return vz; }
     
     // get the timestamp of the current joystick report (microseconds)
-    uint32_t getTimestamp() const { return prv.t; }
+    uint32_t getTimestamp() const { return nthHist(0).t; }
 
     // Set calibration mode on or off
     void calMode(bool f) 
@@ -2453,19 +2647,6 @@ public:
     bool isFiring() { return firing > 3; }
 
 private:
-    // add a history entry
-    inline void addHist(PlungerReading &r)
-    {
-        // if we're about to overwrite the item at the read pointer,
-        // advance the read pointer
-        if (histIdx == histR)
-            histR = (histR + 1) % countof(hist);
-        
-        // add the new entry
-        hist[histIdx++] = r;
-        histIdx %= countof(hist);
-    }
-
     // set a firing mode
     inline void firingMode(int m) 
     {
@@ -2559,11 +2740,8 @@ private:
         }
     }
     
-    // Previous reading
-    PlungerReading prv;
-    
-    // velocity at previous reading
-    float vprv;
+    // velocity at previous reading, and the one before that
+    float vprv, vprv2;
     
     // Circular buffer of recent readings.  We keep a short history
     // of readings to analyze during firing events.  We can only identify
@@ -2572,11 +2750,22 @@ private:
     // exactly when it started.  We throttle our readings to no more
     // than one every 2ms, so we have at least N*2ms of history in this
     // array.
-    PlungerReading hist[50];
+    PlungerReading hist[25];
     int histIdx;
     
-    // history read index
-    int histR;
+    // get the nth history item (0=last, 1=2nd to last, etc)
+    const PlungerReading &nthHist(int n) const
+    {
+        // histIdx-1 is the last written; go from there
+        n = histIdx - 1 - n;
+        
+        // adjust for wrapping
+        if (n < 0)
+            n += countof(hist);
+            
+        // return the item
+        return hist[n];
+    }
 
     // Firing event state.
     //
@@ -3469,9 +3658,6 @@ int main(void)
     // initialize the plunger sensor
     plungerSensor->init();
     
-    // prime the plunger reader
-    plungerReader.prime();
-    
     // set up the ZB Launch Ball monitor
     ZBLaunchBall zbLaunchBall;
     
@@ -3622,13 +3808,11 @@ int main(void)
         // flag:  did we successfully send a joystick report on this round?
         bool jsOK = false;
 
-        // If it's been long enough since our last USB status report,
-        // send the new report.  We throttle the report rate because
-        // it can overwhelm the PC side if we report too frequently.
-        // VP only wants to sync with the real world in 10ms intervals,
-        // so reporting more frequently creates I/O overhead without 
-        // doing anything to improve the simulation.
-        if (cfg.joystickEnabled /* $$$ && jsReportTimer.read_us() > 10000 */)
+        // If it's been long enough since our last USB status report, send
+        // the new report.  VP only polls for input in 10ms intervals, so
+        // there's no benefit in sending reports more frequently than this.
+        // More frequent reporting would only add USB I/O overhead.
+        if (cfg.joystickEnabled && jsReportTimer.read_us() > 10000UL)
         {
             // read the accelerometer
             int xa, ya;
