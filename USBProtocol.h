@@ -79,12 +79,12 @@
 //
 // The pixel dump also sends a special final report, after all of the
 // pixel messages, with the "index" field set to 0x7FF (11 bits of 1's).  
-// It packs special fields instead of pixels:
+// This report packs special fields instead of pixels.  There are two
+// subtypes, sent in sequence:
 //
+//  Subtype 0:
 //    bytes 0:1 = 0x87FF (pixel report flags + index 0x7FF)
-//    byte 2    = 0x00 -> special report subtype 0 (this is to leave
-//                room for adding more information via additional
-//                subtypes in the future)
+//    byte 2    = 0x00 -> special report subtype 0
 //    bytes 3:4 = pixel position of detected shadow edge in this image,
 //                or 0xFFFF if no edge was found in this image.  For
 //                raw pixel reports, no edge will be detected because
@@ -94,6 +94,15 @@
 //                   0x02 = reversed orientation detected
 //    bytes 6:7:8 = average time for a sensor scan, in 10us units
 //    byte 9:10:11 = time for processing this image, in 10us units
+//
+//  Subtype 1:
+//    bytes 0:1 = 0x87FF
+//    byte 2    = 0x01 -> special report subtype 1
+//    bytes 3:4 = calibration zero point, in pixels (16-bit little-endian)
+//    bytes 5:6 = calibration maximum point, in pixels
+//    bytes 7:8 = calibration minimum point, in pixels
+//    byte 9    = calibrated release time, in milliseconds
+// 
 //
 // 2B. Configuration query.
 // This is requested by sending custom protocol message 65 4 (see below).
@@ -246,20 +255,24 @@
 //             the time limit elapses, the device automatically stores the results in
 //             non-volatile flash memory and exits the mode.
 //
-//        3 -> Send pixel dump.  The plunger sensor object sends a series of the special 
-//             pixel dump reports, defined in USBJoystick.cpp; the device automatically
-//             resumes normal joystick messages after sending all pixels.  If the 
-//             plunger sensor isn't an image sensor type, no pixel messages are sent.
-//             Additional parameters:
+//        3 -> Send pixel dump.  The device sends one complete image snapshot from the
+//             plunger sensor, as as series of pixel dump messages.  (The message format
+//             isn't big enough to allow the whole image to be sent in one message, so
+//             the image is broken up into as many messages as necessary.)  After sending
+//             the pixels, the device sends the special suffix messages with additional
+//             data about the sensor.  See the "pixel dump message" section above.  The 
+//             device then resumes sending normal joystick messages.  If the plunger 
+//             sensor isn't an imaging type, no pixel messages are sent, but the extra 
+//             suffix reports are still sent.  If no plunger sensor is installed, no
+//             reports are sent.  Parameters:
 //
 //               third byte = bit flags:
-//                  0x01 = low res mode (for faster updates)
-//
-//               fourth byte = visualization mode:
-//                  0 = raw pixels
-//                  1 = pixels with noise reduction applied
-//                  2 = high contrast
-//                  3 = edge visualization (only detected edges are displayed)
+//                  0x01 = low res mode.  The device rescales the sensor pixel array
+//                         sent in the dump messages to a low-resolution subset.  The
+//                         size of the subset is determined by the device.  This has
+//                         no effect on the sensor operation; it merely reduces the
+//                         USB transmission time to allow for a faster frame rate for
+//                         viewing in the config tool.
 //
 //        4 -> Query configuration.  The device sends a special configuration report,
 //             (see above; see also USBJoystick.cpp), then resumes sending normal 
@@ -504,6 +517,15 @@
 //               be used, for example, to control an indicator LED inside a lighted
 //               momentary pushbutton switch used to activate night mode.  The light 
 //               provides visual feedback that the mode is turned on.
+//
+// 14 -> Disconnect reboot timeout.  The reboot timeout allows the controller software
+//       to automatically reboot the KL25Z after it detects that the USB connection is
+//       broken.  On some hosts, the device isn't able to reconnect after the initial
+//       connection is lost.  The reboot timeout is a workaround for these cases.  When
+//       the software detects that the connection is no longer active, it will reboot
+//       the KL25Z automatically if a new connection isn't established within the
+//       timeout period.  Bytes 3 give the new reboot timeout in seconds.  Setting this
+//       to 0 disables the reboot timeout.
 //
 
 

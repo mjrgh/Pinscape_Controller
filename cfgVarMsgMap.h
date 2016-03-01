@@ -151,6 +151,11 @@ void v_func(uint8_t *data)
             }
         }
         break;
+        
+    case 14:
+        // Disconnect reboot timeout
+        v_byte(disconnectRebootTimeout, 2);
+        break;
     }
 }
 

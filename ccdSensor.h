@@ -25,8 +25,8 @@ public:
         memset(midpt, 127, sizeof(midpt));
         midptIdx = 0;
         
-        // no hysteresis zone yet
-        hyst1 = hyst2 = 0xFFFF;
+        // no history readings yet
+        histIdx = 0;
     }
     
     // initialize
@@ -54,41 +54,7 @@ public:
         // process the pixels and look for the edge position
         int pixpos;
         if (process(pix, n, pixpos, 0))
-        {
-            // Success.  Apply hysteresis.
-            if (pixpos == hyst1)
-            {
-                // this is the same as the last reading, so no adjustment
-                // is needed to the position OR the hysteresis range
-            }
-            else if (pixpos == hyst2)
-            {
-                // We're at the "jitter" end of the current hysteresis
-                // range.  Eliminate the jitter by returning the "stable"
-                // reading instead.
-                pixpos = hyst1;
-            }
-            else if (hyst2 == 0xFFFF && (pixpos == hyst1+1 || pixpos == hyst1-1))
-            {
-                // There's no hysteresis range yet, and we're exactly one
-                // pixel off from the previous reading.  Treat this new
-                // reading as jitter.  We now know that the jitter will
-                // occur in this direction from the last reading, so set
-                // it as the "jitter" end of the hysteresis range.  Then
-                // report the last stable reading to eliminate the jitter.
-                hyst2 = pixpos;
-                pixpos = hyst1;
-            }
-            else
-            {
-                // We're not inside the previous hysteresis range, so we're
-                // breaking free of the hysteresis band.  Reset the hysteresis
-                // to an empty range starting at the current position, and
-                // report the new position as detected.
-                hyst1 = pixpos;
-                hyst2 = 0xFFFF;
-            }
-            
+        {            
             // Normalize to the 16-bit range.  Our reading from the 
             // sensor is a pixel position, 0..n-1.  To rescale to the
             // normalized range, figure pixpos*65535/(n-1).
@@ -621,8 +587,49 @@ public:
         // check for a unique edge
         if (nEdges == 1)
         {
-            // success
+            // Successfully found an edge - presume we'll return the raw
+            // value we just found
             pos = edgePos;
+
+            // Filtering to the signal to reduce jitter.  We sometimes see
+            // the detected position jitter around by a pixel or two when
+            // the plunger is stationary; the filtering is meant to reduce
+            // or (ideally) eliminate it.  The jitter happens because the
+            // exactly pixel position of the edge can be a little ambiguous.
+            // The shadow is usually a little fuzzy and spans more than one
+            // pixel on the sensor, so our algorithm picks out the edge in
+            // each frame according to relative brightness from pixel to
+            // pixel.  The exact relative brightnesses can vary a bit,
+            // though, due to variations in exposure time, light source
+            // uniformity, other stray light sources in the cabinet, pixel
+            // noise in the sensor, ADC error, etc.  
+            //
+            // To filter the jitter, we'll look through the recent history
+            // to see if the recent samples are within a couple of pixels
+            // of each other.  If so, we'll take an average and substitute
+            // that for our current reading.
+            bool allClose = true;
+            long sum = 0;
+            for (int i = 0 ; i < countof(hist) ; ++i)
+            {
+                // if this one isn't close enough, they're not all close
+                if (abs(hist[i] - edgePos) > 2)
+                {
+                    allClose = false;
+                    break;
+                }
+                
+                // count it in the sum
+                sum += hist[i];
+            }
+            if (allClose)
+            [
+                // they're all close by - replace this reading with the
+                // average of nearby pixels
+                pos = int(sum / countof(hist));
+            }
+            
+            // indicate success
             return true;
         }
         else
@@ -762,30 +769,11 @@ protected:
     // on the fly even if the user repositions the sensor while the software
     // is running.
     int dir;
-    
-    // Hysteresis data.  We apply a very mild hysteresis to the position
-    // reading to reduce jitter that can occur with this sensor design.
-    // In practice, the shadow edge isn't perfectly sharp, so we usually
-    // have several pixels in a fuzzy zone between solid shadow and solid
-    // bright.  The sensor scan time isn't perfectly uniform either, so
-    // exposure levels vary (exposure level is a function of the integration
-    // time, and the way we're set up, integration time is a function of 
-    // the sample scan time).  Plus there's some random noise in the sensor
-    // pixels and in the ADC sampling process.  All of these variables
-    // add up to some slight frame-to-frame variation in precisely where
-    // we detect the shadow edge, even when the plunger is perfectly still.
-    // This manifests as jitter: the sensed position wiggles back and forth
-    // in response to the noise factors.  In testing, it appears that the
-    // typical jitter is one pixel - it looks like we basicaly have trouble
-    // deciding whether the edge is at pixel A or pixel A+1, and we jump
-    // back and forth randomly as the noise varies.  To eliminate the
-    // visible effects, we apply hysteresis customized for this magnitude
-    // of jitter.  If two consecutive readings are only one pixel apart,
-    // we'll stick with the first reading.  Furthermore, we'll set the
-    // hysteresis bounds to exactly these two pixels.  'hyst1' is the 
-    // last reported pixel position; 'hyst2' is the adjacent position
-    // in the hysteresis range, if there is one, or 0xFFFF if not.
-    uint16_t hyst1, hyst2;
+
+    // History of recent position readings.  We keep a short history of
+    // readings so that we can apply some filtering to the data.
+    uint16_t hist[10];
+    int histIdx;    
     
     // History of midpoint brightness levels for the last few successful
     // scans.  This is a circular buffer that we write on each scan where

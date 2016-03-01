@@ -1,48 +1,4 @@
-// NEW PLUNGER PROCESSING 1 - 26 Feb 2016
-// This version takes advantage of the new, faster TSL1410R DMA processing
-// to implement better firing event detection.  This attempt works basically
-// like the old version, but uses the higher time resolution to detect firing
-// events more reliably.  The scheme here watches for accelerations (the old
-// TSL1410R code wasn't fast enough to do that).  We observed that a release
-// takes about 65ms from the maximum retraction point to crossing the zero
-// point.  Our 2.5ms snapshots allow us to see about 25 frames over this
-// span.  The first 5-10 frames will show the position moving forward, but
-// we don't see a clear acceleration trend in that first section.  After
-// that we see almost perfectly uniform acceleration for the rest of the
-// release until we cross the zero point.  "Almost" in that we often have
-// one or two frames where the velocity is just slightly lower than the
-// previous frame's.  I think this is probably imprecision in the sensor;
-// realistically, our time base is probably good to only +/- 1ms or so,
-// since the shutter time for each frame is about 2.3ms.  We assume that
-// each frame captures the midpoint time of the shutter span, but that's
-// a crude approximation; the scientifically right way to look at this is
-// that our snapshot times have an uncertainty on the order of the shutter
-// time.  Those error bars of course propagate into the velocity readings.
-// Fortunately, the true acceleration is high enough that it overwhelms
-// the error bars on almost every sample.  It appears to solve this
-// entirely if we simply skip a sample where we don't see acceleration
-// once we think a release has started - this takes our time between
-// samples up to about 5ms, at which point the acceleration does seem to
-// overwhelm the error bars 100% of the time.
-//
-// I'm capturing a snapshot of this implementation because I'm going to
-// try something different.  It would be much simpler if we could put our
-// readings on a slight time delay, and identify firing events
-// retrospectively when we actually cross the zero point.  I'm going to
-// experiment first with a time delay to see what the maximum acceptable
-// delay time is.  I expect that I can go up to about 30ms without it
-// becoming noticeable, but I need to try it out.  If we can go up to
-// 70ms, we can capture firing events perfectly because we can delay
-// reports long enough to have an entire firing event in history before
-// we report anything.  That will let us fix up the history to report an
-// idealized firing event to VP every time, with no false positives.
-// But I suspect a 70ms delay is going to be way too noticeable.  If
-// a 30ms delay works, I think we can still do a pretty good job - that
-// gets us about halfway into a release motion, at which point it's
-// pretty certain that it's really a release.
-
-
-/* Copyright 2014, 2015 M J Roberts, MIT License
+/* Copyright 2014, 2016 M J Roberts, MIT License
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 * and associated documentation files (the "Software"), to deal in the Software without
@@ -2353,6 +2309,55 @@ void createPlunger()
 }
 
 // Plunger reader
+//
+// This class encapsulates our plunger data processing.  At the simplest
+// level, we read the position from the sensor, adjust it for the
+// calibration settings, and report the calibrated position to the host.
+//
+// In addition, we constantly monitor the data for "firing" motions.
+// A firing motion is when the user pulls back the plunger and releases
+// it, allowing it to shoot forward under the force of the main spring.
+// When we detect that this is happening, we briefly stop reporting the
+// real physical position that we're reading from the sensor, and instead
+// report a synthetic series of positions that depicts an idealized 
+// firing motion.
+//
+// The point of the synthetic reports is to correct for distortions
+// created by the joystick interface conventions used by VP and other
+// PC pinball emulators.  The convention they use is simply to have the
+// plunger device report the instantaneous position of the real plunger.
+// The PC software polls this reported position periodically, and moves 
+// the on-screen virtual plunger in sync with the real plunger.  This
+// works fine for human-scale motion when the user is manually moving
+// the plunger.  But it doesn't work for the high speed motion of a 
+// release.  The plunger simply moves too fast.  VP polls in about 10ms
+// intervals; the plunger takes about 50ms to travel from fully
+// retracted to the park position when released.  The low sampling
+// rate relative to the rate of change of the sampled data creates
+// a classic digital aliasing effect.  
+//
+// The synthetic reporting scheme compensates for the interface
+// distortions by essentially changing to a coarse enough timescale
+// that VP can reliably interpret the readings.  Conceptually, there
+// are three steps involved in doing this.  First, we analyze the
+// actual sensor data to detect and characterize the release motion.
+// Second, once we think we have a release in progress, we fit the 
+// data to a mathematical model of the release.  The model we use is 
+// dead simple: we consider the release to have one parameter, namely
+// the retraction distance at the moment the user lets go.  This is an 
+// excellent proxy in the real physical system for the final speed 
+// when the plunger hits the ball, and it also happens to match how 
+// VP models it internally.  Third, we construct synthetic reports
+// that will make VP's internal state match our model.  This is also
+// pretty simple: we just need to send VP the maximum retraction
+// distance for long enough to be sure that it polls it at least
+// once, and then send it the park position for long enough to 
+// ensure that VP will complete the same firing motion.  The 
+// immediate jump from the maximum point to the zero point will
+// cause VP to move its simulation model plunger forward from the
+// starting point at its natural spring acceleration rate, which 
+// is exactly what the real plunger just did.
+//
 class PlungerReader
 {
 public:
@@ -2397,9 +2402,8 @@ public:
                 return;
             }
             
-            // Pull the last two readings from the history
+            // Pull the previous reading from the history
             const PlungerReading &prv = nthHist(0);
-            const PlungerReading &prv2 = nthHist(1);
             
             // If the new reading is within 2ms of the previous reading,
             // ignore it.  We require a minimum time between samples to
@@ -2445,6 +2449,7 @@ public:
             // since we only use the velocity for comparison purposes,
             // to detect acceleration trends.  We therefore save ourselves
             // a little CPU time by using the natural units of our inputs.
+            const PlungerReading &prv2 = nthHist(1);
             float v = float(r.pos - prv2.pos)/float(r.t - prv2.t);
             
             // presume we'll report the latest instantaneous reading
@@ -2651,8 +2656,7 @@ private:
     inline void firingMode(int m) 
     {
         firing = m;
-    
-        // $$$
+#if 0 // $$$   
         lwPin[3]->set(0);
         lwPin[4]->set(0);
         lwPin[5]->set(0);
@@ -2663,7 +2667,7 @@ private:
         case 3: lwPin[5]->set(255); break;       // blue
         case 4: lwPin[3]->set(255); lwPin[5]->set(255); break;   // purple
         }
-        //$$$
+#endif //$$$
     }
     
     // Find the most recent local maximum in the history data, up to
@@ -2769,98 +2773,12 @@ private:
 
     // Firing event state.
     //
-    // A "firing event" happens when we detect that the physical plunger
-    // is moving forward fast enough that it was probably released.  When
-    // we detect a firing event, we momentarily disconnect the joystick
-    // readings from the physical sensor, and instead feed in a series of
-    // synthesized readings that simulate an idealized release motion.
-    //
-    // The reason we create these synthetic readings is that they give us
-    // better results in VP and other PC pinball players.  The joystick
-    // interface only lets us report the instantaneous plunger position.
-    // VP only reads the position at certain intervals, so it picks up
-    // a series of snapshots of the position, which it uses to infer the
-    // plunger velocity.  But the plunger release motion is so fast that
-    // VP's sampling rate creates a classic digital "aliasing" problem.
-    //
-    // Our synthesized report structure is designed to overcome the
-    // aliasing problem by removing the intermediate position reports 
-    // and only reporting the starting and ending positions.  This
-    // allows the PC side to reliably read the extremes of the travel
-    // and work entirely in the simulation domain to simulate a plunger
-    // release of the detected distance.  This produces more realistic
-    // results than feeding VP the real data, ironically.
-    //
-    // DETECTING A RELEASE MOTION
-    //
-    // How do we tell when the plunger is being released?  The basic
-    // idea is to monitor the sensor data and look for a series of
-    // readings that match the profile of a release motion.  For an
-    // idealized, mathematical model of a plunger, a release causes
-    // the plunger to start accelerating under the spring force.
-    //
-    // The real system has a couple of complications.  First, there
-    // are some mechanical effects that make the motion less than
-    // ideal (in the sense of matching the mathematical model),
-    // like friction and wobble.  This seems to be especially
-    // significant for the first 10-20ms of the release, probably
-    // because friction is a bigger factor at slow speeds, and
-    // also because of the uneven forces as the user lets go.
-    // Second, our sensor doesn't have infinite precision, and
-    // our clock doesn't either, and these error bars compound
-    // when we combine position and time to compute velocity.
-    //
-    // To deal with these real-world complications, we have a couple
-    // of strategies.  First, we tolerate a little bit of non-uniformity
-    // in the acceleration, by waiting a little longer if we get a
-    // reading that doesn't appear to be accelerating.  We still
-    // insist on continuous acceleration, but we basically double-check
-    // a reading by extending the time window when necessary.  Second,
-    // when we detect a series of accelerating readings, we go back
-    // to prior readings from before the sustained acceleration
-    // began to find out when the motion really began.
-    //
-    // PROCESSING A RELEASE MOTION
-    //
-    // We continuously monitor the sensor data.  When we see the position
-    // moving forward, toward the zero point, we start watching for
-    // sustained acceleration .  If we see acceleration for more than a 
-    // minimum threshold time (about 20ms), we freeze the reported 
-    // position at the recent local maximum (from the recent history of 
-    // readings) and wait for the acceleration to stop or for the plunger
-    // to cross the zero position.  If it crosses the zero position
-    // while still accelerating, we initiate a firing event.  Otherwise
-    // we return to instantaneous reporting of the actual position.
-    //
-    // HOW THIS LOOKS TO THE USER
-    // 
-    // The typical timing to reach the zero point during a release
-    // is about 60-80ms.  This is essentially the longest that we can
-    // stay in phase 1, so it's the longest that the readings will be
-    // frozen while we try to decide about a firing event.  This is
-    // fast enough that it should be barely perceptible to the user.
-    // The synthetic firing event should trigger almost immediately
-    // upon releasing the plunger, from the user's perspective.
-    //
-    // The big danger with this approach is "false positives":
-    // mistaking manual motion under the user's control for a possible 
-    // firing event.  A false positive would produce a highly visible 
-    // artifact, namely the on-screen plunger freezing in place while 
-    // the player moves the real plunger.  The strategy we use makes it 
-    // almost impossible for this to happen long enough to be 
-    // perceptible.  To fool the system, you have to accelerate the 
-    // plunger very steadily - with about 5ms granularity.  It's
-    // really hard to do this, and especially unlikely that a user
-    // would do so accidentally.
-    //
-    // FIRING STATE VARIABLE
-    //
-    // The firing states are:
-    //
     //   0 - Default state.  We report the real instantaneous plunger 
     //       position to the joystick interface.
     //
-    //   1 - Phase 1 - acceleration
+    //   1 - Possible release in progress.  We enter this state when
+    //       we see the plunger start to move forward, and stay in this
+    //       state as long as we see *accelerating* forward motion.
     //
     //   2 - Firing event started.  We report the "bounce" position for
     //       a minimum time.
@@ -2871,11 +2789,12 @@ private:
     //
     int firing;
     
-    // Position/timestamp at start of firing phase 1.  We freeze the
-    // joystick reports at this position until we decide whether or not 
-    // we're actually in a firing event.  This isn't set until we're
-    // confident that we've been in the accleration phase for long
-    // enough; pos is non-zero when this is valid.
+    // Position/timestamp at start of firing phase 1.  When we see a
+    // sustained forward acceleration, we freeze joystick reports at
+    // the recent local maximum, on the assumption that this was the
+    // start of the release.  If this is zero, it means that we're
+    // monitoring accelerating motion but haven't seen it for long
+    // enough yet to be confident that a release is in progress.
     PlungerReading f1;
     
     // Position/timestamp at start of firing phase 2.  The position is
@@ -2886,7 +2805,7 @@ private:
     
     // Position/timestamp of start of stability window during phase 3.
     // We use this to determine when the plunger comes to rest.  We set
-    // this at the beginning of phase 4, and then reset it when the 
+    // this at the beginning of phase 3, and then reset it when the 
     // plunger moves too far from the last position.
     PlungerReading f3s;
     
@@ -2968,7 +2887,7 @@ public:
         {                
             int znew = plungerReader.getPosition();
             const int cockThreshold = JOYMAX/3;
-            const uint16_t pushThreshold = uint16_t(-JOYMAX/3.0 * cfg.plunger.zbLaunchBall.pushDistance/1000.0 * 65535.0);
+            const int pushThreshold = int(-JOYMAX/3.0 * cfg.plunger.zbLaunchBall.pushDistance/1000.0);
             int newState = lbState;
             switch (lbState)
             {
@@ -3153,7 +3072,7 @@ void reboot(USBJoystick &js)
     js.disconnect();
     
     // wait a few seconds to make sure the host notices the disconnect
-    wait(5);
+    wait(2.5f);
     
     // reset the device
     NVIC_SystemReset();
@@ -3208,7 +3127,7 @@ uint16_t statusFlags;
 // (helpful for installing and setting up the sensor and light source)
 bool reportPix = false;
 uint8_t reportPixFlags;    // pixel report flag bits (see ccdSensor.h)
-uint8_t reportPixVisMode;  // pixel report visualization mode (see ccdSensor.h)
+uint8_t reportPixVisMode;  // pixel report visualization mode (not currently used)
 
 
 // ---------------------------------------------------------------------------
@@ -3529,17 +3448,6 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
 
 // ---------------------------------------------------------------------------
 //
-// Pre-connection diagnostic flasher
-//
-void preConnectFlasher()
-{
-    diagLED(1, 1, 0);
-    wait(0.05);
-    diagLED(0, 0, 0);
-}
-
-// ---------------------------------------------------------------------------
-//
 // Main program loop.  This is invoked on startup and runs forever.  Our
 // main work is to read our devices (the accelerometer and the CCD), process
 // the readings into nudge and plunger position data, and send the results
@@ -3561,10 +3469,6 @@ int main(void)
     
     // initialize the diagnostic LEDs
     initDiagLEDs(cfg);
-
-    // set up the pre-connected ticker
-    Ticker preConnectTicker;
-    preConnectTicker.attach(preConnectFlasher, 3);
 
     // we're not connected/awake yet
     bool connected = false;
@@ -3599,10 +3503,26 @@ int main(void)
     
     // Create the joystick USB client.  Note that we use the LedWiz unit
     // number from the saved configuration.
-    MyUSBJoystick js(cfg.usbVendorID, cfg.usbProductID, USB_VERSION_NO, true, cfg.joystickEnabled, kbKeys);
-    
-    // we're now connected - kill the pre-connect ticker
-    preConnectTicker.detach();
+    MyUSBJoystick js(cfg.usbVendorID, cfg.usbProductID, USB_VERSION_NO, false, 
+        cfg.joystickEnabled, kbKeys);
+        
+    // Wait for the connection
+    Timer connectTimer;
+    connectTimer.start();
+    while (!js.configured())
+    {
+        // show one short yellow flash at 2-second intervals
+        if (connectTimer.read_us() > 2000000)
+        {
+            // short yellow flash
+            diagLED(1, 1, 0);
+            wait(0.05);
+            diagLED(0, 0, 0);
+            
+            // reset the flash timer
+            connectTimer.reset();
+        }
+    }
     
     // Last report timer for the joytick interface.  We use the joystick timer 
     // to throttle the report rate, because VP doesn't benefit from reports any 
@@ -3956,17 +3876,46 @@ int main(void)
         }
         
         // if we're disconnected, initiate a new connection
-        if (!connected && !js.isConnected())
+        if (!connected)
         {
-            // show connect-wait diagnostics
-            diagLED(0, 0, 0);
-            preConnectTicker.attach(preConnectFlasher, 3);
+            // The "connected" variable means that we're either disconnected
+            // or that the connection has been suspended (e.g., the host is in 
+            // a sleep mode).  If the connection was lost entirely, explicitly
+            // initiate a reconnection.
+            if (!js.isConnected())
+                js.connect(false);
             
-            // wait for the connection
-            js.connect(true);
+            // set up a timer to monitor the reboot timeout
+            Timer rebootTimer;
+            rebootTimer.start();
             
-            // remove the connection diagnostic ticker
-            preConnectTicker.detach();
+            // wait for reconnect or reboot
+            connectTimer.reset();
+            connectTimer.start();
+            while (!js.isConnected() || js.isSuspended())
+            {
+                // show a diagnostic flash every 2 seconds
+                if (connectTimer.read_us() > 2000000)
+                {
+                    // flash once if suspended or twice if disconnected
+                    for (int j = js.isConnected() ? 1 : 2 ; j > 0 ; --j)
+                    {
+                        // short red flash
+                        diagLED(1, 0, 0);
+                        wait(0.05f);
+                        diagLED(0, 0, 0);
+                        wait(0.05f);
+                    }
+                    
+                    // reset the flash timer
+                    connectTimer.reset();
+                }
+                
+                // if the disconnect reboot timeout has expired, reboot
+                if (cfg.disconnectRebootTimeout != 0 
+                    && rebootTimer.read() > cfg.disconnectRebootTimeout)
+                    reboot(js);
+            }
         }
 
     // $$$
@@ -3988,26 +3937,7 @@ int main(void)
         // provide a visual status indication on the on-board LED
         if (calBtnState < 2 && hbTimer.read_us() > 1000000) 
         {
-            if (!newConnected)
-            {
-                // suspended - turn off the LED
-                diagLED(0, 0, 0);
-
-                // show a status flash every so often                
-                if (hbcnt % 3 == 0)
-                {
-                    // disconnected = short red/red flash
-                    // suspended = short red flash
-                    for (int n = js.isConnected() ? 1 : 2 ; n > 0 ; --n)
-                    {
-                        diagLED(1, 0, 0);
-                        wait(0.05);
-                        diagLED(0, 0, 0);
-                        wait(0.25);
-                    }
-                }
-            }
-            else if (jsOKTimer.read() > 5)
+            if (jsOKTimer.read() > 5)
             {
                 // USB freeze - show red/yellow.
                 // Our outgoing joystick messages aren't going through, even though we

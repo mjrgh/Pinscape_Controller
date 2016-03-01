@@ -136,6 +136,9 @@ struct Config
         usbProductID = 0x00F7;     // LedWiz product code for unit #8
         psUnitNo = 8;
         
+        // set a disconnect reboot timeout of 10 seconds by default
+        disconnectRebootTimeout = 10;
+        
         // enable joystick reports
         joystickEnabled = true;
         
@@ -377,6 +380,13 @@ struct Config
     // use the device as purely an output controller.
     char joystickEnabled;
     
+    // Timeout for rebooting the KL25Z when the connection is lost.  On some
+    // hosts, the mbed USB stack has problems reconnecting after an initial
+    // connection is dropped.  As a workaround, we can automatically reboot
+    // the KL25Z when it detects that it's no longer connected, after the
+    // interval set here expires.  The timeout is in seconds; setting this
+    // to 0 disables the automatic reboot.
+    uint8_t disconnectRebootTimeout;
     
     // --- ACCELEROMETER ---
     
