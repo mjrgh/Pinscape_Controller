@@ -213,6 +213,17 @@ class USBJoystick: public USBHID {
          bool updateStatus(uint32_t stat);
          
          /**
+         * Write the plunger status report.
+         *
+         * @param npix number of pixels in the sensor (0 for non-imaging sensors)
+         * @param edgePos the pixel position of the detected edge in this image, or -1 if none detected
+         * @param dir sensor orientation (1 = standard, -1 = reversed, 0 = unknown)
+         * @param avgScanTime average sensor scan time in microseconds
+         * @param processingTime time in microseconds to process the current frame
+         */
+         bool sendPlungerStatus(int npix, int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime);
+         
+         /**
          * Write an exposure report.  We'll fill out a report with as many pixels as
          * will fit in the packet, send the report, and update the index to the next
          * pixel to send.  The caller should call this repeatedly to send reports for
@@ -222,18 +233,7 @@ class USBJoystick: public USBHID {
          * @param npix number of pixels in the overall array
          * @param pix pixel array
          */
-         bool updateExposure(int &idx, int npix, const uint8_t *pix);
-         
-         /**
-         * Write the special extended exposure report with additional data about the 
-         * scan.
-         *
-         * @param edgePos the pixel position of the detected edge in this image, or -1 if none detected
-         * @param dir detected sensor orientation: 1 for standard, -1 for reversed, 0 for unknown
-         * @param avgScanTime average sensor scan time in microseconds
-         * @param processingTime time in microseconds to process the current frame
-         */
-         bool updateExposureExt(int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime);
+         bool sendPlungerPix(int &idx, int npix, const uint8_t *pix);
          
          /**
          * Write a configuration report.
@@ -242,9 +242,19 @@ class USBJoystick: public USBHID {
          * @param unitNo the device unit number
          * @param plungerZero plunger zero calibration point
          * @param plungerMax plunger max calibration point
+         * @param plungerRlsTime measured plunger release time, in milliseconds
          * @param configured true if a configuration has been saved to flash from the host
          */
-         bool reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax, bool configured);
+         bool reportConfig(int numOutputs, int unitNo, 
+            int plungerZero, int plungerMax, int plunterRlsTime, 
+            bool configured);
+            
+         /**
+         * Write a configuration variable query report.
+         *
+         * @param data the 7-byte data variable buffer, starting with the variable ID byte
+         */
+         bool reportConfigVar(const uint8_t *data);
          
          /**
          * Write a device ID report.

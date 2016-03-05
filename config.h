@@ -20,7 +20,7 @@
 // $$$ TESTING CONFIGURATIONS
 #define TEST_CONFIG_EXPAN     0
 #define TEST_CONFIG_CAB       1
-#define TEST_KEEP_PRINTF      1
+#define TEST_KEEP_PRINTF      0
 
 
 #ifndef CONFIG_H
@@ -144,6 +144,11 @@ struct Config
         
         // assume standard orientation, with USB ports toward front of cabinet
         orientation = OrientationFront;
+
+        // assume a basic setup with no expansion boards
+        expan.nMain = 0;
+        expan.nPower = 0;
+        expan.nChime = 0;
 
         // assume no plunger is attached
         plunger.enabled = false;
@@ -394,6 +399,16 @@ struct Config
     char orientation;
     
     
+    // --- EXPANSION BOARDS ---
+    struct
+    {
+        int nMain;      // number of main interface boards (usually 1 max)
+        int nPower;     // number of MOSFET power boards
+        int nChime;     // number of chime boards
+        
+    } expan;
+    
+    
     // --- PLUNGER CONFIGURATION ---
     struct
     {
@@ -471,6 +486,9 @@ struct Config
             uint16_t min;
             uint16_t zero;
             uint16_t max;
+            
+            // Measured release time, in milliseconds.
+            uint8_t tRelease;
     
             // Reset the plunger calibration
             void setDefaults()
@@ -479,6 +497,7 @@ struct Config
                 min = 0;                  // assume we can go all the way forward...
                 max = 0xffff;             // ...and all the way back
                 zero = max/6;             // the rest position is usually around 1/2" back = 1/6 of total travel
+                tRelease = 65;            // standard 65ms release time
             }
             
             // Begin calibration.  This sets each limit to the worst
@@ -491,6 +510,7 @@ struct Config
                 min = 0;                  // we don't calibrate the maximum forward position, so keep this at zero
                 zero = 0xffff;            // set the zero position all the way back
                 max = 0;                  // set the retracted position all the way forward
+                tRelease = 65;            // revert to a default release time
             }
 
         } cal;

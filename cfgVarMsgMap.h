@@ -156,6 +156,20 @@ void v_func(uint8_t *data)
         // Disconnect reboot timeout
         v_byte(disconnectRebootTimeout, 2);
         break;
+        
+    case 15:
+        // plunger calibration
+        v_ui16(plunger.cal.zero, 2);
+        v_ui16(plunger.cal.max, 4);
+        v_byte(plunger.cal.tRelease, 6);
+        break;
+        
+    case 16:
+        // expansion board configuration
+        v_byte(expan.nMain, 2);
+        v_byte(expan.nPower, 3);
+        v_byte(expan.nChime, 4);
+        break;
     }
 }
 

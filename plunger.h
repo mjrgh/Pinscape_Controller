@@ -72,29 +72,69 @@ public:
     // that it wasn't possible to take a valid reading.
     virtual bool read(PlungerReading &r) = 0;
     
-    // Send an exposure report to the host, via the joystick interface.  This
-    // is for image sensors, and can be omitted by other sensor types.  For
-    // image sensors, this takes one exposure and sends all pixels to the host
-    // through special joystick reports.  This is used by tools on the host PC
-    // to let the user view the low-level sensor pixel data, which can be
-    // helpful during installation to adjust the sensor positioning and light
-    // source.
+    // Send a sensor status report to the host, via the joystick interface.
+    // This provides some common information for all sensor types, and also
+    // includes a full image snapshot of the current sensor pixels for
+    // imaging sensor types.
     //
-    // Flag bits:
-    //   0x01  -> low res scan (default is high res scan)
+    // The default implementation here sends the common information
+    // packet, with the pixel size set to 0.
     //
-    // Visualization modes:
-    //   0  -> raw pixels
-    //   1  -> processed pixels (noise reduction, etc)
-    //   2  -> exaggerated contrast mode
-    //   3  -> edge visualization
+    // 'flags' is a combination of bit flags:
+    //   0x01  -> low-res scan (default is high res scan)
     //
-    // If processed mode is selected, the sensor should apply any pixel
-    // processing it normally does when taking a plunger position reading,
-    // such as exposure correction, noise reduction, etc.  In raw mode, we
-    // simply send the pixels as read from the sensor.  Both modes are useful
-    // in setting up the physical sensor.
-    virtual void sendExposureReport(class USBJoystick &js, uint8_t flags, uint8_t visMode) { }
+    // Low-res scan mode means that the sensor should send a scaled-down
+    // image, at a reduced size determined by the sensor subtype.  The
+    // default if this flag isn't set is to send the full image, at the
+    // sensor's native pixel size.  The low-res version is a reduced size
+    // image in the normal sense of scaling down a photo image, keeping the
+    // image intact but at reduced resolution.  Note that low-res mode
+    // doesn't affect the ongoing sensor operation at all.  It only applies
+    // to this single pixel report.  The purpose is simply to reduce the USB 
+    // transmission time for the image, to allow for a faster frame rate for 
+    // displaying the sensor image in real time on the PC.  For a high-res
+    // sensor like the TSL1410R, sending the full pixel array by USB takes 
+    // so long that the frame rate is way below regular video rates.
+    //
+    // 'visMode' is the visualization mode.  This is currently unused.  (In
+    // a preliminary design, the CCD sensor was going to pre-process the pixels
+    // through some filters, such as noise reduction and contrast enhnacement,
+    // before detecting the edge.  'visMode' was meant to select how much of
+    // this processing to apply to the pixels transmitted to the host, to allow
+    // the user to see each stage of the processing from raw sensor pixels to
+    // fully processed pixels.  But the filtering process proved to be too slow, 
+    // so in the end we removed it and now just do the edge detection directly
+    // on the raw pixels.  This makes the visualization mode unnecessary.
+    // However, we're keeping the parameter in case it becomes useful in the
+    // future.  Note that this could be used for special displays that don't 
+    // reflect actual pre-processing that would be done in normal edge
+    // detection, but instead visualize the internals of the algorithm, as
+    // a debugging or optimization tool.)
+    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags, uint8_t visMode)
+    {
+        // read the current position
+        int pos = 0xFFFF;
+        PlungerReading r;
+        if (read(r))
+        {
+            // success - scale it to 0..4095 (the generic scale used
+            // for non-imaging sensors)
+            pos = int(r.pos*4095L / 65535L);
+        }
+        
+        // Send the common status information, indicating 0 pixels, standard
+        // sensor orientation, and zero processing time.  Non-imaging sensors 
+        // usually don't have any way to detect the orientation, so they have 
+        // to rely on being installed in a pre-determined direction.  Non-
+        // imaging sensors usually have negligible analysis time (the only
+        // "analysis" is usually nothing more than a multiply to rescale an 
+        // ADC sample), so there's no point in collecting actual timing data; 
+        // just report zero.
+        js.sendPlungerStatus(0, pos, 1, getAvgScanTime(), 0);
+    }
+    
+    // Get the average sensor scan time in microseconds
+    virtual uint32_t getAvgScanTime() = 0;
         
 protected:
 };

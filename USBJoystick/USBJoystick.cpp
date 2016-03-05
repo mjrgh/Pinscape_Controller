@@ -94,37 +94,8 @@ bool USBJoystick::mediaUpdate(uint8_t data)
     return writeTO(EP4IN, report.data, report.length, MAX_PACKET_SIZE_EPINT, 100);
 }
  
-bool USBJoystick::updateExposure(int &idx, int npix, const uint8_t *pix)
-{
-    HID_REPORT report;
-    
-    // Set the special status bits to indicate it's an exposure report.
-    // The high 5 bits of the status word are set to 10000, and the
-    // low 11 bits are the current pixel index.
-    uint16_t s = idx | 0x8000;
-    put(0, s);
-    
-    // start at the second byte
-    int ofs = 2;
-    
-    // in the first report, add the total pixel count as the next two bytes
-    if (idx == 0)
-    {
-        put(ofs, npix);
-        ofs += 2;
-    }
-        
-    // now fill out the remaining bytes with exposure values
-    report.length = reportLen;
-    for ( ; ofs < report.length ; ++ofs)
-        report.data[ofs] = (idx < npix ? pix[idx++] : 0);
-    
-    // send the report
-    return sendTO(&report, 100);
-}
-
-bool USBJoystick::updateExposureExt(
-    int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime)
+bool USBJoystick::sendPlungerStatus(
+    int npix, int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime)
 {
     HID_REPORT report;
     
@@ -137,26 +108,33 @@ bool USBJoystick::updateExposureExt(
     
     // write the report subtype (0) to byte 2
     report.data[ofs++] = 0;
+
+    // write the number of pixels to bytes 3-4
+    put(ofs, uint16_t(npix));
+    ofs += 2;
     
-    // write the shadow edge position to bytes 3-4
+    // write the shadow edge position to bytes 5-6
     put(ofs, uint16_t(edgePos));
     ofs += 2;
     
-    // write the flags to byte 5:
-    //   0x01 -> standard orientation detected (dir == 1)
-    //   0x02 -> reverse orientation detected (dir == -1)
+    // write the flags to byte 7
+    extern bool plungerCalMode;
     uint8_t flags = 0;
-    if (dir == 1) flags |= 0x01;
-    if (dir == -1) flags |= 0x02;
+    if (dir == 1) 
+        flags |= 0x01; 
+    else if (dir == -1)
+        flags |= 0x02;
+    if (plungerCalMode)
+        flags |= 0x04;
     report.data[ofs++] = flags;
     
-    // write the average scan time in 10us intervals to bytes 6-8
+    // write the average scan time in 10us intervals to bytes 8-10
     uint32_t t = uint32_t(avgScanTime / 10);
     report.data[ofs++] = t & 0xff;
     report.data[ofs++] = (t >> 8) & 0xff;
     report.data[ofs++] = (t >> 16) & 0xff;
     
-    // write the processing time to bytes 9-11
+    // write the processing time to bytes 11-13
     t = uint32_t(processingTime / 10);
     report.data[ofs++] = t & 0xff;
     report.data[ofs++] = (t >> 8) & 0xff;
@@ -164,6 +142,28 @@ bool USBJoystick::updateExposureExt(
     
     // send the report
     report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::sendPlungerPix(int &idx, int npix, const uint8_t *pix)
+{
+    HID_REPORT report;
+    
+    // Set the special status bits to indicate it's an exposure report.
+    // The high 5 bits of the status word are set to 10000, and the
+    // low 11 bits are the current pixel index.
+    uint16_t s = idx | 0x8000;
+    put(0, s);
+    
+    // start at the second byte
+    int ofs = 2;
+    
+    // now fill out the remaining bytes with exposure values
+    report.length = reportLen;
+    for ( ; ofs < report.length ; ++ofs)
+        report.data[ofs] = (idx < npix ? pix[idx++] : 0);
+    
+    // send the report
     return sendTO(&report, 100);
 }
 
@@ -189,7 +189,30 @@ bool USBJoystick::reportID()
     return sendTO(&report, 100);
 }
 
-bool USBJoystick::reportConfig(int numOutputs, int unitNo, int plungerZero, int plungerMax, bool configured)
+bool USBJoystick::reportConfigVar(const uint8_t *data)
+{
+    HID_REPORT report;
+
+    // initially fill the report with zeros
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate that it's a config 
+    // variable report
+    uint16_t s = 0x9800;
+    put(0, s);
+    
+    // Copy the variable data (7 bytes, starting with the variable ID)
+    memcpy(report.data + 2, data, 7);
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::reportConfig(
+    int numOutputs, int unitNo, 
+    int plungerZero, int plungerMax, int plungerRlsTime,
+    bool configured)
 {
     HID_REPORT report;
 
@@ -209,10 +232,11 @@ bool USBJoystick::reportConfig(int numOutputs, int unitNo, int plungerZero, int 
     // write the plunger zero and max values
     put(6, plungerZero);
     put(8, plungerMax);
+    report.data[10] = uint8_t(plungerRlsTime);
     
     // write the status bits: 
     //  0x01  -> configuration loaded
-    report.data[10] = (configured ? 0x01 : 0x00);
+    report.data[11] = (configured ? 0x01 : 0x00);
     
     // send the report
     report.length = reportLen;

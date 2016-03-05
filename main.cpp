@@ -2308,6 +2308,9 @@ void createPlunger()
     }
 }
 
+// Global plunger calibration mode flag
+bool plungerCalMode;
+
 // Plunger reader
 //
 // This class encapsulates our plunger data processing.  At the simplest
@@ -2368,9 +2371,6 @@ public:
 
         // no history yet
         histIdx = 0;
-        
-        // not in calibration mode
-        cal = false;
     }
 
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -2384,21 +2384,9 @@ public:
         if (plungerSensor->read(r))
         {
             // if in calibration mode, apply it to the calibration
-            if (cal)
+            if (plungerCalMode)
             {
-                // if it's outside of the current calibration bounds,
-                // expand the bounds
-                if (r.pos < cfg.plunger.cal.min)
-                    cfg.plunger.cal.min = r.pos;
-                if (r.pos < cfg.plunger.cal.zero)
-                    cfg.plunger.cal.zero = r.pos;
-                if (r.pos > cfg.plunger.cal.max)
-                    cfg.plunger.cal.max = r.pos;
-                    
-                // As long as we're in calibration mode, return the raw
-                // sensor position as the joystick value, adjusted to the
-                // JOYMAX scale.
-                z = int16_t((long(r.pos) * JOYMAX)/65535);
+                readForCal(r);
                 return;
             }
             
@@ -2419,7 +2407,7 @@ public:
             // bounds-check the calibration data
             checkCalBounds(r.pos);
 
-            // calibrate and rescale the value
+            // Apply the calibration and rescale to the joystick range.
             r.pos = int(
                 (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
                 / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
@@ -2638,20 +2626,195 @@ public:
     uint32_t getTimestamp() const { return nthHist(0).t; }
 
     // Set calibration mode on or off
-    void calMode(bool f) 
+    void setCalMode(bool f) 
     {
-        // if entering calibration mode, reset the saved calibration data
-        if (f && !cal)
+        // check to see if we're entering calibration mode
+        if (f && !plungerCalMode)
+        {
+            // reset the calibration in the configuration
             cfg.plunger.cal.begin();
-
+            
+            // start in state 0 (waiting to settle)
+            calState = 0;
+            calZeroPosSum = 0;
+            calZeroPosN = 0;
+            calRlsTimeSum = 0;
+            calRlsTimeN = 0;
+            
+            // set the initial zero point to the current position
+            PlungerReading r;
+            if (plungerSensor->read(r))
+            {
+                // got a reading - use it as the initial zero point
+                cfg.plunger.cal.zero = r.pos;
+                
+                // use it as the starting point for the settling watch
+                f1 = r;
+            }
+            else
+            {
+                // no reading available - use the default 1/6 position
+                cfg.plunger.cal.zero = 0xffff/6;
+                
+                // we don't have a starting point for the setting watch
+                f1.pos = -65535;
+                f1.t = 0;
+            }
+        }
+            
         // remember the new mode
-        cal = f; 
+        plungerCalMode = f; 
     }
     
     // is a firing event in progress?
     bool isFiring() { return firing > 3; }
 
 private:
+    // Read the sensor in calibration mode
+    void readForCal(PlungerReading r)
+    {
+        // if it's outside of the current calibration bounds,
+        // expand the bounds
+        if (r.pos < cfg.plunger.cal.min)
+            cfg.plunger.cal.min = r.pos;
+        if (r.pos > cfg.plunger.cal.max)
+            cfg.plunger.cal.max = r.pos;
+                    
+        // While we're in calibration mode, report the raw sensor
+        // position as the joystick value, adjusted to the JOYMAX scale.
+        z = int16_t((long(r.pos) * JOYMAX)/65535);
+        
+        // for the release monitoring, take readings at least 2ms apart
+        if (uint32_t(r.t - f2.t) < 2000UL)
+            return;
+        
+        // Check our state
+        switch (calState)
+        {
+        case 0:
+            // We're waiting for the position to settle.  Check to see if
+            // we've been at the recent settling position long enough.
+            // Consider 1/50" (about 0.5mm) close enough to count as stable, 
+            // to allow for some slight sensor noise from reading to reading.
+            if (abs(r.pos - f1.pos) > 65535/3/50)
+            {
+                // too far away - set the new starting point
+                f1 = r;
+            }
+            else if (uint32_t(r.t - f1.t) > 100000)
+            {
+                // We've been stationary long enough to count as settled.
+                // Wwitch to "at rest" state.
+                calState = 1;
+                
+                // collect the new zero point for our average
+                calZeroPosSum += r.pos;
+                calZeroPosN += 1;
+                
+                // use the new average as the zero point
+                cfg.plunger.cal.zero = uint16_t(calZeroPosSum / calZeroPosN);
+                
+                // remember the current position in f1 to detect when we start
+                // moving again
+                f1 = r;
+            }
+            break;
+            
+        case 1:
+            // At rest.  We remain in this state until we see the plunger
+            // retract more than about 1/2".
+            if (r.pos - f1.pos > 65535/6)
+            {
+                // switch to state 2 - retracting
+                calState = 2;
+                
+                // use f1 as the max so far
+                f1 = r;
+            }
+            break;
+            
+        case 2:
+            // Away from rest position.  Note the maximum point so far in f1,
+            // and monitor for release motions.
+            if (r.pos >= f1.pos)
+            {
+                // moving back - note the new max point on this run
+                f1 = r;
+            }
+            else
+            {
+                // moving forward - switch to possible release mode
+                calState = 3;
+            }
+            break;
+            
+        case 3:
+            // Possible release.  We have to move forward on each new
+            // reading, relative to two readings ago, to stay in release 
+            // mode.
+            if (r.pos >= f3r.pos)
+            {
+                // not moving forward - switch back to retract mode
+                calState = 2;
+                f1 = r;
+            }
+            else if (r.pos <= cfg.plunger.cal.zero)
+            {
+                // Crossed the zero point.  Figure the release time.  If
+                // it's within a reasonable range, add it to the average.
+                // We'll ignore outliers on the assumption that they
+                // don't reflect actual release motions.  
+                int dt = uint32_t(r.t - f1.t)/1000;
+                if (dt < 250 && dt > 25)
+                {
+                    // count it in the average
+                    calRlsTimeSum += dt;
+                    calRlsTimeN += 1;
+                    
+                    // store the new average in the configuration
+                    cfg.plunger.cal.tRelease = uint8_t(calRlsTimeSum / calRlsTimeN);
+                    cfg.plunger.cal.tRelease = dt; // $$$
+                }
+                
+                // release done - switch to "waiting to settle" mode
+                calState = 0;
+                f1 = r;
+            }
+            break;
+        }
+        
+        // f2 is always the immediately previous reading in cal mode, 
+        // and f3r is the one before that
+        f3r = f2;
+        f2 = r;
+    }
+
+    // Calibration state.  During calibration mode, we watch for release
+    // events, to measure the time it takes to complete the release
+    // motion; and we watch for the plunger to come to reset after a
+    // release, to gather statistics on the rest position.
+    //   0 = waiting to settle
+    //   1 = at rest
+    //   2 = retracting
+    //   3 = possibly releasing
+    uint8_t calState;
+    
+    // Calibration zero point statistics.
+    // During calibration mode, we collect data on the rest position (the 
+    // zero point) by watching for the plunger to come to rest after each 
+    // release.  We average these rest positions to get the calibrated 
+    // zero point.  We use the average because the real physical plunger 
+    // itself doesn't come to rest at exactly the same spot every time, 
+    // largely due to friction in the mechanism.  To calculate the average,
+    // we keep a sum of the readings and a count of samples.
+    long calZeroPosSum;
+    int calZeroPosN;
+    
+    // Calibration release time statistics.
+    // During calibration, we collect an average for the release time.
+    long calRlsTimeSum;
+    int calRlsTimeN;
+
     // set a firing mode
     inline void firingMode(int m) 
     {
@@ -2816,9 +2979,6 @@ private:
     // motion within this timeframe if the plunger is just bouncing
     // freely.
     PlungerReading f3r;
-    
-    // flag: we're in calibration mode
-    bool cal;
     
     // next Z value to report to the joystick interface (in joystick 
     // distance units)
@@ -3125,9 +3285,9 @@ uint16_t statusFlags;
     
 // Pixel dump mode - the host requested a dump of image sensor pixels
 // (helpful for installing and setting up the sensor and light source)
-bool reportPix = false;
-uint8_t reportPixFlags;    // pixel report flag bits (see ccdSensor.h)
-uint8_t reportPixVisMode;  // pixel report visualization mode (not currently used)
+bool reportPlungerStat = false;
+uint8_t reportStatFlags;    // pixel report flag bits (see ccdSensor.h)
+uint8_t reportStatVisMode;  // pixel report visualization mode (not currently used)
 
 
 // ---------------------------------------------------------------------------
@@ -3298,17 +3458,17 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             
             // enter calibration mode
             calBtnState = 3;
-            plungerReader.calMode(true);
+            plungerReader.setCalMode(true);
             calBtnTimer.reset();
             break;
             
         case 3:
-            // 3 = pixel dump
+            // 3 = plunger sensor status report
             //     data[2] = flag bits
             //     data[3] = visualization mode
-            reportPix = true;
-            reportPixFlags = data[2];
-            reportPixVisMode = data[3];
+            reportPlungerStat = true;
+            reportStatFlags = data[2];
+            reportStatVisMode = data[3];
             
             // show purple until we finish sending the report
             diagLED(1, 0, 1);
@@ -3320,7 +3480,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             js.reportConfig(
                 numOutputs, 
                 cfg.psUnitNo - 1,   // report 0-15 range for unit number (we store 1-16 internally)
-                cfg.plunger.cal.zero, cfg.plunger.cal.max,
+                cfg.plunger.cal.zero, cfg.plunger.cal.max, cfg.plunger.cal.tRelease,
                 nvm.valid());
             break;
             
@@ -3350,6 +3510,24 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             // 8 = Engage/disengage night mode.
             //     data[2] = 1 to engage, 0 to disengage
             setNightMode(data[2]);
+            break;
+            
+        case 9:
+            // 9 = Config variable query.
+            //     data[2] = config var ID
+            //     data[3] = array index (for array vars: button assignments, output ports)
+            {
+                // set up the reply buffer with the variable ID data
+                uint8_t reply[8];
+                reply[1] = data[2];
+                reply[2] = data[3];
+                
+                // query the value
+                configVarGet(reply);
+                
+                // send the reply
+                js.reportConfigVar(reply + 1);
+            }
             break;
         }
     }
@@ -3626,7 +3804,7 @@ int main(void)
                     calBtnTimer.reset();
                     
                     // begin the plunger calibration limits
-                    plungerReader.calMode(true);
+                    plungerReader.setCalMode(true);
                 }
                 break;
                 
@@ -3650,7 +3828,7 @@ int main(void)
             {
                 // exit calibration mode
                 calBtnState = 0;
-                plungerReader.calMode(false);
+                plungerReader.setCalMode(false);
                 
                 // save the updated configuration
                 cfg.plunger.cal.calibrated = 1;
@@ -3777,14 +3955,14 @@ int main(void)
             jsReportTimer.reset();
         }
 
-        // If we're in pixel dump mode, report all pixel exposure values
-        if (reportPix)
+        // If we're in sensor status mode, report all pixel exposure values
+        if (reportPlungerStat)
         {
             // send the report            
-            plungerSensor->sendExposureReport(js, reportPixFlags, reportPixVisMode);
+            plungerSensor->sendStatusReport(js, reportStatFlags, reportStatVisMode);
 
             // we have satisfied this request
-            reportPix = false;
+            reportPlungerStat = false;
         }
         
         // If joystick reports are turned off, send a generic status report

@@ -55,18 +55,66 @@
 // as an opaque vendor-defined value, so the joystick interface on the
 // Windows side simply ignores it.)
 //
-// 2A. Plunger sensor pixel dump
-// Software on the PC can request a full read of the pixels from the plunger 
-// image sensor (if an imaging sensor type is being used) by sending custom 
-// protocol message 65 3 (see below).  Normally, the pixels from the image
-// sensor are read and processed on the controller device without being sent
-// to the PC; the PC only receives the plunger position reading obtained from
-// analyzing the image data.  For debugging and setup purposes, software on
-// the host can use this special report to obtain the full image pixel array.
-// The image sensors we use have too many pixels to fit into one report, so 
-// we have to send a series of reports to transmit the full image.  We send
-// as many reports as necessary to transmit the full image.  Each report
-// looks like this:
+// 2A. Plunger sensor status report
+// Software on the PC can request a detailed status report from the plunger
+// sensor.  The status information is meant as an aid to installing and
+// adjusting the sensor device for proper performance.  For imaging sensor
+// types, the status report includes a complete current image snapshot
+// (an array of all of the pixels the sensor is currently imaging).  For
+// all sensor types, it includes the current plunger position registered
+// on the sensor, and some timing information.
+//
+// To request the sensor status, the host sends custom protocol message 65 3
+// (see below).  The device replies with a message in this format:
+//
+//    bytes 0:1 = 0x87FF
+//    byte  2   = 0 -> first (currently only) status report packet
+//                (additional packets could be added in the future if
+//                more fields need to be added)
+//    bytes 3:4 = number of pixels to be sent in following messages, as
+//                an unsigned 16-bit little-endian integer.  This is 0 if 
+//                the sensor isn't an imaging type.
+//    bytes 5:6 = current plunger position registered on the sensor.
+//                For imaging sensors, this is the pixel position, so it's
+//                scaled from 0 to number of pixels - 1.  For non-imaging
+//                sensors, this uses the generic joystick scale 0..4095.
+//                The special value 0xFFFF means that the position couldn't
+//                be determined,
+//    byte  7   = bit flags: 
+//                   0x01 = normal orientation detected
+//                   0x02 = reversed orientation detected
+//                   0x04 = calibration mode is active (no pixel packets
+//                          are sent for this reading)
+//    bytes 8:9:10 = average time for each sensor read, in 10us units.
+//                This is the average time it takes to complete the I/O
+//                operation to read the sensor, to obtain the raw sensor
+//                data for instantaneous plunger position reading.  For 
+//                an imaging sensor, this is the time it takes for the 
+//                sensor to capture the image and transfer it to the
+//                microcontroller.  For an analog sensor (e.g., an LVDT
+//                or potentiometer), it's the time to complete an ADC
+//                sample.
+//    bytes 11:12:13 = time it took to process the current frame, in 10us 
+//                units.  This is the software processing time that was
+//                needed to analyze the raw data read from the sensor.
+//                This is typically only non-zero for imaging sensors,
+//                where it reflects the time required to scan the pixel
+//                array to find the indicated plunger position.  The time
+//                is usually zero or negligible for analog sensor types, 
+//                since the only "analysis" is a multiplication to rescale 
+//                the ADC sample.
+//
+// If the sensor is an imaging sensor type, this will be followed by a
+// series of pixel messages.  The imaging sensor types have too many pixels
+// to send in a single USB transaction, so the device breaks up the array
+// into as many packets as needed and sends them in sequence.  For non-
+// imaging sensors, the "number of pixels" field in the lead packet is
+// zero, so obviously no pixel packets will follow.  If the "calibration
+// active" bit in the flags byte is set, no pixel packets are sent even
+// if the sensor is an imaging type, since the transmission time for the
+// pixels would intefere with the calibration process.  If pixels are sent,
+// they're sent in order starting at the first pixel.  The format of each 
+// pixel packet is:
 //
 //    bytes 0:1 = 11-bit index, with high 5 bits set to 10000.  For 
 //                example, 0x8004 (encoded little endian as 0x04 0x80) 
@@ -77,31 +125,13 @@
 //    bytes 3   = brightness of pixel at index+1
 //    etc for the rest of the packet
 //
-// The pixel dump also sends a special final report, after all of the
-// pixel messages, with the "index" field set to 0x7FF (11 bits of 1's).  
-// This report packs special fields instead of pixels.  There are two
-// subtypes, sent in sequence:
-//
-//  Subtype 0:
-//    bytes 0:1 = 0x87FF (pixel report flags + index 0x7FF)
-//    byte 2    = 0x00 -> special report subtype 0
-//    bytes 3:4 = pixel position of detected shadow edge in this image,
-//                or 0xFFFF if no edge was found in this image.  For
-//                raw pixel reports, no edge will be detected because
-//                we don't look for one.
-//    byte 5    = flags: 
-//                   0x01 = normal orientation detected
-//                   0x02 = reversed orientation detected
-//    bytes 6:7:8 = average time for a sensor scan, in 10us units
-//    byte 9:10:11 = time for processing this image, in 10us units
-//
-//  Subtype 1:
-//    bytes 0:1 = 0x87FF
-//    byte 2    = 0x01 -> special report subtype 1
-//    bytes 3:4 = calibration zero point, in pixels (16-bit little-endian)
-//    bytes 5:6 = calibration maximum point, in pixels
-//    bytes 7:8 = calibration minimum point, in pixels
-//    byte 9    = calibrated release time, in milliseconds
+// Note that we currently only support one-dimensional imaging sensors
+// (i.e., pixel arrays that are 1 pixel wide).  The report format doesn't
+// have any provision for a two-dimensional layout.  The KL25Z probably
+// isn't powerful enough to do real-time image analysis on a 2D image
+// anyway, so it's unlikely that we'd be able to make 2D sensors work at
+// all, but if we ever add such a thing we'll have to upgrade the report 
+// format here accordingly.
 // 
 //
 // 2B. Configuration query.
@@ -114,7 +144,8 @@
 //    bytes 2:3 = total number of outputs, little endian
 //    bytes 6:7 = plunger calibration zero point, little endian
 //    bytes 8:9 = plunger calibration maximum point, little endian
-//    byte  10   = bit flags: 
+//    byte  10  = plunger calibration release time, in milliseconds
+//    byte  11  = bit flags: 
 //                 0x01 -> configuration loaded; 0 in this bit means that
 //                         the firmware has been loaded but no configuration
 //                         has been sent from the host
@@ -124,13 +155,25 @@
 // This is requested by sending custom protocol message 65 7 (see below).
 // In response, the device sends one report to the host using this format:
 //
-//    bytes 0:1 = 0x9000.  This has bit pattern 10010 in the high 5
-//                bits, which distinguishes this special report from other 
-//                report types.
+//    bytes 0:1 = 0x9000.  This has bit pattern 10010 in the high 5 bits
+//                to distinguish this from other report types.
 //    bytes 2-11 = Unique CPU ID.  This is the ID stored in the CPU at the
 //                factory, guaranteed to be unique across Kinetis devices.
 //                This can be used by the host to distinguish devices when
 //                two or more controllers are attached.
+//
+// 2D. Configuration variable query.
+// This is requested by sending custom protocol message 65 9 (see below).
+// In response, the device sends one report to the host using this format:
+//
+//   bytes 0:1 = 0x9800.  This has bit pattern 10011 in the high 5 bits
+//               to distinguish this from other report types.
+//   byte  2   = Variable ID.  This is the same variable ID sent in the
+//               query message, to relate the reply to the request.
+//   bytes 3-8 = Current value of the variable, in the format for the
+//               individual variable type.  The variable formats are
+//               described in the CONFIGURATION VARIABLES section below.
+//
 //
 // WHY WE USE THIS HACKY APPROACH TO DIFFERENT REPORT TYPES
 //
@@ -293,6 +336,12 @@
 //        8 -> Engage/disengage night mode.  The third byte of the message is 1 to
 //             engage night mode, 0 to disengage night mode.  (This mode isn't stored
 //             persistently; night mode is disengaged after a reset or power cycle.)
+//
+//        9 -> Query configuration variable.  The second byte is the config variable
+//             number (see the CONFIGURATION VARIABLES section below).  For the array
+//             variables (button assignments, output ports), the third byte is the
+//             array index.  The device replies with a configuration variable report
+//             (see above) with the current setting for the requested variable.
 //
 // 66  -> Set configuration variable.  The second byte of the message is the config
 //        variable number, and the remaining bytes give the new value for the variable.
@@ -527,7 +576,27 @@
 //       timeout period.  Bytes 3 give the new reboot timeout in seconds.  Setting this
 //       to 0 disables the reboot timeout.
 //
-
+// 15 -> Plunger calibration.  In most cases, the calibration is set internally by the
+//       device by running the calibration procedure.  However, it's sometimes useful
+//       for the host to be able to get and set the calibration, such as to back up
+//       the device settings on the PC, or to save and restore the current settings
+//       when installing a software update.
+//
+//         bytes 3:4 = rest position (unsigned 16-bit little-endian)
+//         bytes 5:6 = maximum retraction point (unsigned 16-bit little-endian)
+//         byte  7   = measured plunger release travel time in milliseconds
+//
+// 16 -> Expansion board configuration.  This doesn't affect the controller behavior
+//       directly; the individual options related to the expansion boards (such as 
+//       the TLC5940 and 74HC595 setup) still need to be set separately.  This is
+//       stored so that the PC config UI can store and recover the information to
+//       present in the UI.  For the "classic" KL25Z-only configuration, simply set 
+//       all of the fields to zero.
+//
+//         byte 3 = number of main interface boards
+//         byte 4 = number of MOSFET power boards
+//         byte 5 = number of chime boards
+//
 
 
 // --- PIN NUMBER MAPPINGS ---

@@ -15,6 +15,7 @@ public:
     
     virtual void init() { }
     virtual bool read(PlungerReading &r) { return false; }
+    virtual uint32_t getAvgScanTime() { return 0; }
 };
 
 #endif /* NULLSENSOR_H */

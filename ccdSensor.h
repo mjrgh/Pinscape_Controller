@@ -55,6 +55,9 @@ public:
         int pixpos;
         if (process(pix, n, pixpos, 0))
         {            
+            // run the position through the anti-jitter filter
+            filter(pixpos);
+
             // Normalize to the 16-bit range.  Our reading from the 
             // sensor is a pixel position, 0..n-1.  To rescale to the
             // normalized range, figure pixpos*65535/(n-1).
@@ -76,24 +79,6 @@ public:
     // of the edge and return true; otherwise we return false.  The 'pos'
     // value returned, if any, is adjusted for sensor orientation so that
     // it reflects the logical plunger position.
-    //
-    // 'visMode' is the visualization mode.  If non-zero, we replace the
-    // pixels in the 'pix' array with a new version for visual presentation
-    // to the user, as an aid to setup and debugging.  The visualization
-    // modes are:
-    //
-    //   0 = No visualization
-    //   1 = High contrast: we set each pixel to white or black according
-    //       to whether it's brighter or dimmer than the midpoint brightness 
-    //       we use to seek the shadow edge.  This mode makes the edge 
-    //       positions visually apparent.
-    //   2 = Edge mode: we set all pixels to white except for detected edges,
-    //       which we set to black.
-    //
-    // The 'pix' array is overwritten with the processed pixels.  If visMode
-    // is 0, this reflects only the basic preprocessing we do in an edge
-    // scan, such as noise reduction.  For other visualization modes, the
-    // pixels are replaced by the visualization results.
     bool process(uint8_t *pix, int &n, int &pos, int visMode)
     {
         // Get the levels at each end
@@ -194,455 +179,75 @@ public:
         // no edge found
         return false;
     }
-
-
-#if 0
-    bool process3(uint8_t *pix, int &n, int &pos, int visMode)
-    {
-        // First, reduce the pixel array resolution to 1/4 of the 
-        // native sensor resolution.  The native 400 dpi is higher
-        // than we need for good results, so we can afford to cut 
-        // this down a bit.  Reducing the resolution  gives us
-        // a little simplistic noise reduction (by averaging adjacent
-        // pixels), and it speeds up the rest of the edge finder by
-        // making the data set smaller.
-        //
-        // While we're scanning, collect the brightness range of the
-        // reduced pixel set.
-        register int src, dst;
-        int lo = pix[0], hi = pix[0];
-        for (src = 0, dst = 0 ; src < n ; )
-        {
-            // compute the average of this pixel group
-            int p = (int(pix[src++]) + pix[src++] + pix[src++] + pix[src++]) / 4;
-            
-            // note if it's the new high or low point
-            if (p > hi)
-                hi = p;
-            else if (p < lo)
-                lo = p;
-            
-            // Store the result back into the original array.  Note
-            // that there's no risk of overwriting anything we still
-            // need, since the pixel set is shrinking, so the write 
-            // pointer is always behind the read pointer.
-            pix[dst++] = p;
-        }
-        
-        // set the new array size
-        n = dst;
-
-        // figure the midpoint brightness
-        int mid = (hi + lo)/2;
-        
-        // Look at the first few pixels on the left and right sides
-        // to try to detect the sensor orientation. 
-        int left = pix[0] + pix[1] + pix[2] + pix[3];
-        int right = pix[n-1] + pix[n-2] + pix[n-3] + pix[n-4];
-        if (left > right + 40)
-        {
-            // left side is brighter - standard orientation
-            dir = 1;
-        }
-        else if (right > left + 40)
-        {
-            // right side is brighter - reversed orientation
-            dir = -1;
-        }
-        
-        // scan for edges according to the direction
-        bool found = false;
-        if (dir == 0)
-        {
-        }
-        else
-        {
-            // scan from the bright end to the dark end
-            int stop;
-            if (dir == 1)
-            {
-                src = 0;
-                stop = n;
-            }
-            else
-            {
-                src = n - 1;
-                stop = -1;
-            }
-
-            // scan through the pixels
-            for ( ; src != stop ; src += dir)
-            {
-                // if this pixel is darker than the midpoint, we might 
-                // have an edge
-                if (pix[src] < mid)
-                {
-                    // make sure it's not just noise by checking the next
-                    // few to make sure they're also darker
-                    if (dir > 0)
-                        dst = src + 10 > n ? n : src + 10;
-                    else
-                        dst = src - 10 < 0 ? -1 : src - 10;
-                    int i, nok;
-                    for (nok = 0, i = src ; i != dst ; i += dir)
-                    {
-                        if (pix[i] < mid)
-                            ++nok;
-                    }
-                    if (nok > 6)
-                    {
-                        // we have a winner
-                        pos = src;
-                        found = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // return the result
-        return found;        
-    }
-#endif
-
-#if 0
-    bool process2(uint8_t *pix, int n, int &pos, int visMode)
-    {
-        // find the high and low brightness levels, and sum
-        // all pixels (for the running averages)
-        register int i;
-        long sum = 0;
-        int lo = 255, hi = 0;
-        for (i = 0 ; i < n ; ++i)
-        {
-            int p = pix[i];
-            sum += p;
-            if (p > hi) hi = p;
-            if (p < lo) lo = p;
-        }
-        
-        // Figure the midpoint brightness
-        int mid = (lo + hi)/2;
-        
-        // Scan for edges.  An edge is where adjacent pixels are
-        // on opposite sides of the brightness midpoint.  For each
-        // edge, we'll compute the "steepness" as the difference
-        // between the average brightness on each side.  We'll
-        // keep only the steepest edge.
-        register int bestSteepness = -1;
-        register int bestPos = -1;
-        register int sumLeft = 0;
-        register int prv = pix[0], nxt = pix[1];
-        for (i = 1 ; i < n ; prv = nxt, nxt = pix[++i])
-        {
-            // figure the new sums left and right of the i:i+1 boundary
-            sumLeft += prv;
-            
-            // if this is an edge, check if it's the best edge
-            if (((mid - prv) & 0x80) ^ ((mid - nxt) & 0x80))
-            {
-                // compute the steepness
-                int steepness = sumLeft/i - (sum - sumLeft)/(n-i);
-                if (steepness > bestSteepness)
-                {
-                    bestPos = i;
-                    bestSteepness = steepness;
-                }
-            }
-        }
-        
-        // if we found a position, return it
-        if (bestPos >= 0)
-        {
-            pos = bestPos;
-            return true;
-        }
-        else
-        {
-            return false;
-        }
-    }
-#endif
-
-#if 0
-    bool process1(uint8_t *pix, int n, int &pos, int visMode)
-    {
-        // presume failure
-        bool ret = false;
-        
-        // apply noise reduction
-        noiseReduction(pix, n);
-        
-        // make a histogram of brightness values
-        uint8_t hist[256];
-        memset(hist, 0, sizeof(hist));
-        for (int i = 0 ; i < n ; ++i)
-        {
-            // get this pixel brightness, and count it in the histogram,
-            // stopping if we hit the maximum count of 255
-            int b = pix[i];
-            if (hist[b] < 255)
-                ++hist[b];
-        }
-        
-        // Find the high and low bounds.  To avoid counting outliers that
-        // might be noise, we'll scan in from each end of the brightness 
-        // range until we find a few pixels at or outside that level.
-        int cnt, lo, hi;
-        const int mincnt = 10;
-        for (cnt = 0, lo = 0 ; lo < 255 ; ++lo)
-        {
-            cnt += hist[lo];
-            if (cnt >= mincnt)
-                break;
-        }
-        for (cnt = 0, hi = 255 ; hi >= 0 ; --hi)
-        {
-            cnt += hist[hi];
-            if (cnt >= mincnt)
-                break;
-        }
-        
-        // figure the inferred midpoint brightness level
-        uint8_t m = uint8_t((int(lo) + int(hi))/2);
-        
-        // Try finding an edge with the inferred brightness range
-        if (findEdge(pix, n, m, pos, false))
-        {
-            // Found it!  This image has sufficient contrast to find
-            // an edge, so save the midpoint brightness for next time in
-            // case the next image isn't as clear.
-            midpt[midptIdx] = m;
-            midptIdx = (midptIdx + 1) % countof(midpt);
-            
-            // Infer the sensor orientation.  If pixels at the bottom 
-            // of the array are brighter than pixels at the top, it's in the
-            // standard orientation, otherwise it's the reverse orientation.
-            int a = int(pix[0]) + int(pix[1]) + int(pix[2]);
-            int b = int(pix[n-1]) + int(pix[n-2]) + int(pix[n-3]);
-            dir = (a > b ? 1 : -1);
-            
-            // if we're in the reversed orientation, mirror the position
-            if (dir < 0)
-                pos = n-1 - pos;
-                
-            // success
-            ret = true;
-        }
-        else
-        {
-            // We didn't find a clear edge using the inferred exposure
-            // level.  This might be because the image is entirely in or out
-            // of shadow, with the plunger's shadow's edge out of the frame.
-            // Figure the average of the recent history of successful frames
-            // so that we can check to see if we have a low-contrast image
-            // that's entirely above or below the recent midpoints.
-            int avg = 0;
-            for (int i = 0 ; i < countof(midpt) ; avg += midpt[i++]) ;
-            avg /= countof(midpt);
-            
-            // count how many we have above and below the midpoint
-            int nBelow = 0, nAbove = 0;
-            for (int i = 0 ; i < avg ; nBelow += hist[i++]) ;
-            for (int i = avg + 1 ; i < 255 ; nAbove += hist[i++]) ;
-            
-            // check if we're mostly above or below (we don't require *all*,
-            // to allow for some pixel noise remaining)
-            if (nBelow < 50)
-            {
-                // everything's bright -> we're in full light -> fully retracted
-                pos = n - 1;
-                ret = true;
-            }
-            else if (nAbove < 50)
-            {
-                // everything's dark -> we're in full shadow -> fully forward
-                pos = 0;
-                ret = true;
-            }
-            
-            // for visualization purposes, use the previous average as the midpoint
-            m = avg;
-        }
-        
-        // If desired, apply the visualization mode to the pixels
-        switch (visMode)
-        {
-        case 2:
-            // High contrast mode.  Peg each pixel to the white or black according
-            // to which side of the midpoint it's on.
-            for (int i = 0 ; i < n ; ++i)
-                pix[i] = (pix[i] < m ? 0 : 255);
-            break;
-            
-        case 3:
-            // Edge mode.  Re-run the edge analysis in visualization mode.
-            {
-                int dummy;
-                findEdge(pix, n, m, dummy, true);
-            }
-            break;
-        }
-        
-        // return the result
-        return ret;
-    }
     
-    // Apply noise reduction to the pixel array.  We use a simple rank
-    // selection median filter, which is fast and seems to produce pretty
-    // good results with data from this sensor type.  The filter looks at
-    // a small window around each pixel; if a given pixel is the outlier
-    // within its window (i.e., it has the maximum or minimum brightness 
-    // of all the pixels in the window), we replace it with the median
-    // brightness of the pixels in the window.  This works particularly
-    // well with the structure of the image we expect to capture, since
-    // the image should have stretches of roughly uniform brightness -
-    // part fully exposed and part in the plunger's shadow.  Spiky
-    // variations in isolated pixels are almost guaranteed to be noise.
-    void noiseReduction(uint8_t *pix, int n)
-    {
-        // set up a rolling window of pixels
-        uint8_t w[7] = { pix[0], pix[1], pix[2], pix[3], pix[4], pix[5], pix[6] };
-        int a = 0;
-        
-        // run through the pixels
-        for (int i = 0 ; i < n ; ++i)
-        {
-            // set up a sorting array for the current window
-            uint8_t tmp[7] = { w[0], w[1], w[2], w[3], w[4], w[5], w[6] };
-            
-            // sort it (using a Bose-Nelson sorting network for N=7)
-#define SWAP(x, y) { \
-                const int a = tmp[x], b = tmp[y]; \
-                if (a > b) tmp[x] = b, tmp[y] = a; \
-            }
-            SWAP(1, 2);
-            SWAP(0, 2);
-            SWAP(0, 1);
-            SWAP(3, 4);
-            SWAP(5, 6);
-            SWAP(3, 5);
-            SWAP(4, 6);
-            SWAP(4, 5);
-            SWAP(0, 4);
-            SWAP(0, 3);
-            SWAP(1, 5);
-            SWAP(2, 6);
-            SWAP(2, 5);
-            SWAP(1, 3);
-            SWAP(2, 4);
-            SWAP(2, 3);            
-
-            // if the current pixel is at one of the extremes, replace it
-            // with the median, otherwise leave it unchanged
-            if (pix[i] == tmp[0] || pix[i] == tmp[6])
-                pix[i] = tmp[3];
-                
-            // update our rolling window, if we're not at the start or
-            // end of the overall pixel array
-            if (i >= 3 && i < n-4)
-            {
-                w[a] = pix[i+4];
-                a = (a + 1) % 7;
-            }
-        }
-    }
-    
-    // Find an edge in the image.  'm' is the midpoint brightness level
-    // in the array.  On success, fills in 'pos' with the pixel position
-    // of the edge and returns true.  Returns false if no clear, unique 
-    // edge can be detected.
+    // Filter a result through the jitter reducer.  We tend to have some
+    // very slight jitter - by a pixel or two - even when the plunger is
+    // stationary.  This happens due to analog noise.  In the theoretical
+    // ideal, analog noise wouldn't be a factor for this sensor design,
+    // in that we'd have enough contrast between the bright and dark
+    // regions that there'd be no ambiguity as to where the shadow edge
+    // falls.  But in the real system, the shadow edge isn't perfectly
+    // sharp on the scale of our pixels, so the edge isn't an ideal
+    // digital 0-1 discontinuity but rather a ramp of gray levels over
+    // a few pixels.  Our edge detector picks the pixel where we cross
+    // the midpoint brightness threshold.  The exact midpoint can vary
+    // a little from frame to frame due to exposure length variations,
+    // light source variations, other stray light sources in the cabinet, 
+    // ADC error, sensor pixel noise, and electrical noise.  As the 
+    // midpoint varies, the pixel that qualifies as the edge position 
+    // can move by a pixel or two from one from to the next, even 
+    // though the physical shadow isn't moving.  This all adds up to
+    // some slight jitter in the final position reading.
     //
-    // If 'vis' is true, we'll update the pixel array with a visualization
-    // of the edges, for display in the config tool.
-    bool findEdge(uint8_t *pix, int n, uint8_t m, int &pos, bool vis)
-    {
-        // Scan for edges.  An edge is a transition where two adajacent
-        // pixels are on opposite sides of the brightness midpoint.
-        int nEdges = 0;
-        int edgePos = 0;
-        uint8_t prv = pix[0], nxt = pix[1];
-        for (int i = 1 ; i < n-1 ; prv = nxt, nxt = pix[++i])
+    // To reduce the jitter, we keep a short history of recent readings.
+    // When we see a new reading that's close to the whole string of
+    // recent readings, we peg the new reading to the consensus of the
+    // recent history.  This smooths out these small variations without
+    // affecting response time or resolution.
+    void filter(int &pos)
+    {        
+        // check to see if it's close to all of the history elements
+        const int dpos = 1;
+        bool isClose = true;
+        long sum = 0;
+        for (int i = 0 ; i < countof(hist) ; ++i)
         {
-            // presume we'll show a non-edge (white) pixel in the visualization
-            uint8_t vispix = 255;
-            
-            // if the two are on opposite sides of the midpoint, we have
-            // an edge
-            if ((prv < m && nxt > m) || (prv > m && nxt < m))
+            int ipos = hist[i];
+            sum += ipos;
+            if (pos > ipos + dpos || pos < ipos - dpos)
             {
-                // count the edge and note its position
-                ++nEdges;
-                edgePos = i;
-                
-                // color edges black in the visualization
-                vispix = 0;
+                isClose = false;
+                break;
             }
-            
-            // if in visualization mode, substitute the visualization pixel
-            if (vis)
-                pix[i] = vispix;
         }
         
-        // check for a unique edge
-        if (nEdges == 1)
+        // check if we're close to all recent readings
+        if (isClose)
         {
-            // Successfully found an edge - presume we'll return the raw
-            // value we just found
-            pos = edgePos;
-
-            // Filtering to the signal to reduce jitter.  We sometimes see
-            // the detected position jitter around by a pixel or two when
-            // the plunger is stationary; the filtering is meant to reduce
-            // or (ideally) eliminate it.  The jitter happens because the
-            // exactly pixel position of the edge can be a little ambiguous.
-            // The shadow is usually a little fuzzy and spans more than one
-            // pixel on the sensor, so our algorithm picks out the edge in
-            // each frame according to relative brightness from pixel to
-            // pixel.  The exact relative brightnesses can vary a bit,
-            // though, due to variations in exposure time, light source
-            // uniformity, other stray light sources in the cabinet, pixel
-            // noise in the sensor, ADC error, etc.  
-            //
-            // To filter the jitter, we'll look through the recent history
-            // to see if the recent samples are within a couple of pixels
-            // of each other.  If so, we'll take an average and substitute
-            // that for our current reading.
-            bool allClose = true;
-            long sum = 0;
-            for (int i = 0 ; i < countof(hist) ; ++i)
-            {
-                // if this one isn't close enough, they're not all close
-                if (abs(hist[i] - edgePos) > 2)
-                {
-                    allClose = false;
-                    break;
-                }
-                
-                // count it in the sum
-                sum += hist[i];
-            }
-            if (allClose)
-            [
-                // they're all close by - replace this reading with the
-                // average of nearby pixels
-                pos = int(sum / countof(hist));
-            }
-            
-            // indicate success
-            return true;
+            // We're close, so just stick to the average of recent
+            // readings.  Note that we don't add the new reading to
+            // the history in this case.  If the edge is about halfway
+            // between two pixels, the history will be about 50/50 on
+            // an ongoing basis, so if just kept adding samples we'd
+            // still jitter (just at a slightly reduced rate).  By
+            // stalling the history when it looks like we're stationary,
+            // we'll just pick one of the pixels and stay there as long
+            // as the plunger stays where it is.
+            pos = sum/countof(hist);
         }
         else
         {
-            // failure
-            return false;
+            // This isn't near enough to the recent stationary position,
+            // so keep the new reading exactly as it is, and add it to the
+            // history.
+            hist[histIdx++] = pos;
+            histIdx %= countof(hist);
         }
     }
-#endif
     
-    // Send an exposure report to the joystick interface.
+    // Send a status report to the joystick interface.
     // See plunger.h for details on the flags and visualization modes.
-    virtual void sendExposureReport(USBJoystick &js, uint8_t flags, uint8_t visMode)
+    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t visMode)
     {
         // start a capture
         ccd.startCapture();
@@ -652,23 +257,20 @@ public:
         int n;
         uint32_t t;
         ccd.getPix(pix, n, t);
-        
-        // Apply processing if desired.  For visualization mode 0, apply no
-        // processing at all.  For all others it through the pixel processor.
-        int pos = 0xffff;
-        uint32_t processTime = 0;
-        if (visMode != 0)
-        {
-            // count the processing time
-            Timer pt;
-            pt.start();
 
-            // do the processing
-            process(pix, n, pos, visMode);
-            
-            // note the processing time
-            processTime = pt.read_us();
-        }
+        // start a timer to measure the processing time
+        Timer pt;
+        pt.start();
+
+        // process the pixels and read the position
+        int pos;
+        if (process(pix, n, pos, visMode))
+            filter(pos);
+        else
+            pos = 0xFFFF;
+        
+        // note the processing time
+        uint32_t processTime = pt.read_us();
         
         // if a low-res scan is desired, reduce to a subset of pixels
         if (flags & 0x01)
@@ -681,68 +283,39 @@ public:
             int src, dst;
             for (src = dst = 0 ; dst < lowResPix ; ++dst)
             {
-                // Combine these pixels - the best way to do this differs
-                // by visualization mode...
+                // average this block of pixels
                 int a = 0;
-                switch (visMode)
-                {
-                case 0:
-                case 1:
-                    // Raw or noise-reduced pixels.  This mode shows basically
-                    // a regular picture, so reduce the resolution by averaging
-                    // the grouped pixels.
-                    for (int j = 0 ; j < group ; ++j)
-                        a += pix[src++];
+                for (int j = 0 ; j < group ; ++j)
+                    a += pix[src++];
                         
-                    // we have the sum, so get the average
-                    a /= group;
-                    break;
-                    
-                case 2:
-                    // High contrast mode.  To retain the high contrast, take a
-                    // majority vote of the pixels.  Start by counting the white
-                    // pixels.
-                    for (int j = 0 ; j < group ; ++j)
-                        a += (pix[src++] > 127);
-                        
-                    // If half or more are white, make the combined pixel white;
-                    // otherwise make it black.
-                    a = (a >= n/2 ? 255 : 0);
-                    break;
-                    
-                case 3:
-                    // Edge mode.  Edges are shown as black.  To retain every
-                    // detected edge in the result image, show the combined pixel
-                    // as an edge if ANY pixel within the group is an edge.
-                    a = 255;
-                    for (int j = 0 ; j < group ; ++j)
-                    {
-                        if (pix[src++] < 127)
-                            a = 0;
-                    }
-                    break;
-                }
-                    
+                // we have the sum, so get the average
+                a /= group;
+
                 // store the down-res'd pixel in the array
                 pix[dst] = uint8_t(a);
             }
             
-            // update the pixel count to the number we stored
-            n = dst;
-            
-            // if we have a valid position, rescale it to the reduced pixel count
-            if (pos != 0xffff)
-                pos = pos / group;
+            // rescale the position for the reduced resolution
+            if (pos != 0xFFFF)
+                pos = pos * (lowResPix-1) / (n-1);
+
+            // update the pixel count to the reduced array size
+            n = lowResPix;
         }
         
-        // send reports for all pixels
-        int idx = 0;
-        while (idx < n)
-            js.updateExposure(idx, n, pix);
-            
-        // send a special final report with additional data
-        js.updateExposureExt(pos, dir, ccd.getAvgScanTime(), processTime);
+        // send the sensor status report report
+        js.sendPlungerStatus(n, pos, dir, ccd.getAvgScanTime(), processTime);
         
+        // If we're not in calibration mode, send the pixels
+        extern bool plungerCalMode;
+        if (!plungerCalMode)
+        {
+            // send the pixels in report-sized chunks until we get them all
+            int idx = 0;
+            while (idx < n)
+                js.sendPlungerPix(idx, n, pix);
+        }
+            
         // It takes us a while to send all of the pixels, since we have
         // to break them up into many USB reports.  This delay means that
         // the sensor has been sitting there integrating for much longer
@@ -753,6 +326,9 @@ public:
         ccd.clear();
         ccd.startCapture();
     }
+    
+    // get the average sensor scan time
+    virtual uint32_t getAvgScanTime() { return ccd.getAvgScanTime(); }
     
 protected:
     // Sensor orientation.  +1 means that the "tip" end - which is always
@@ -772,7 +348,7 @@ protected:
 
     // History of recent position readings.  We keep a short history of
     // readings so that we can apply some filtering to the data.
-    uint16_t hist[10];
+    uint16_t hist[8];
     int histIdx;    
     
     // History of midpoint brightness levels for the last few successful

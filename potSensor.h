@@ -55,17 +55,25 @@ public:
             + uint32_t(pot.read_u16())
             ) / 5U);
             
-        // Get the ending time of the sample, and figure the indicated
+        // Get the elapsed time of the sample, and figure the indicated
         // sample time as the midpoint between the start and end times.
         // (Note that the timer might overflow the uint32_t between t0 
         // and now, in which case it will appear that now < t0.  The
         // calculation will always work out right anyway, because it's 
         // effectively performed mod 2^32-1.)
-        r.t = t0 + (timer.read_us() - t0)/2;        
+        uint32_t dt = timer.read_us() - t0;
+        r.t = t0 + dt/2;
+        
+        // add the current sample to our timing statistics
+        totScanTime += dt;
+        nScans += 1;
             
         // success
         return true;
     }
+    
+    // figure the average scan time in microseconds
+    virtual uint32_t getAvgScanTime() { return uint32_t(totScanTime/nScans); }
         
 private:
     // analog input for the pot wiper
@@ -73,4 +81,8 @@ private:
     
     // timer for input timestamps
     Timer timer;
+    
+    // total sensor scan time in microseconds, and number of scans completed
+    long long totScanTime;
+    int nScans;
 };
