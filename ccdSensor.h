@@ -53,7 +53,7 @@ public:
         
         // process the pixels and look for the edge position
         int pixpos;
-        if (process(pix, n, pixpos, 0))
+        if (process(pix, n, pixpos))
         {            
             // run the position through the anti-jitter filter
             filter(pixpos);
@@ -74,31 +74,42 @@ public:
         }
     }
         
-    // Process an image.  Applies noise reduction and looks for edges.
+    // Process an image - scan for the shadow edge to determine the plunger
+    // position.
+    //
     // If we detect the plunger position, we set 'pos' to the pixel location
     // of the edge and return true; otherwise we return false.  The 'pos'
     // value returned, if any, is adjusted for sensor orientation so that
-    // it reflects the logical plunger position.
-    bool process(uint8_t *pix, int &n, int &pos, int visMode)
+    // it reflects the logical plunger position (i.e., distance retracted,
+    // where 0 is always the fully forward position and 'n' is fully
+    // retracted).
+    bool process(uint8_t *pix, int n, int &pos)
     {
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
         int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
         
-        // Figure the sensor orientation based on the relative 
-        // brightness levels at the opposite ends of the image
-        int pi;
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        int bi, di;
+        int binc, dinc;
         if (a > b+10)
         {
             // left end is brighter - standard orientation
             dir = 1;
-            pi = 5;
+            bi = 4, di = n - 5;
+            binc = 1, dinc = -1;
         }
         else if (b > a+10)
         {
            // right end is brighter - reverse orientation
             dir = -1;
-            pi = n - 6;
+            bi = n - 5, di = 4;
+            binc = -1, dinc = 1;
         }
         else if (dir != 0)
         {
@@ -141,22 +152,108 @@ public:
             return false;
         }
             
-        // figure the midpoint brigthness
+        // Figure the crossover brightness levels for detecting the edge.
+        // The midpoint is the brightness level halfway between the bright
+        // and dark regions we detected at the opposite ends of the sensor.
+        // To find the edge, we'll look for a brightness level slightly 
+        // *past* the midpoint, to help reject noise - the bright region
+        // pixels should all cluster close to the higher level, and the
+        // shadow region should all cluster close to the lower level.
+        // We'll define "close" as within 1/3 of the gap between the 
+        // extremes.
         int mid = (a+b)/2;
+        int delta6 = abs(a-b)/6;
+        int crossoverHi = mid + delta6;
+        int crossoverLo = mid - delta6;
             
-        // Scan from the bright side looking for an edge
-        for (int i = 5 ; i < n-5 ; ++i, pi += dir)
+#if 1 // $$$
+        // Scan inward from the each end, looking for edges.  Each time we
+        // find an edge from one direction, we'll see if the scan from the
+        // other direction agrees.  If it does, we have a winner.  If they
+        // don't agree, we must have found some noise in one direction or the
+        // other, so switch sides and continue the scan.  On each continued
+        // scan, if the stopping point from the last scan *was* noise, we'll
+        // start seeing the expected non-edge pixels again as we move on,
+        // so we'll effectively factor out the noise.  If what stopped us
+        // *wasn't* noise but was a legitimate edge, we'll see that we're
+        // still in the region that stopped us in the first place and just
+        // stop again immediately.  
+        //
+        // The two sides have to converge, because they march relentlessly
+        // towards each other until they cross.  Even if we have a totally
+        // random bunch of pixels, the two indices will eventually meet and
+        // we'll declare that to be the edge position.  The processing time
+        // is linear in the pixel count - it's equivalent to one pass over
+        // the pixels.  The measured time for 1280 pixels is about 1.3ms,
+        // which is about half the DMA transfer time.  Our goal is always
+        // to complete the processing in less than the DMA transfer time,
+        // since that's as fast as we can possibly go with the physical
+        // sensor.  Since our processing time is overlapped with the DMA
+        // transfer, the overall frame rate is limited by the *longer* of
+        // the two times, not the sum of the two times.  So as long as the
+        // processing takes less time than the DMA transfer, we're not 
+        // contributing at all to the overall frame rate limit - it's like
+        // we're not even here.
+        for (;;)
+        {
+            // scan from the bright side
+            for (bi += binc ; bi >= 5 && bi <= n-6 ; bi += binc)
+            {
+                // if we found a dark pixel, consider it to be an edge
+                if (pix[bi] < crossoverLo)
+                    break;
+            }
+            
+            // if we reached an extreme, return failure
+            if (bi < 5 || bi > n-6)
+                return false;
+            
+            // if the two directions crossed, we have a winner
+            if (binc > 0 ? bi >= di : bi <= di)
+            {
+                pos = (dir == 1 ? bi : n - bi);
+                return true;
+            }
+            
+            // they haven't converged yet, so scan from the dark side
+            for (di += dinc ; di >= 5 && di <= n-6 ; di += dinc)
+            {
+                // if we found a bright pixel, consider it to be an edge
+                if (pix[di] > crossoverHi)
+                    break;
+            }
+            
+            // if we reached an extreme, return failure
+            if (di < 5 || di > n-6)
+                return false;
+            
+            // if they crossed now, we have a winner
+            if (binc > 0 ? bi >= di : bi <= di)
+            {
+                pos = (dir == 1 ? di : n - di);
+                return true;
+            }
+        }
+        
+#else // $$$    
+        // Old method - single-sided scan with a little local noise suppression.
+        // Scan from the bright side looking, for a pixel that drops below the
+        // midpoint brightess.  To reduce false positives from noise, check to
+        // see if the majority of the next few pixels stay in shadow - if not,
+        // consider the dark pixel to be some kind of transient noise, and
+        // continue looking for a more solid edge.
+        for (int i = 5 ; i < n-5 ; ++i, bi += dir)
         {
             // check to see if we found a dark pixel
-            if (pix[pi] < mid)
+            if (pix[bi] < mid)
             {
                 // make sure we have a sustained edge
                 int ok = 0;
-                int pi2 = pi + dir;
-                for (int j = 0 ; j < 5 ; ++j, pi2 += dir)
+                int bi2 = bi + dir;
+                for (int j = 0 ; j < 5 ; ++j, bi2 += dir)
                 {
                     // count this pixel if it's darker than the midpoint
-                    if (pix[pi2] < mid)
+                    if (pix[bi2] < mid)
                         ++ok;
                 }
                 
@@ -178,6 +275,7 @@ public:
         
         // no edge found
         return false;
+#endif
     }
     
     // Filter a result through the jitter reducer.  We tend to have some
@@ -207,8 +305,7 @@ public:
     void filter(int &pos)
     {        
         // check to see if it's close to all of the history elements
-        const int dpos = 1;
-        bool isClose = true;
+        const int dpos = 2;
         long sum = 0;
         for (int i = 0 ; i < countof(hist) ; ++i)
         {
@@ -216,43 +313,64 @@ public:
             sum += ipos;
             if (pos > ipos + dpos || pos < ipos - dpos)
             {
-                isClose = false;
-                break;
+                // not close enough - add the new position to the
+                // history and use it as-is
+                hist[histIdx++] = pos;
+                histIdx %= countof(hist);
+                return;
             }
         }
         
-        // check if we're close to all recent readings
-        if (isClose)
-        {
-            // We're close, so just stick to the average of recent
-            // readings.  Note that we don't add the new reading to
-            // the history in this case.  If the edge is about halfway
-            // between two pixels, the history will be about 50/50 on
-            // an ongoing basis, so if just kept adding samples we'd
-            // still jitter (just at a slightly reduced rate).  By
-            // stalling the history when it looks like we're stationary,
-            // we'll just pick one of the pixels and stay there as long
-            // as the plunger stays where it is.
-            pos = sum/countof(hist);
-        }
-        else
-        {
-            // This isn't near enough to the recent stationary position,
-            // so keep the new reading exactly as it is, and add it to the
-            // history.
-            hist[histIdx++] = pos;
-            histIdx %= countof(hist);
-        }
+        // We're close to all recent readings, so use the average
+        // of the recent readings.  Don't add the new reading to the
+        // the history in this case.  If the edge is about halfway
+        // between two pixels, the history will be about 50/50 on
+        // an ongoing basis, so if just kept adding samples we'd
+        // still jitter (just at a slightly reduced rate).  By
+        // stalling the history when it looks like we're stationary,
+        // we'll just pick one of the pixels and stay there as long
+        // as the plunger stays where it is.
+        pos = sum/countof(hist);
     }
     
     // Send a status report to the joystick interface.
-    // See plunger.h for details on the flags and visualization modes.
-    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t visMode)
+    // See plunger.h for details on the arguments.
+    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t extraTime)
     {
-        // start a capture
-        ccd.startCapture();
+        // To get the requested timing for the cycle we report, we need to run
+        // an extra cycle.  Right now, the sensor is integrating from whenever
+        // the last start() call was made.  
+        //
+        // 1. Call startCapture() to end that previous cycle.  This will collect
+        // dits pixels into one DMA buffer (call it EVEN), and start a new 
+        // integration cycle.  
+        // 
+        // 2. We know a new integration has just started, so we can control its
+        // time.  Wait for the cycle we just started to finish, since that sets
+        // the minimum time.
+        //
+        // 3. The integration cycle we started in step 1 has now been running the
+        // minimum time - namely, one read cycle.  Pause for our extraTime delay
+        // to add the requested added time.
+        //
+        // 4. Start the next cycle.  This will make the pixels we started reading
+        // in step 1 available via getPix(), and will end the integration cycle
+        // we started in step 1 and start reading its pixels into the internal
+        // DMA buffer.  
+        //
+        // 5. This is where it gets tricky!  The pixels we want are the ones that 
+        // started integrating in step 1, which are the ones we're reading via DMA 
+        // now.  The pixels available via getPix() are the ones from the cycle we 
+        // *ended* in step 1 - we don't want these.  So we need to start a *third*
+        // cycle in order to get the pixels from the second cycle.
         
-        // get the stable pixel array
+        ccd.startCapture();                 // read pixels from period A, begin integration period B
+        ccd.wait();                         // wait for scan of A to complete, as minimum integration B time
+        wait_us(long(extraTime) * 100);     // add extraTime (0.1ms == 100us increments) to integration B time
+        ccd.startCapture();                 // read pixels from integration period B, begin period C; period A pixels now available
+        ccd.startCapture();                 // read pixels from integration period C, begin period D; period B pixels now available
+        
+        // get the pixel array
         uint8_t *pix;
         int n;
         uint32_t t;
@@ -264,7 +382,7 @@ public:
 
         // process the pixels and read the position
         int pos;
-        if (process(pix, n, pos, visMode))
+        if (process(pix, n, pos))
             filter(pos);
         else
             pos = 0xFFFF;

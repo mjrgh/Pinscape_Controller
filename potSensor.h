@@ -21,6 +21,8 @@ public:
     {
         // start our sample timer with an arbitrary zero point of now
         timer.start();
+        totScanTime = 0;
+        nScans = 0;
     }
     
     virtual void init() 
@@ -73,7 +75,10 @@ public:
     }
     
     // figure the average scan time in microseconds
-    virtual uint32_t getAvgScanTime() { return uint32_t(totScanTime/nScans); }
+    virtual uint32_t getAvgScanTime() 
+    { 
+        return nScans != 0 ? uint32_t(totScanTime/nScans) : 0; 
+    }
         
 private:
     // analog input for the pot wiper
@@ -83,6 +88,6 @@ private:
     Timer timer;
     
     // total sensor scan time in microseconds, and number of scans completed
-    long long totScanTime;
+    uint64_t totScanTime;
     int nScans;
 };

@@ -414,12 +414,13 @@ public:
     
     // Clock through all pixels to clear the array.  Pulses SI at the
     // beginning of the operation, which starts a new integration cycle.
-    // The caller can thus immediately call read() to read the pixels 
-    // integrated while the clear() was taking place.
     void clear()
     {
         // get the clock toggle register
         volatile uint32_t *ptor = &clockPort->PTOR;
+        
+        // make sure any DMA run is completed
+        wait();
         
         // clock in an SI pulse
         si = 1;

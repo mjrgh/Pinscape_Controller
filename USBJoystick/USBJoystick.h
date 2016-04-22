@@ -259,7 +259,14 @@ class USBJoystick: public USBHID {
          /**
          * Write a device ID report.
          */
-         bool reportID();
+         bool reportID(int index);
+         
+         /**
+         * Write a build data report
+         *
+         * @param date build date plus time, in __DATE__ " " __TIME__ macro format ("Mon dd, yyyy hh:mm:ss")
+         */
+         bool reportBuildInfo(const char *date);
  
          /**
          * Send a joystick report to the host

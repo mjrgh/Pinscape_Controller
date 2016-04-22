@@ -82,57 +82,53 @@
 //    to the PC as a joystick button or as a keyboard key (you can select which key
 //    is used for each button).
 //
-//  - LedWiz emulation.  The KL25Z can appear to the PC as an LedWiz device, and will
-//    accept and process LedWiz commands from the host.  The software can turn digital
-//    output ports on and off, and can set varying PWM intensitiy levels on a subset
-//    of ports.  The KL25Z hardware is limited to 10 PWM ports.  Ports beyond the
-//    10 PWM ports are simple digital on/off ports.  Intensity level settings on 
-//    digital ports is ignored, so such ports can only be used for devices such as 
-//    contactors and solenoids that don't need differeing intensities.
+//  - LedWiz emulation.  The KL25Z can pretend to be an LedWiz device.  This lets
+//    you connect feedback devices (lights, solenoids, motors) to GPIO ports on the 
+//    KL25Z, and lets PC software (such as Visual Pinball) control them during game 
+//    play to create a more immersive playing experience.  The Pinscape software
+//    presents itself to the host as an LedWiz device and accepts the full LedWiz
+//    command set, so software on the PC designed for real LedWiz'es can control
+//    attached devices without any modifications.
 //
-//    Note that the KL25Z can only supply or sink 4mA on its output ports, so external 
-//    amplifier hardware is required to use the LedWiz emulation.  Many different 
-//    hardware designs are possible, but there's a simple reference design in the 
-//    documentation that uses a Darlington array IC to increase the output from 
-//    each port to 500mA (the same level as the LedWiz), plus an extended design 
-//    that adds an optocoupler and MOSFET to provide very high power handling, up 
-//    to about 45A or 150W, with voltages up to 100V.  That will handle just about 
-//    any DC device directly (wtihout relays or other amplifiers), and switches fast 
-//    enough to support PWM devices.  For example, you can use it to drive a motor at
-//    different speeds via the PWM intensity.
-//
-//    The Controller device can report any desired LedWiz unit number to the host, 
-//    which makes it possible for one or more Pinscape Controller units to coexist
-//    with one more more real LedWiz units in the same machine.  The LedWiz design 
-//    allows for up to 16 units to be installed in one machine.  Each device needs
-//    to have a distinct LedWiz Unit Number, which allows software on the PC to
-//    address each device independently.
-//
-//    The LedWiz emulation features are of course optional.  There's no need to 
-//    build any of the external port hardware (or attach anything to the output 
-//    ports at all) if the LedWiz features aren't needed.
+//    Even though the software provides a very thorough LedWiz emulation, the KL25Z
+//    GPIO hardware design imposes some serious limitations.  The big one is that
+//    the KL25Z only has 10 PWM channels, meaning that only 10 ports can have
+//    varying-intensity outputs (e.g., for controlling the brightness level of an
+//    LED or the speed or a motor).  You can control more than 10 output ports, but
+//    only 10 can have PWM control; the rest are simple "digital" ports that can only
+//    be switched fully on or fully off.  The second limitation is that the KL25Z
+//    just doesn't have that many GPIO ports overall.  There are enough to populate
+//    all 32 button inputs OR all 32 LedWiz outputs, but not both.  The default is
+//    to assign 24 buttons and 22 LedWiz ports; you can change this balance to trade
+//    off more outputs for fewer inputs, or vice versa.  The third limitation is that
+//    the KL25Z GPIO pins have *very* tiny amperage limits - just 4mA, which isn't
+//    even enough to control a small LED.  So in order to connect any kind of feedback
+//    device to an output, you *must* build some external circuitry to boost the
+//    current handing.  The Build Guide has a reference circuit design for this
+//    purpose that's simple and inexpensive to build.
 //
 //  - Enhanced LedWiz emulation with TLC5940 PWM controller chips.  You can attach
 //    external PWM controller chips for controlling device outputs, instead of using
-//    the limited LedWiz emulation through the on-board GPIO ports as described above. 
-//    The software can control a set of daisy-chained TLC5940 chips, which provide
-//    16 PWM outputs per chip.  Two of these chips give you the full complement
-//    of 32 output ports of an actual LedWiz, and four give you 64 ports, which
-//    should be plenty for nearly any virtual pinball project.  A private, extended
-//    version of the LedWiz protocol lets the host control the extra outputs, up to
-//    128 outputs per KL25Z (8 TLC5940s).  To take advantage of the extra outputs
-//    on the PC side, you need software that knows about the protocol extensions,
-//    which means you need the latest version of DirectOutput Framework (DOF).  VP
-//    uses DOF for its output, so VP will be able to use the added ports without any
-//    extra work on your part.  Older software (e.g., Future Pinball) that doesn't
-//    use DOF will still be able to use the LedWiz-compatible protocol, so it'll be
-//    able to control your first 32 ports (numbered 1-32 in the LedWiz scheme), but
-//    older software won't be able to address higher-numbered ports.  That shouldn't
-//    be a problem because older software wouldn't know what to do with the extra
-//    devices anyway - FP, for example, is limited to a pre-defined set of outputs.
-//    As long as you put the most common devices on the first 32 outputs, and use
-//    higher numbered ports for the less common devices that older software can't
-//    use anyway, you'll get maximum functionality out of software new and old.
+//    the on-board GPIO ports as described above.  The software can control a set of 
+//    daisy-chained TLC5940 chips.  Each chip provides 16 PWM outputs, so you just
+//    need two of them to get the full complement of 32 output ports of a real LedWiz.
+//    You can hook up even more, though.  Four chips gives you 64 ports, which should
+//    be plenty for nearly any virtual pinball project.  To accommodate the larger
+//    supply of ports possible with the PWM chips, the controller software provides
+//    a custom, extended version of the LedWiz protocol that can handle up to 128
+//    ports.  PC software designed only for the real LedWiz obviously won't know
+//    about the extended protocol and won't be able to take advantage of its extra
+//    capabilities, but the latest version of DOF (DirectOutput Framework) *does* 
+//    know the new language and can take full advantage.  Older software will still
+//    work, though - the new extensions are all backward compatible, so old software
+//    that only knows about the original LedWiz protocol will still work, with the
+//    obvious limitation that it can only access the first 32 ports.
+//
+//    The Pinscape Expansion Board project (which appeared in early 2016) provides
+//    a reference hardware design, with EAGLE circuit board layouts, that takes full
+//    advantage of the TLC5940 capability.  It lets you create a customized set of
+//    outputs with full PWM control and power handling for high-current devices
+//    built in to the boards.  
 //
 //  - Night Mode control for output devices.  You can connect a switch or button
 //    to the controller to activate "Night Mode", which disables feedback devices
@@ -213,6 +209,71 @@
 #define DECL_EXTERNS
 #include "config.h"
 
+
+// --------------------------------------------------------------------------
+// 
+// OpenSDA module identifier.  This is for the benefit of the Windows
+// configuration tool.  When the config tool installs a .bin file onto
+// the KL25Z, it will first find the sentinel string within the .bin file,
+// and patch the "\0" bytes that follow the sentinel string with the 
+// OpenSDA module ID data.  This allows us to report the OpenSDA 
+// identifiers back to the host system via USB, which in turn allows the 
+// config tool to figure out which OpenSDA MSD (mass storage device - a 
+// virtual disk drive) correlates to which Pinscape controller USB 
+// interface.  
+// 
+// This is only important if multiple Pinscape devices are attached to 
+// the same host.  There doesn't seem to be any other way to figure out 
+// which OpenSDA MSD corresponds to which KL25Z USB interface; the OpenSDA 
+// MSD doesn't report the KL25Z CPU ID anywhere, and the KL25Z doesn't
+// have any way to learn about the OpenSDA module it's connected to.  The
+// only way to pass this information to the KL25Z side that I can come up 
+// with is to have the Windows host embed it in the .bin file before 
+// downloading it to the OpenSDA MSD.
+//
+// We initialize the const data buffer (the part after the sentinel string)
+// with all "\0" bytes, so that's what will be in the executable image that
+// comes out of the mbed compiler.  If you manually install the resulting
+// .bin file onto the KL25Z (via the Windows desktop, say), the "\0" bytes
+// will stay this way and read as all 0's at run-time.  Since a real TUID
+// would never be all 0's, that tells us that we were never patched and
+// thus don't have any information on the OpenSDA module.
+//
+const char *getOpenSDAID()
+{
+    #define OPENSDA_PREFIX "///Pinscape.OpenSDA.TUID///"
+    static const char OpenSDA[] = OPENSDA_PREFIX "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0///";
+    const size_t OpenSDA_prefix_length = sizeof(OPENSDA_PREFIX) - 1;
+    
+    return OpenSDA + OpenSDA_prefix_length;
+}
+
+// --------------------------------------------------------------------------
+//
+// Build ID.  We use the date and time of compiling the program as a build
+// identifier.  It would be a little nicer to use a simple serial number
+// instead, but the mbed platform doesn't have a way to automate that.  The
+// timestamp is a pretty good proxy for a serial number in that it will
+// naturally increase on each new build, which is the primary property we
+// want from this.
+//
+// As with the embedded OpenSDA ID, we store the build timestamp with a
+// sentinel string prefix, to allow automated tools to find the static data
+// in the .bin file by searching for the sentinel string.  In contrast to 
+// the OpenSDA ID, the value we store here is for tools to extract rather 
+// than store, since we automatically populate it via the preprocessor 
+// macros.
+//
+const char *getBuildID()
+{
+    #define BUILDID_PREFIX "///Pinscape.Build.ID///"
+    static const char BuildID[] = BUILDID_PREFIX __DATE__ " " __TIME__ "///";
+    const size_t BuildID_prefix_length = sizeof(BUILDID_PREFIX) - 1;
+    
+    return BuildID + BuildID_prefix_length;
+}
+
+
 // --------------------------------------------------------------------------
 //
 // Custom memory allocator.  We use our own version of malloc() to provide
@@ -276,6 +337,14 @@ private:
     bool running;
 };
 
+
+// --------------------------------------------------------------------------
+//
+// Reboot timer.  When we have a deferred reboot operation pending, we
+// set the target time and start the timer.
+Timer2 rebootTimer;
+long rebootTime_us;
+
 // --------------------------------------------------------------------------
 // 
 // USB product version number
@@ -332,29 +401,36 @@ inline int32_t wireI32(const uint8_t *b)
     return (int32_t)wireUI32(b);
 }
 
-static const PinName pinNameMap[] =  {
-    NC,    PTA1,  PTA2,  PTA4,  PTA5,  PTA12, PTA13, PTA16, PTA17, PTB0,    // 0-9
-    PTB1,  PTB2,  PTB3,  PTB8,  PTB9,  PTB10, PTB11, PTB18, PTB19, PTC0,    // 10-19
-    PTC1,  PTC2,  PTC3,  PTC4,  PTC5,  PTC6,  PTC7,  PTC8,  PTC9,  PTC10,   // 20-29
-    PTC11, PTC12, PTC13, PTC16, PTC17, PTD0,  PTD1,  PTD2,  PTD3,  PTD4,    // 30-39
-    PTD5,  PTD6,  PTD7,  PTE0,  PTE1,  PTE2,  PTE3,  PTE4,  PTE5,  PTE20,   // 40-49
-    PTE21, PTE22, PTE23, PTE29, PTE30, PTE31                                // 50-55
-};
-inline PinName wirePinName(int c)
+// Convert "wire" (USB) pin codes to/from PinName values.
+// 
+// The internal mbed PinName format is 
+//
+//   ((port) << PORT_SHIFT) | (pin << 2)    // MBED FORMAT
+//
+// where 'port' is 0-4 for Port A to Port E, and 'pin' is
+// 0 to 31.  E.g., E31 is (4 << PORT_SHIFT) | (31<<2).
+//
+// We remap this to our more compact wire format where each
+// pin name fits in 8 bits:
+//
+//   ((port) << 5) | pin)                   // WIRE FORMAT
+//
+// E.g., E31 is (4 << 5) | 31.
+//
+// Wire code FF corresponds to PinName NC (not connected).
+//
+inline PinName wirePinName(uint8_t c)
 {
-    return (c < countof(pinNameMap) ? pinNameMap[c] : NC);
+    if (c == 0xFF)
+        return NC;                                  // 0xFF -> NC
+    else 
+        return PinName(
+            (int(c & 0xE0) << (PORT_SHIFT - 5))      // top three bits are the port
+            | (int(c & 0x1F) << 2));                // bottom five bits are pin
 }
 inline void pinNameWire(uint8_t *b, PinName n)
 {
-    b[0] = 0; // presume invalid -> NC
-    for (int i = 0 ; i < countof(pinNameMap) ; ++i)
-    {
-        if (pinNameMap[i] == n)
-        {
-            b[0] = i;
-            return;
-        }
-    }
+    *b = PINNAME_TO_WIRE(n);
 }
 
 
@@ -419,10 +495,6 @@ void initDiagLEDs(Config &cfg)
     LedSeg l;
     for (int i = 0 ; i < MAX_OUT_PORTS && cfg.outPort[i].typ != PortTypeDisabled ; ++i)
         l.check(cfg.outPort[i]);
-    
-    // check the special ports
-    for (int i = 0 ; i < countof(cfg.specialPort) ; ++i)
-        l.check(cfg.specialPort[i]);
     
     // We now know which segments are taken for LedWiz use and which
     // are free.  Create diagnostic ports for the ones not claimed for
@@ -495,8 +567,33 @@ public:
     virtual void set(uint8_t val) { out->set(255 - val); }
     
 private:
+    // underlying physical output
     LwOut *out;
 };
+
+// Global ZB Launch Ball state
+bool zbLaunchOn = false;
+
+// ZB Launch Ball output.  This is layered on a port (physical or virtual)
+// to track the ZB Launch Ball signal.
+class LwZbLaunchOut: public LwOut
+{
+public:
+    LwZbLaunchOut(LwOut *o) : out(o) { }
+    virtual void set(uint8_t val)
+    {
+        // update the global ZB Launch Ball state
+        zbLaunchOn = (val != 0);
+        
+        // pass it along to the underlying port, in case it's a physical output
+        out->set(val);
+    }
+        
+private:
+    // underlying physical or virtual output
+    LwOut *out;
+};
+
 
 // Gamma correction table for 8-bit input values
 static const uint8_t gamma[] = {
@@ -531,6 +628,9 @@ private:
     LwOut *out;
 };
 
+// global night mode flag
+static bool nightMode = false;
+
 // Noisy output.  This is a filter object that we layer on top of
 // a physical pin output.  This filter disables the port when night
 // mode is engaged.
@@ -540,14 +640,27 @@ public:
     LwNoisyOut(LwOut *o) : out(o) { }
     virtual void set(uint8_t val) { out->set(nightMode ? 0 : val); }
     
-    static bool nightMode;
-
 private:
     LwOut *out;
 };
 
-// global night mode flag
-bool LwNoisyOut::nightMode = false;
+// Night Mode indicator output.  This is a filter object that we
+// layer on top of a physical pin output.  This filter ignores the
+// host value and simply shows the night mode status.
+class LwNightModeIndicatorOut: public LwOut
+{
+public:
+    LwNightModeIndicatorOut(LwOut *o) : out(o) { }
+    virtual void set(uint8_t) 
+    {
+        // ignore the host value and simply show the current 
+        // night mode setting
+        out->set(nightMode ? 255 : 0);
+    }
+
+private:
+    LwOut *out;
+};
 
 
 //
@@ -559,8 +672,13 @@ void init_tlc5940(Config &cfg)
 {
     if (cfg.tlc5940.nchips != 0)
     {
-        tlc5940 = new TLC5940(cfg.tlc5940.sclk, cfg.tlc5940.sin, cfg.tlc5940.gsclk,
-            cfg.tlc5940.blank, cfg.tlc5940.xlat, cfg.tlc5940.nchips);
+        tlc5940 = new TLC5940(
+            wirePinName(cfg.tlc5940.sclk), 
+            wirePinName(cfg.tlc5940.sin),
+            wirePinName(cfg.tlc5940.gsclk),
+            wirePinName(cfg.tlc5940.blank), 
+            wirePinName(cfg.tlc5940.xlat), 
+            cfg.tlc5940.nchips);
     }
 }
 
@@ -656,7 +774,12 @@ void init_hc595(Config &cfg)
 {
     if (cfg.hc595.nchips != 0)
     {
-        hc595 = new HC595(cfg.hc595.nchips, cfg.hc595.sin, cfg.hc595.sclk, cfg.hc595.latch, cfg.hc595.ena);
+        hc595 = new HC595(
+            wirePinName(cfg.hc595.nchips), 
+            wirePinName(cfg.hc595.sin), 
+            wirePinName(cfg.hc595.sclk), 
+            wirePinName(cfg.hc595.latch), 
+            wirePinName(cfg.hc595.ena));
         hc595->init();
         hc595->update();
     }
@@ -763,13 +886,6 @@ public:
 static int numOutputs;
 static LwOut **lwPin;
 
-// Special output ports:
-//
-//    [0] = Night Mode indicator light
-//
-static LwOut *specialPin[1];
-const int SPECIAL_PIN_NIGHTMODE = 0;
-
 
 // Number of LedWiz emulation outputs.  This is the number of ports
 // accessible through the standard (non-extended) LedWiz protocol
@@ -785,7 +901,7 @@ static int numLwOutputs;
 static uint8_t *outLevel;
 
 // create a single output pin
-LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
+LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
 {
     // get this item's values
     int typ = pc.typ;
@@ -883,6 +999,16 @@ LwOut *createLwPin(LedWizPortCfg &pc, Config &cfg)
     // If it's gamma-corrected, layer on a gamma corrector
     if (gamma)
         lwp = new LwGammaOut(lwp);
+        
+    // If this is the ZB Launch Ball port, layer a monitor object.  Note
+    // that the nominal port numbering in the cofnig starts at 1, but we're
+    // using an array index, so test against portno+1.
+    if (portno + 1 == cfg.plunger.zbLaunchBall.port)
+        lwp = new LwZbLaunchOut(lwp);
+        
+    // If this is the Night Mode indicator port, layer a night mode object.
+    if (portno + 1 == cfg.nightMode.port)
+        lwp = new LwNightModeIndicatorOut(lwp);
 
     // turn it off initially      
     lwp->set(0);
@@ -923,11 +1049,7 @@ void initLwOut(Config &cfg)
     
     // create the pin interface object for each port
     for (i = 0 ; i < numOutputs ; ++i)
-        lwPin[i] = createLwPin(cfg.outPort[i], cfg);
-        
-    // create the pin interface for each special port
-    for (i = 0 ; i < countof(cfg.specialPort) ; ++i)
-        specialPin[i] = createLwPin(cfg.specialPort[i], cfg);
+        lwPin[i] = createLwPin(i, cfg.outPort[i], cfg);
 }
 
 // LedWiz output states.
@@ -1157,49 +1279,57 @@ struct ButtonState
     ButtonState()
     {
         di = NULL;
-        on = 0;
-        pressed = prev = 0;
-        dbstate = 0;
-        js = 0;
-        keymod = 0;
-        keycode = 0;
-        special = 0;
+        physState = logState = prevLogState = 0;
+        virtState = 0;
+        dbState = 0;
         pulseState = 0;
-        pulseTime = 0.0f;
+        pulseTime = 0;
     }
     
-    // DigitalIn for the button
+    // "Virtually" press or un-press the button.  This can be used to
+    // control the button state via a software (virtual) source, such as
+    // the ZB Launch Ball feature.
+    //
+    // To allow sharing of one button by multiple virtual sources, each
+    // virtual source must keep track of its own state internally, and 
+    // only call this routine to CHANGE the state.  This is because calls
+    // to this routine are additive: turning the button ON twice will
+    // require turning it OFF twice before it actually turns off.
+    void virtPress(bool on)
+    {
+        // Increment or decrement the current state
+        virtState += on ? 1 : -1;
+    }
+    
+    // DigitalIn for the button, if connected to a physical input
     TinyDigitalIn *di;
     
     // current PHYSICAL on/off state, after debouncing
-    uint8_t on : 1;
+    uint8_t physState : 1;
     
     // current LOGICAL on/off state as reported to the host.
-    uint8_t pressed : 1;
+    uint8_t logState : 1;
 
     // previous logical on/off state, when keys were last processed for USB 
     // reports and local effects
-    uint8_t prev : 1;
+    uint8_t prevLogState : 1;
+    
+    // Virtual press state.  This is used to simulate pressing the button via
+    // software inputs rather than physical inputs.  To allow one button to be
+    // controlled by mulitple software sources, each source should keep track
+    // of its own virtual state for the button independently, and then INCREMENT
+    // this variable when the source's state transitions from off to on, and
+    // DECREMENT it when the source's state transitions from on to off.  That
+    // will make the button's pressed state the logical OR of all of the virtual
+    // and physical source states.
+    uint8_t virtState;
     
     // Debounce history.  On each scan, we shift in a 1 bit to the lsb if
     // the physical key is reporting ON, and shift in a 0 bit if the physical
     // key is reporting OFF.  We consider the key to have a new stable state
     // if we have N consecutive 0's or 1's in the low N bits (where N is
     // a parameter that determines how long we wait for transients to settle).
-    uint8_t dbstate;
-    
-    // joystick button mask for the button, if mapped as a joystick button
-    uint32_t js;
-    
-    // keyboard modifier bits and scan code for the button, if mapped as a keyboard key
-    uint8_t keymod;
-    uint8_t keycode;
-    
-    // media control key code
-    uint8_t mediakey;
-    
-    // special key code
-    uint8_t special;
+    uint8_t dbState;
     
     // Pulse mode: a button in pulse mode transmits a brief logical button press and
     // release each time the attached physical switch changes state.  This is useful
@@ -1220,17 +1350,17 @@ struct ButtonState
     //
     // Each state change sticks for a minimum period; when the timer expires,
     // if the underlying physical switch is in a different state, we switch
-    // to the next state and restart the timer.  pulseTime is the amount of
-    // time remaining before we can make another state transition.  The state
-    // transitions require a complete cycle, 1 -> 2 -> 3 -> 4 -> 1...; this
-    // guarantees that the parity of the pulse count always matches the 
+    // to the next state and restart the timer.  pulseTime is the time remaining
+    // remaining before we can make another state transition, in microseconds.
+    // The state transitions require a complete cycle, 1 -> 2 -> 3 -> 4 -> 1...; 
+    // this guarantees that the parity of the pulse count always matches the 
     // current physical switch state when the latter is stable, which makes
     // it impossible to "trick" the host by rapidly toggling the switch state.
     // (On my original Pinscape cabinet, I had a hardware pulse generator
     // for coin door, and that *was* possible to trick by rapid toggling.
     // This software system can't be fooled that way.)
     uint8_t pulseState;
-    float pulseTime;
+    uint32_t pulseTime;
     
 } __attribute__((packed)) buttonState[MAX_BUTTONS];
 
@@ -1267,7 +1397,8 @@ void scanButtons()
     ButtonState *bs = buttonState;
     for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
     {
-        // if it's connected, check its physical state
+        // if this logical button is connected to a physical input, check 
+        // the GPIO pin state
         if (bs->di != NULL)
         {
             // Shift the new state into the debounce history.  Note that
@@ -1275,10 +1406,10 @@ void scanButtons()
             // the reading by XOR'ing the low bit with 1.  And of course we
             // only want the low bit (since the history is effectively a bit
             // vector), so mask the whole thing with 0x01 as well.
-            uint8_t db = bs->dbstate;
+            uint8_t db = bs->dbState;
             db <<= 1;
             db |= (bs->di->read() & 0x01) ^ 0x01;
-            bs->dbstate = db;
+            bs->dbState = db;
             
             // if we have all 0's or 1's in the history for the required
             // debounce period, the key state is stable - check for a change
@@ -1286,7 +1417,7 @@ void scanButtons()
             const uint8_t stable = 0x1F;   // 00011111b -> 5 stable readings
             db &= stable;
             if (db == 0 || db == stable)
-                bs->on = db;
+                bs->physState = db & 1;
         }
     }
 }
@@ -1302,6 +1433,17 @@ void initButtons(Config &cfg, bool &kbKeys)
     // presume we'll find no keyboard keys
     kbKeys = false;
     
+    // Configure the virtual buttons.  These are buttons controlled via
+    // software triggers rather than physical GPIO inputs.  The virtual
+    // buttons have the same control structures as regular buttons, but
+    // they get their configuration data from other config variables.
+    
+    // ZB Launch Ball button
+    cfg.button[ZBL_BUTTON].set(
+        PINNAME_TO_WIRE(NC),
+        cfg.plunger.zbLaunchBall.keytype,
+        cfg.plunger.zbLaunchBall.keycode);
+    
     // create the digital inputs
     ButtonState *bs = buttonState;
     for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
@@ -1316,40 +1458,28 @@ void initButtons(Config &cfg, bool &kbKeys)
             if (cfg.button[i].flags & BtnFlagPulse)
                 bs->pulseState = 1;
             
-            // note if it's a keyboard key of some kind (including media keys)
-            uint8_t val = cfg.button[i].val;
+            // Note if it's a keyboard key of some kind.  If we find any keyboard
+            // mappings, we'll declare a keyboard interface when we send our HID 
+            // configuration to the host during USB connection setup.
             switch (cfg.button[i].typ)
             {
-            case BtnTypeJoystick:
-                // joystick button - get the button bit mask
-                bs->js = 1 << val;
-                break;
-                
             case BtnTypeKey:
-                // regular keyboard key - note the scan code
-                bs->keycode = val;
+                // note that we have at least one keyboard key
                 kbKeys = true;
                 break;
                 
-            case BtnTypeModKey:
-                // keyboard mod key - note the modifier mask
-                bs->keymod = val;
-                kbKeys = true;
-                break;
-                
-            case BtnTypeMedia:
-                // media key - note the code
-                bs->mediakey = val;
-                kbKeys = true;
-                break;
-                
-            case BtnTypeSpecial:
-                // special key
-                bs->special = val;
+            default:
+                // not a keyboard key
                 break;
             }
         }
     }
+    
+    // If the ZB Launch Ball feature is enabled, and it uses a keyboard
+    // key, this requires setting up a USB keyboard interface.
+    if (cfg.plunger.zbLaunchBall.port != 0 
+        && cfg.plunger.zbLaunchBall.keytype == BtnTypeKey)
+        kbKeys = true;
     
     // start the button scan thread
     buttonTicker.attach_us(scanButtons, 1000);
@@ -1362,7 +1492,7 @@ void initButtons(Config &cfg, bool &kbKeys)
 // media control descriptors with the current state of keys mapped to
 // those HID interfaces, and executes the local effects for any keys 
 // mapped to special device functions (e.g., Night Mode).
-void processButtons()
+void processButtons(Config &cfg)
 {
     // start with an empty list of USB key codes
     uint8_t modkeys = 0;
@@ -1376,33 +1506,36 @@ void processButtons()
     uint8_t mediakeys = 0;
     
     // calculate the time since the last run
-    float dt = buttonTimer.read();
+    uint32_t dt = buttonTimer.read_us();
     buttonTimer.reset();
 
     // scan the button list
     ButtonState *bs = buttonState;
-    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
+    ButtonCfg *bc = cfg.button;
+    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs, ++bc)
     {
         // if it's a pulse-mode switch, get the virtual pressed state
         if (bs->pulseState != 0)
         {
-            // deduct the time to the next state change
-            bs->pulseTime -= dt;
-            if (bs->pulseTime < 0)
-                bs->pulseTime = 0;
-                
             // if the timer has expired, check for state changes
-            if (bs->pulseTime == 0)
+            if (bs->pulseTime > dt)
             {
-                const float pulseLength = 0.2;
+                // not expired yet - deduct the last interval
+                bs->pulseTime -= dt;
+            }
+            else
+            {
+                // pulse time expired - check for a state change
+                const uint32_t pulseLength = 200000UL;  // 200 milliseconds
                 switch (bs->pulseState)
                 {
                 case 1:
                     // off - if the physical switch is now on, start a button pulse
-                    if (bs->on) {
+                    if (bs->physState) 
+                    {
                         bs->pulseTime = pulseLength;
                         bs->pulseState = 2;
-                        bs->pressed = 1;
+                        bs->logState = 1;
                     }
                     break;
                     
@@ -1412,15 +1545,16 @@ void processButtons()
                     // change in state in the logical button
                     bs->pulseState = 3;
                     bs->pulseTime = pulseLength;
-                    bs->pressed = 0;
+                    bs->logState = 0;
                     break;
                     
                 case 3:
                     // on - if the physical switch is now off, start a button pulse
-                    if (!bs->on) {
+                    if (!bs->physState) 
+                    {
                         bs->pulseTime = pulseLength;
                         bs->pulseState = 4;
-                        bs->pressed = 1;
+                        bs->logState = 1;
                     }
                     break;
                     
@@ -1428,7 +1562,7 @@ void processButtons()
                     // transitioning on to off - end the pulse, and start a gap
                     bs->pulseState = 1;
                     bs->pulseTime = pulseLength;
-                    bs->pressed = 0;
+                    bs->logState = 0;
                     break;
                 }
             }
@@ -1436,44 +1570,102 @@ void processButtons()
         else
         {
             // not a pulse switch - the logical state is the same as the physical state
-            bs->pressed = bs->on;
+            bs->logState = bs->physState;
         }
 
         // carry out any edge effects from buttons changing states
-        if (bs->pressed != bs->prev)
+        if (bs->logState != bs->prevLogState)
         {
             // check for special key transitions
-            switch (bs->special)
+            if (cfg.nightMode.btn == i + 1)
             {
-            case 1:
-                // night mode momentary switch - when the button transitions from
-                // OFF to ON, invert night mode
-                if (bs->pressed)
-                    toggleNightMode();
-                break;
-                
-            case 2:
-                // night mode toggle switch - when the button changes state, change
-                // night mode to match the new state
-                setNightMode(bs->pressed);
-                break;
+                // Check the switch type in the config flags.  If flag 0x01 is set,
+                // it's a persistent on/off switch, so the night mode state simply
+                // follows the current state of the switch.  Otherwise, it's a 
+                // momentary button, so each button push (i.e., each transition from
+                // logical state OFF to ON) toggles the current night mode state.
+                if (cfg.nightMode.flags & 0x01)
+                {
+                    // toggle switch - when the button changes state, change
+                    // night mode to match the new state
+                    setNightMode(bs->logState);
+                }
+                else
+                {
+                    // momentary switch - toggle the night mode state when the
+                    // physical button is pushed (i.e., when its logical state
+                    // transitions from OFF to ON)
+                    if (bs->logState)
+                        toggleNightMode();
+                }
             }
             
             // remember the new state for comparison on the next run
-            bs->prev = bs->pressed;
+            bs->prevLogState = bs->logState;
         }
 
-        // if it's pressed, add it to the appropriate key state list
-        if (bs->pressed)
+        // if it's pressed, physically or virtually, add it to the appropriate 
+        // key state list
+        if (bs->logState || bs->virtState)
         {
             // OR in the joystick button bit, mod key bits, and media key bits
-            newjs |= bs->js;
-            modkeys |= bs->keymod;
-            mediakeys |= bs->mediakey;
-            
-            // if it has a keyboard key, add the scan code to the active list
-            if (bs->keycode != 0 && nkeys < 7)
-                keys[nkeys++] = bs->keycode;
+            uint8_t val = bc->val;
+            switch (bc->typ)
+            {
+            case BtnTypeJoystick:
+                // joystick button
+                newjs |= (1 << (val - 1));
+                break;
+                
+            case BtnTypeKey:
+                // Keyboard key.  This could be a modifier key (shift, control,
+                // alt, GUI), a media key (mute, volume up, volume down), or a
+                // regular key.  Check which one.
+                if (val >= 0x7F && val <= 0x81)
+                {
+                    // It's a media key.  OR the key into the media key mask.
+                    // The media mask bits are mapped in the HID report descriptor
+                    // in USBJoystick.cpp.  For simplicity, we arrange the mask so
+                    // that the ones with regular keyboard equivalents that we catch
+                    // here are in the same order as the key scan codes:
+                    //
+                    //   Mute     = scan 0x7F = mask bit 0x01
+                    //   Vol Up   = scan 0x80 = mask bit 0x02
+                    //   Vol Down = scan 0x81 = mask bit 0x04
+                    //
+                    // So we can translate from scan code to bit mask with some
+                    // simple bit shifting:
+                    mediakeys |= (1 << (val - 0x7f));
+                }
+                else if (val >= 0xE0 && val <= 0xE7)
+                {
+                    // It's a modifier key.  Like the media keys, these are represented
+                    // in the USB reports with a bit mask, and like the media keys, we
+                    // arrange the mask bits in the same order as the scan codes.  This
+                    // makes figuring the mask a simple bit shift:
+                    modkeys |= (1 << (val - 0xE0));
+                }
+                else
+                {
+                    // It's a regular key.  Make sure it's not already in the list, and
+                    // that the list isn't full.  If neither of these apply, add the key.
+                    if (nkeys < 7)
+                    {
+                        bool found;
+                        for (int j = 0 ; j < nkeys ; ++j)
+                        {
+                            if (keys[j] == val)
+                            {
+                                found = true;
+                                break;
+                            }
+                        }
+                        if (!found)
+                            keys[nkeys++] = val;
+                    }
+                }
+                break;
+            }
         }
     }
 
@@ -2139,11 +2331,13 @@ void TVTimerInt()
 void startTVTimer(Config &cfg)
 {
     // only start the timer if the status sense circuit pins are configured
-    if (cfg.TVON.statusPin != NC && cfg.TVON.latchPin != NC && cfg.TVON.relayPin != NC)
+    if (cfg.TVON.statusPin != 0xFF 
+        && cfg.TVON.latchPin != 0xFF 
+        && cfg.TVON.relayPin != 0xFF)
     {
-        psu2_status_sense = new DigitalIn(cfg.TVON.statusPin);
-        psu2_status_set = new DigitalOut(cfg.TVON.latchPin);
-        tv_relay = new DigitalOut(cfg.TVON.relayPin);
+        psu2_status_sense = new DigitalIn(wirePinName(cfg.TVON.statusPin));
+        psu2_status_set = new DigitalOut(wirePinName(cfg.TVON.latchPin));
+        tv_relay = new DigitalOut(wirePinName(cfg.TVON.relayPin));
         tv_delay_time = cfg.TVON.delayTime/100.0;
     
         // Set up our time routine to run every 1/4 second.  
@@ -2245,10 +2439,12 @@ void saveConfigToFlash()
 static void setNightMode(bool on)
 {
     // set the new night mode flag in the noisy output class
-    LwNoisyOut::nightMode = on;
+    nightMode = on;
 
     // update the special output pin that shows the night mode state
-    specialPin[SPECIAL_PIN_NIGHTMODE]->set(on ? 255 : 0);
+    int port = int(cfg.nightMode.port) - 1;
+    if (port >= 0 && port < numOutputs)
+        lwPin[port]->set(nightMode ? 255 : 0);
 
     // update all outputs for the mode change
     updateAllOuts();
@@ -2257,7 +2453,7 @@ static void setNightMode(bool on)
 // Toggle night mode
 static void toggleNightMode()
 {
-    setNightMode(!LwNoisyOut::nightMode);
+    setNightMode(!nightMode);
 }
 
 
@@ -2278,27 +2474,44 @@ void createPlunger()
     {
     case PlungerType_TSL1410RS:
         // pins are: SI, CLOCK, AO
-        plungerSensor = new PlungerSensorTSL1410R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], NC);
+        plungerSensor = new PlungerSensorTSL1410R(
+            wirePinName(cfg.plunger.sensorPin[0]), 
+            wirePinName(cfg.plunger.sensorPin[1]),
+            wirePinName(cfg.plunger.sensorPin[2]),
+            NC);
         break;
         
     case PlungerType_TSL1410RP:
         // pins are: SI, CLOCK, AO1, AO2
-        plungerSensor = new PlungerSensorTSL1410R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], cfg.plunger.sensorPin[3]);
+        plungerSensor = new PlungerSensorTSL1410R(
+            wirePinName(cfg.plunger.sensorPin[0]), 
+            wirePinName(cfg.plunger.sensorPin[1]),
+            wirePinName(cfg.plunger.sensorPin[2]), 
+            wirePinName(cfg.plunger.sensorPin[3]));
         break;
         
     case PlungerType_TSL1412RS:
         // pins are: SI, CLOCK, AO1, AO2
-        plungerSensor = new PlungerSensorTSL1412R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], NC);
+        plungerSensor = new PlungerSensorTSL1412R(
+            wirePinName(cfg.plunger.sensorPin[0]),
+            wirePinName(cfg.plunger.sensorPin[1]), 
+            wirePinName(cfg.plunger.sensorPin[2]), 
+            NC);
         break;
     
     case PlungerType_TSL1412RP:
         // pins are: SI, CLOCK, AO1, AO2
-        plungerSensor = new PlungerSensorTSL1412R(cfg.plunger.sensorPin[0], cfg.plunger.sensorPin[1], cfg.plunger.sensorPin[2], cfg.plunger.sensorPin[3]);
+        plungerSensor = new PlungerSensorTSL1412R(
+            wirePinName(cfg.plunger.sensorPin[0]), 
+            wirePinName(cfg.plunger.sensorPin[1]), 
+            wirePinName(cfg.plunger.sensorPin[2]), 
+            wirePinName(cfg.plunger.sensorPin[3]));
         break;
     
     case PlungerType_Pot:
         // pins are: AO
-        plungerSensor = new PlungerSensorPot(cfg.plunger.sensorPin[0]);
+        plungerSensor = new PlungerSensorPot(
+            wirePinName(cfg.plunger.sensorPin[0]));
         break;
     
     case PlungerType_None:
@@ -2383,13 +2596,6 @@ public:
         PlungerReading r;
         if (plungerSensor->read(r))
         {
-            // if in calibration mode, apply it to the calibration
-            if (plungerCalMode)
-            {
-                readForCal(r);
-                return;
-            }
-            
             // Pull the previous reading from the history
             const PlungerReading &prv = nthHist(0);
             
@@ -2403,14 +2609,68 @@ public:
             // we're using a fast sensor like that.)
             if (uint32_t(r.t - prv.t) < 2000UL)
                 return;
-                
-            // bounds-check the calibration data
-            checkCalBounds(r.pos);
 
-            // Apply the calibration and rescale to the joystick range.
-            r.pos = int(
-                (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
-                / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
+            // check for calibration mode
+            if (plungerCalMode)
+            {
+                // Calibration mode.  Adjust the calibration bounds to fit
+                // the value.  If this value is beyond the current min or max,
+                // expand the envelope to include this new value.
+                if (r.pos > cfg.plunger.cal.max)
+                    cfg.plunger.cal.max = r.pos;
+                if (r.pos < cfg.plunger.cal.min)
+                    cfg.plunger.cal.min = r.pos;
+
+                // If we're in calibration state 0, we're waiting for the
+                // plunger to come to rest at the park position so that we
+                // can take a sample of the park position.  Check to see if
+                // we've been at rest for a minimum interval.
+                if (calState == 0)
+                {
+                    if (abs(r.pos - calZeroStart.pos) < 65535/3/50)
+                    {
+                        // we're close enough - make sure we've been here long enough
+                        if (uint32_t(r.t - calZeroStart.t) > 100000UL)
+                        {
+                            // we've been at rest long enough - count it
+                            calZeroPosSum += r.pos;
+                            calZeroPosN += 1;
+                            
+                            // update the zero position from the new average
+                            cfg.plunger.cal.zero = uint16_t(calZeroPosSum / calZeroPosN);
+                            
+                            // switch to calibration state 1 - at rest
+                            calState = 1;
+                        }
+                    }
+                    else
+                    {
+                        // we're not close to the last position - start again here
+                        calZeroStart = r;
+                    }
+                }
+                
+                // Rescale to the joystick range, and adjust for the current
+                // park position, but don't calibrate.  We don't know the maximum
+                // point yet, so we can't calibrate the range.
+                r.pos = int(
+                    (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
+                    / (65535 - cfg.plunger.cal.zero));
+            }
+            else
+            {
+                // Not in calibration mode.  Apply the existing calibration and 
+                // rescale to the joystick range.
+                r.pos = int(
+                    (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
+                    / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
+                    
+                // limit the result to the valid joystick range
+                if (r.pos > JOYMAX)
+                    r.pos = JOYMAX;
+                else if (r.pos < -JOYMAX)
+                    r.pos = -JOYMAX;
+            }
 
             // Calculate the velocity from the second-to-last reading
             // to here, in joystick distance units per microsecond.
@@ -2456,8 +2716,13 @@ public:
                 // be strong enough to require the synthetic firing treatment.
                 if (v < 0 && r.pos > JOYMAX/6)
                 {
-                    // enter phase 1
+                    // enter firing phase 1
                     firingMode(1);
+                    
+                    // if in calibration state 1 (at rest), switch to state 2 (not 
+                    // at rest)
+                    if (calState == 1)
+                        calState = 2;
                     
                     // we don't have a freeze position yet, but note the start time
                     f1.pos = 0;
@@ -2470,7 +2735,7 @@ public:
                     // linearly proportional to the starting retraction distance.  
                     // The barrel spring is about 1/6 the length of the main spring, 
                     // so figure it compresses by 1/6 the distance.  (This is overly
-                    // simplistic and inaccurate, but it seems to give perfectly good
+                    // simplistic and not very accurate, but it seems to give good 
                     // visual results, and that's all it's for.)
                     f2.pos = -r.pos/6;
                 }
@@ -2488,6 +2753,25 @@ public:
                     
                     // note the start time for the firing phase
                     f2.t = r.t;
+                    
+                    // if in calibration mode, and we're in state 2 (moving), 
+                    // collect firing statistics for calibration purposes
+                    if (plungerCalMode && calState == 2)
+                    {
+                        // collect a new zero point for the average when we 
+                        // come to rest
+                        calState = 0;
+                        
+                        // collect average firing time statistics in millseconds, if 
+                        // it's in range (20 to 255 ms)
+                        int dt = uint32_t(r.t - f1.t)/1000UL;
+                        if (dt >= 20 && dt <= 255)
+                        {
+                            calRlsTimeSum += dt;
+                            calRlsTimeN += 1;
+                            cfg.plunger.cal.tRelease = uint8_t(calRlsTimeSum / calRlsTimeN);
+                        }
+                    }
                 }
                 else if (v < vprv2)
                 {
@@ -2519,6 +2803,7 @@ public:
                 {
                     // We're not accelerating.  Cancel the firing event.
                     firingMode(0);
+                    calState = 1;
                 }
                 break;
                 
@@ -2578,11 +2863,14 @@ public:
                     f3r.t = r.t;
                 }
 
-                // check if we've come to rest, or close enough
-                if (abs(r.pos - f3s.pos) < 200)
+                // Check if we're close to the last starting point.  The joystick
+                // positive axis range (0..4096) covers the retraction distance of 
+                // about 2.5", so 1" is about 1638 joystick units, hence 1/16" is
+                // about 100 units.
+                if (abs(r.pos - f3s.pos) < 100)
                 {
-                    // It's within an eighth inch of the last starting point. 
-                    // If it's been here for 30ms, consider it stable.
+                    // It's at roughly the same position as the starting point.
+                    // Consider it stable if this has been true for 300ms.
                     if (uint32_t(r.t - f3s.t) > 30000UL)
                     {
                         // we're done with the firing event
@@ -2649,7 +2937,7 @@ public:
                 cfg.plunger.cal.zero = r.pos;
                 
                 // use it as the starting point for the settling watch
-                f1 = r;
+                calZeroStart = r;
             }
             else
             {
@@ -2657,8 +2945,21 @@ public:
                 cfg.plunger.cal.zero = 0xffff/6;
                 
                 // we don't have a starting point for the setting watch
-                f1.pos = -65535;
-                f1.t = 0;
+                calZeroStart.pos = -65535;
+                calZeroStart.t = 0;
+            }
+        }
+        else if (!f && plungerCalMode)
+        {
+            // Leaving calibration mode.  Make sure the max is past the
+            // zero point - if it's not, we'd have a zero or negative
+            // denominator for the scaling calculation, which would be
+            // physically meaningless.
+            if (cfg.plunger.cal.max <= cfg.plunger.cal.zero)
+            {
+                // bad settings - reset to defaults
+                cfg.plunger.cal.max = 0xffff;
+                cfg.plunger.cal.zero = 0xffff/6;
             }
         }
             
@@ -2667,127 +2968,9 @@ public:
     }
     
     // is a firing event in progress?
-    bool isFiring() { return firing > 3; }
+    bool isFiring() { return firing == 3; }
 
 private:
-    // Read the sensor in calibration mode
-    void readForCal(PlungerReading r)
-    {
-        // if it's outside of the current calibration bounds,
-        // expand the bounds
-        if (r.pos < cfg.plunger.cal.min)
-            cfg.plunger.cal.min = r.pos;
-        if (r.pos > cfg.plunger.cal.max)
-            cfg.plunger.cal.max = r.pos;
-                    
-        // While we're in calibration mode, report the raw sensor
-        // position as the joystick value, adjusted to the JOYMAX scale.
-        z = int16_t((long(r.pos) * JOYMAX)/65535);
-        
-        // for the release monitoring, take readings at least 2ms apart
-        if (uint32_t(r.t - f2.t) < 2000UL)
-            return;
-        
-        // Check our state
-        switch (calState)
-        {
-        case 0:
-            // We're waiting for the position to settle.  Check to see if
-            // we've been at the recent settling position long enough.
-            // Consider 1/50" (about 0.5mm) close enough to count as stable, 
-            // to allow for some slight sensor noise from reading to reading.
-            if (abs(r.pos - f1.pos) > 65535/3/50)
-            {
-                // too far away - set the new starting point
-                f1 = r;
-            }
-            else if (uint32_t(r.t - f1.t) > 100000)
-            {
-                // We've been stationary long enough to count as settled.
-                // Wwitch to "at rest" state.
-                calState = 1;
-                
-                // collect the new zero point for our average
-                calZeroPosSum += r.pos;
-                calZeroPosN += 1;
-                
-                // use the new average as the zero point
-                cfg.plunger.cal.zero = uint16_t(calZeroPosSum / calZeroPosN);
-                
-                // remember the current position in f1 to detect when we start
-                // moving again
-                f1 = r;
-            }
-            break;
-            
-        case 1:
-            // At rest.  We remain in this state until we see the plunger
-            // retract more than about 1/2".
-            if (r.pos - f1.pos > 65535/6)
-            {
-                // switch to state 2 - retracting
-                calState = 2;
-                
-                // use f1 as the max so far
-                f1 = r;
-            }
-            break;
-            
-        case 2:
-            // Away from rest position.  Note the maximum point so far in f1,
-            // and monitor for release motions.
-            if (r.pos >= f1.pos)
-            {
-                // moving back - note the new max point on this run
-                f1 = r;
-            }
-            else
-            {
-                // moving forward - switch to possible release mode
-                calState = 3;
-            }
-            break;
-            
-        case 3:
-            // Possible release.  We have to move forward on each new
-            // reading, relative to two readings ago, to stay in release 
-            // mode.
-            if (r.pos >= f3r.pos)
-            {
-                // not moving forward - switch back to retract mode
-                calState = 2;
-                f1 = r;
-            }
-            else if (r.pos <= cfg.plunger.cal.zero)
-            {
-                // Crossed the zero point.  Figure the release time.  If
-                // it's within a reasonable range, add it to the average.
-                // We'll ignore outliers on the assumption that they
-                // don't reflect actual release motions.  
-                int dt = uint32_t(r.t - f1.t)/1000;
-                if (dt < 250 && dt > 25)
-                {
-                    // count it in the average
-                    calRlsTimeSum += dt;
-                    calRlsTimeN += 1;
-                    
-                    // store the new average in the configuration
-                    cfg.plunger.cal.tRelease = uint8_t(calRlsTimeSum / calRlsTimeN);
-                    cfg.plunger.cal.tRelease = dt; // $$$
-                }
-                
-                // release done - switch to "waiting to settle" mode
-                calState = 0;
-                f1 = r;
-            }
-            break;
-        }
-        
-        // f2 is always the immediately previous reading in cal mode, 
-        // and f3r is the one before that
-        f3r = f2;
-        f2 = r;
-    }
 
     // Calibration state.  During calibration mode, we watch for release
     // events, to measure the time it takes to complete the release
@@ -2807,6 +2990,7 @@ private:
     // itself doesn't come to rest at exactly the same spot every time, 
     // largely due to friction in the mechanism.  To calculate the average,
     // we keep a sum of the readings and a count of samples.
+    PlungerReading calZeroStart;
     long calZeroPosSum;
     int calZeroPosN;
     
@@ -2860,53 +3044,6 @@ private:
         return hi;
     }
 
-    // Adjust the calibration bounds for a new reading.  This is used
-    // while NOT in calibration mode to ensure that a reading doesn't
-    // violate the calibration limits.  If it does, we'll readjust the
-    // limits to incorporate the new value.
-    void checkCalBounds(int pos)
-    {
-        // If the value is beyond the calibration maximum, increase the
-        // calibration point.  This ensures that our joystick reading
-        // is always within the valid joystick field range.
-        if (pos > cfg.plunger.cal.max)
-            cfg.plunger.cal.max = pos;
-            
-        // make sure we don't overflow in the opposite direction
-        if (pos < cfg.plunger.cal.zero
-            && cfg.plunger.cal.zero - pos > cfg.plunger.cal.max)
-        {
-            // we need to raise 'max' by this much to keep things in range
-            int adj = cfg.plunger.cal.zero - pos - cfg.plunger.cal.max;
-            
-            // we can raise 'max' at most this much before overflowing
-            int lim = 0xffff - cfg.plunger.cal.max;
-            
-            // if we have headroom to raise 'max' by 'adj', do so, otherwise
-            // raise it as much as we can and apply the excess to lowering the
-            // zero point
-            if (adj > lim)
-            {
-                cfg.plunger.cal.zero -= adj - lim;
-                adj = lim;
-            }
-            cfg.plunger.cal.max += adj;
-        }
-            
-        // If the calibration max isn't higher than the calibration
-        // zero, we have a negative or zero scale range, which isn't
-        // physically meaningful.  Fix it by forcing the max above
-        // the zero point (or the zero point below the max, if they're
-        // both pegged at the datatype maximum).
-        if (cfg.plunger.cal.max <= cfg.plunger.cal.zero)
-        {
-            if (cfg.plunger.cal.zero != 0xFFFF)
-                cfg.plunger.cal.max = cfg.plunger.cal.zero + 1;
-            else
-                cfg.plunger.cal.zero -= 1;
-        }
-    }
-    
     // velocity at previous reading, and the one before that
     float vprv, vprv2;
     
@@ -2939,16 +3076,12 @@ private:
     //   0 - Default state.  We report the real instantaneous plunger 
     //       position to the joystick interface.
     //
-    //   1 - Possible release in progress.  We enter this state when
-    //       we see the plunger start to move forward, and stay in this
-    //       state as long as we see *accelerating* forward motion.
+    //   1 - Moving forward
     //
-    //   2 - Firing event started.  We report the "bounce" position for
-    //       a minimum time.
+    //   2 - Accelerating
     //
-    //   3 - Firing event hold.  We report the rest position for a
-    //       minimum interval, or until the real plunger comes to rest
-    //       somewhere, whichever comes first.
+    //   3 - Firing.  We report the rest position for a minimum interval,
+    //       or until the real plunger comes to rest somewhere.
     //
     int firing;
     
@@ -3026,12 +3159,7 @@ public:
     {
         // start in the default state
         lbState = 0;
-        
-        // get the button bit for the ZB Launch Ball button
-        lbButtonBit = (1 << (cfg.plunger.zbLaunchBall.btn - 1));
-        
-        // start the state transition timer
-        lbTimer.start();
+        btnState = false;
     }
 
     // Update state.  This checks the current plunger position and
@@ -3040,152 +3168,96 @@ public:
     // Updates the simulated button vector according to the current
     // launch ball state.  The main loop calls this before each 
     // joystick update to figure the new simulated button state.
-    void update(uint32_t &simButtons)
+    void update()
     {
-        // Check for a simulated Launch Ball button press, if enabled
-        if (cfg.plunger.zbLaunchBall.port != 0)
+        // If the ZB Launch Ball led wiz output is ON, check for a 
+        // plunger firing event
+        if (zbLaunchOn)
         {                
+            // note the new position
             int znew = plungerReader.getPosition();
-            const int cockThreshold = JOYMAX/3;
+            
+            // figure the push threshold from the configuration data
             const int pushThreshold = int(-JOYMAX/3.0 * cfg.plunger.zbLaunchBall.pushDistance/1000.0);
-            int newState = lbState;
+
+            // check the state
             switch (lbState)
             {
             case 0:
-                // Base state.  If the plunger is pulled back by an inch
-                // or more, go to "cocked" state.  If the plunger is pushed
-                // forward by 1/4" or more, go to "pressed" state.
-                if (znew >= cockThreshold)
-                    newState = 1;
+                // Default state.  If a launch event has been detected on
+                // the plunger, activate a timed pulse and switch to state 1.
+                // If the plunger is pushed forward of the threshold, push
+                // the button.
+                if (plungerReader.isFiring())
+                {
+                    // firing event - start a timed Launch button pulse
+                    lbTimer.reset();
+                    lbTimer.start();
+                    setButton(true);
+                    
+                    // switch to state 1
+                    lbState = 1;
+                }
                 else if (znew <= pushThreshold)
-                    newState = 5;
+                {
+                    // pushed forward without a firing event - hold the
+                    // button as long as we're pushed forward
+                    setButton(true);
+                }
+                else
+                {
+                    // not pushed forward - turn off the Launch button
+                    setButton(false);
+                }
                 break;
                 
             case 1:
-                // Cocked state.  If a firing event is now in progress,
-                // go to "launch" state.  Otherwise, if the plunger is less
-                // than 1" retracted, go to "uncocked" state - the player
-                // might be slowly returning the plunger to rest so as not
-                // to trigger a launch.
-                if (plungerReader.isFiring() || znew <= 0)
-                    newState = 3;
-                else if (znew < cockThreshold)
-                    newState = 2;
+                // State 1: Timed Launch button pulse in progress after a
+                // firing event.  Wait for the timer to expire.
+                if (lbTimer.read_us() > 200000UL)
+                {
+                    // timer expired - turn off the button
+                    setButton(false);
+                    
+                    // switch to state 2
+                    lbState = 2;
+                }
                 break;
                 
             case 2:
-                // Uncocked state.  If the plunger is more than an inch
-                // retracted, return to cocked state.  If we've been in
-                // the uncocked state for more than half a second, return
-                // to the base state.  This allows the user to return the
-                // plunger to rest without triggering a launch, by moving
-                // it at manual speed to the rest position rather than
-                // releasing it.
-                if (znew >= cockThreshold)
-                    newState = 1;
-                else if (lbTimer.read_us() > 500000)
-                    newState = 0;
-                break;
-                
-            case 3:
-                // Launch state.  If the plunger is no longer pushed
-                // forward, switch to launch rest state.
-                if (znew >= 0)
-                    newState = 4;
-                break;    
-                
-            case 4:
-                // Launch rest state.  If the plunger is pushed forward
-                // again, switch back to launch state.  If not, and we've
-                // been in this state for at least 200ms, return to the
-                // default state.
-                if (znew <= pushThreshold)
-                    newState = 3;
-                else if (lbTimer.read_us() > 200000)
-                    newState = 0;                    
-                break;
-                
-            case 5:
-                // Press-and-Hold state.  If the plunger is no longer pushed
-                // forward, AND it's been at least 50ms since we generated
-                // the simulated Launch Ball button press, return to the base 
-                // state.  The minimum time is to ensure that VP has a chance
-                // to see the button press and to avoid transient key bounce
-                // effects when the plunger position is right on the threshold.
-                if (znew > pushThreshold && lbTimer.read_us() > 50000)
-                    newState = 0;
-                break;
-            }
-            
-            // change states if desired
-            if (newState != lbState)
-            {
-                // If we're entering Launch state OR we're entering the
-                // Press-and-Hold state, AND the ZB Launch Ball LedWiz signal 
-                // is turned on, simulate a Launch Ball button press.
-                if (((newState == 3 && lbState != 4) || newState == 5)
-                    && wizOn[cfg.plunger.zbLaunchBall.port-1])
+                // State 2: Timed Launch button pulse done.  Wait for the
+                // plunger launch event to end.
+                if (!plungerReader.isFiring())
                 {
-                    lbBtnTimer.reset();
-                    lbBtnTimer.start();
-                    simButtons |= lbButtonBit;
+                    // firing event done - return to default state
+                    lbState = 0;
                 }
-                
-                // if we're switching to state 0, release the button
-                if (newState == 0)
-                    simButtons &= ~(1 << (cfg.plunger.zbLaunchBall.btn - 1));
-                
-                // switch to the new state
-                lbState = newState;
-                
-                // start timing in the new state
-                lbTimer.reset();
-            }
-            
-            // If the Launch Ball button press is in effect, but the
-            // ZB Launch Ball LedWiz signal is no longer turned on, turn
-            // off the button.
-            //
-            // If we're in one of the Launch states (state #3 or #4),
-            // and the button has been on for long enough, turn it off.
-            // The Launch mode is triggered by a pull-and-release gesture.
-            // From the user's perspective, this is just a single gesture
-            // that should trigger just one momentary press on the Launch
-            // Ball button.  Physically, though, the plunger usually
-            // bounces back and forth for 500ms or so before coming to
-            // rest after this gesture.  That's what the whole state
-            // #3-#4 business is all about - we stay in this pair of
-            // states until the plunger comes to rest.  As long as we're
-            // in these states, we won't send duplicate button presses.
-            // But we also don't want the one button press to continue 
-            // the whole time, so we'll time it out now.
-            //
-            // (This could be written as one big 'if' condition, but
-            // I'm breaking it out verbosely like this to make it easier
-            // for human readers such as myself to comprehend the logic.)
-            if ((simButtons & lbButtonBit) != 0)
-            {
-                int turnOff = false;
-                
-                // turn it off if the ZB Launch Ball signal is off
-                if (!wizOn[cfg.plunger.zbLaunchBall.port-1])
-                    turnOff = true;
-                    
-                // also turn it off if we're in state 3 or 4 ("Launch"),
-                // and the button has been on long enough
-                if ((lbState == 3 || lbState == 4) && lbBtnTimer.read_us() > 250000)
-                    turnOff = true;
-                    
-                // if we decided to turn off the button, do so
-                if (turnOff)
-                {
-                    lbBtnTimer.stop();
-                    simButtons &= ~lbButtonBit;
-                }
+                break;
             }
         }
+        else
+        {
+            // ZB Launch Ball disabled - turn off the button if it was on
+            setButton(false);
+                
+            // return to the default state
+            lbState = 0;
+        }
     }
-  
+    
+    // Set the button state
+    void setButton(bool on)
+    {
+        if (btnState != on)
+        {
+            // remember the new state
+            btnState = on;
+            
+            // update the virtual button state
+            buttonState[ZBL_BUTTON].virtPress(on);
+        }
+    }
+    
 private:
     // Simulated Launch Ball button state.  If a "ZB Launch Ball" port is
     // defined for our LedWiz port mapping, any time that port is turned ON,
@@ -3196,16 +3268,13 @@ private:
     //
     // States:
     //   0 = default
-    //   1 = cocked (plunger has been pulled back about 1" from state 0)
-    //   2 = uncocked (plunger is pulled back less than 1" from state 1)
-    //   3 = launching, plunger is forward beyond park position
-    //   4 = launching, plunger is behind park position
-    //   5 = pressed and holding (plunger has been pressed forward beyond 
-    //       the park position from state 0)
-    int lbState;
+    //   1 = firing (firing event has activated a Launch button pulse)
+    //   2 = firing done (Launch button pulse ended, waiting for plunger
+    //       firing event to end)
+    uint8_t lbState;
     
-    // button bit for ZB launch ball button
-    uint32_t lbButtonBit;
+    // button state
+    bool btnState;
     
     // Time since last lbState transition.  Some of the states are time-
     // sensitive.  In the "uncocked" state, we'll return to state 0 if
@@ -3215,11 +3284,6 @@ private:
     // the Launch Ball button after a moment, and we need to wait for 
     // the plunger to come to rest before returning to state 0.
     Timer lbTimer;
-    
-    // Launch Ball simulated push timer.  We start this when we simulate
-    // the button push, and turn off the simulated button when enough time
-    // has elapsed.
-    Timer lbBtnTimer;
 };
 
 // ---------------------------------------------------------------------------
@@ -3286,8 +3350,8 @@ uint16_t statusFlags;
 // Pixel dump mode - the host requested a dump of image sensor pixels
 // (helpful for installing and setting up the sensor and light source)
 bool reportPlungerStat = false;
-uint8_t reportStatFlags;    // pixel report flag bits (see ccdSensor.h)
-uint8_t reportStatVisMode;  // pixel report visualization mode (not currently used)
+uint8_t reportPlungerStatFlags; // plunger pixel report flag bits (see ccdSensor.h)
+uint8_t reportPlungerStatTime;  // extra exposure time for plunger pixel report
 
 
 // ---------------------------------------------------------------------------
@@ -3313,9 +3377,10 @@ int calBtnLit = false;
 
 // Handle SET messages - write configuration variables from USB message data
 #define if_msg_valid(test)  if (test)
-#define v_byte(var, ofs)   cfg.var = data[ofs]
-#define v_ui16(var, ofs)   cfg.var = wireUI16(data+ofs)
-#define v_pin(var, ofs)    cfg.var = wirePinName(data[ofs])
+#define v_byte(var, ofs)    cfg.var = data[ofs]
+#define v_ui16(var, ofs)    cfg.var = wireUI16(data+(ofs))
+#define v_pin(var, ofs)     cfg.var = wirePinName(data[ofs])
+#define v_byte_ro(val, ofs) // ignore read-only variables on SET
 #define v_func configVarSet
 #include "cfgVarMsgMap.h"
 
@@ -3324,13 +3389,15 @@ int calBtnLit = false;
 #undef v_byte
 #undef v_ui16
 #undef v_pin
+#undef v_byte_ro
 #undef v_func
 
 // Handle GET messages - read variable values and return in USB message daa
 #define if_msg_valid(test)
-#define v_byte(var, ofs)   data[ofs] = cfg.var
-#define v_ui16(var, ofs)   ui16Wire(data+ofs, cfg.var)
-#define v_pin(var, ofs)    pinNameWire(data+ofs, cfg.var)
+#define v_byte(var, ofs)    data[ofs] = cfg.var
+#define v_ui16(var, ofs)    ui16Wire(data+(ofs), cfg.var)
+#define v_pin(var, ofs)     pinNameWire(data+(ofs), cfg.var)
+#define v_byte_ro(val, ofs) data[ofs] = val
 #define v_func  configVarGet
 #include "cfgVarMsgMap.h"
 
@@ -3465,10 +3532,10 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         case 3:
             // 3 = plunger sensor status report
             //     data[2] = flag bits
-            //     data[3] = visualization mode
+            //     data[3] = extra exposure time, 100us (.1ms) increments
             reportPlungerStat = true;
-            reportStatFlags = data[2];
-            reportStatVisMode = data[3];
+            reportPlungerStatFlags = data[2];
+            reportPlungerStatTime = data[3];
             
             // show purple until we finish sending the report
             diagLED(1, 0, 1);
@@ -3493,17 +3560,16 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             // 6 = Save configuration to flash.
             saveConfigToFlash();
             
-            // Reboot the microcontroller.  Nearly all config changes
-            // require a reset, and a reset only takes a few seconds, 
-            // so we don't bother tracking whether or not a reboot is
-            // really needed.
-            reboot(js);
+            // before disconnecting, pause for the delay time specified in
+            // the parameter byte (in seconds)
+            rebootTime_us = data[2] * 1000000L;
+            rebootTimer.start();
             break;
             
         case 7:
             // 7 = Device ID report
-            // (No parameters)
-            js.reportID();
+            //     data[2] = ID index: 1=CPU ID, 2=OpenSDA TUID
+            js.reportID(data[2]);
             break;
             
         case 8:
@@ -3517,10 +3583,12 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             //     data[2] = config var ID
             //     data[3] = array index (for array vars: button assignments, output ports)
             {
-                // set up the reply buffer with the variable ID data
+                // set up the reply buffer with the variable ID data, and zero out
+                // the rest of the buffer
                 uint8_t reply[8];
                 reply[1] = data[2];
                 reply[2] = data[3];
+                memset(reply+3, 0, sizeof(reply)-3);
                 
                 // query the value
                 configVarGet(reply);
@@ -3528,6 +3596,11 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
                 // send the reply
                 js.reportConfigVar(reply + 1);
             }
+            break;
+            
+        case 10:
+            // 10 = Build ID query.
+            js.reportBuildInfo(getBuildID());
             break;
         }
     }
@@ -3721,8 +3794,10 @@ int main(void)
     statusFlags = (cfg.plunger.enabled ? 0x01 : 0x00);
 
     // initialize the calibration buttons, if present
-    DigitalIn *calBtn = (cfg.plunger.cal.btn == NC ? 0 : new DigitalIn(cfg.plunger.cal.btn));
-    DigitalOut *calBtnLed = (cfg.plunger.cal.led == NC ? 0 : new DigitalOut(cfg.plunger.cal.led));
+    DigitalIn *calBtn = (cfg.plunger.cal.btn == 0xFF ? 0 : 
+        new DigitalIn(wirePinName(cfg.plunger.cal.btn)));
+    DigitalOut *calBtnLed = (cfg.plunger.cal.led == 0xFF ? 0 :
+        new DigitalOut(wirePinName(cfg.plunger.cal.led)));
 
     // initialize the calibration button 
     calBtnTimer.start();
@@ -3744,14 +3819,6 @@ int main(void)
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
     int x = 0, y = 0;
-    
-    // Simulated button states.  This is a vector of button states
-    // for the simulated buttons.  We combine this with the physical
-    // button states on each USB joystick report, so we will report
-    // a button as pressed if either the physical button is being pressed
-    // or we're simulating a press on the button.  This is used for the
-    // simulated Launch Ball button.
-    uint32_t simButtons = 0;
     
     // initialize the plunger sensor
     plungerSensor->init();
@@ -3881,12 +3948,12 @@ int main(void)
         // read the plunger sensor
         plungerReader.read();
         
-        // process button updates
-        processButtons();
+        // update the ZB Launch Ball status
+        zbLaunchBall.update();
         
-        // handle the ZB Launch Ball feature
-        zbLaunchBall.update(simButtons);
-
+        // process button updates
+        processButtons(cfg);
+        
         // send a keyboard report if we have new data
         if (kbState.changed)
         {
@@ -3934,10 +4001,7 @@ int main(void)
             // a traditional plunger, so we don't want to confuse VP with
             // regular plunger inputs.
             int z = plungerReader.getPosition();
-            int zrep = (!cfg.plunger.enabled ? 0 :
-                        cfg.plunger.zbLaunchBall.port != 0 
-                          && wizOn[cfg.plunger.zbLaunchBall.port-1] ? 0 :
-                        z);
+            int zrep = (!cfg.plunger.enabled || zbLaunchOn ? 0 : z);
             
             // rotate X and Y according to the device orientation in the cabinet
             accelRotate(x, y);
@@ -3949,7 +4013,7 @@ int main(void)
 #endif
 
             // send the joystick report
-            jsOK = js.update(x, y, zrep, jsButtons | simButtons, statusFlags);
+            jsOK = js.update(x, y, zrep, jsButtons, statusFlags);
             
             // we've just started a new report interval, so reset the timer
             jsReportTimer.reset();
@@ -3959,7 +4023,7 @@ int main(void)
         if (reportPlungerStat)
         {
             // send the report            
-            plungerSensor->sendStatusReport(js, reportStatFlags, reportStatVisMode);
+            plungerSensor->sendStatusReport(js, reportPlungerStatFlags, reportPlungerStatTime);
 
             // we have satisfied this request
             reportPlungerStat = false;
@@ -4052,6 +4116,10 @@ int main(void)
                 }
             }
         }
+        
+        // if we have a reboot timer pending, check for completion
+        if (rebootTimer.isRunning() && rebootTimer.read_us() > rebootTime_us)
+            reboot(js);
         
         // if we're disconnected, initiate a new connection
         if (!connected)

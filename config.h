@@ -26,7 +26,6 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-
 // Plunger type codes
 // NOTE!  These values are part of the external USB interface.  New
 // values can be added, but the meaning of an existing assigned number 
@@ -49,11 +48,9 @@ const int OrientationRight     = 2;      // ports pointed toward right side of c
 const int OrientationRear      = 3;      // ports pointed toward back of cabinet
 
 // input button types
+const int BtnTypeNone          = 0;      // unused
 const int BtnTypeJoystick      = 1;      // joystick button
-const int BtnTypeKey           = 2;      // regular keyboard key
-const int BtnTypeModKey        = 3;      // keyboard modifier key (shift, ctrl, etc)
-const int BtnTypeMedia         = 4;      // media control key (volume up/down, etc)
-const int BtnTypeSpecial       = 5;      // special button (night mode switch, etc)
+const int BtnTypeKey           = 2;      // keyboard key
 
 // input button flags
 const uint8_t BtnFlagPulse     = 0x01;   // pulse mode - reports each change in the physical switch state
@@ -64,7 +61,10 @@ struct ButtonCfg
 {
     uint8_t pin;        // physical input GPIO pin - a USB-to-PinName mapping index
     uint8_t typ;        // key type reported to PC - a BtnTypeXxx value
-    uint8_t val;        // key value reported - meaning depends on 'typ' value
+    uint8_t val;        // key value reported - meaning depends on 'typ' value:
+                        //   none     -> no PC input reports (val is unused)
+                        //   joystick -> val is joystick button number (1..32)
+                        //   keyboard -> val is USB scan code
     uint8_t flags;      // key flags - a bitwise combination of BtnFlagXxx values
 
     void set(uint8_t pin, uint8_t typ, uint8_t val, uint8_t flags = 0)
@@ -79,7 +79,10 @@ struct ButtonCfg
     
 
 // maximum number of input button mappings
-const int MAX_BUTTONS = 32;
+const int MAX_EXT_BUTTONS = 32;             // buttons visible through USB interface
+const int VIRTUAL_BUTTONS = 1;              // number of internal virtual buttons
+const int ZBL_BUTTON = MAX_EXT_BUTTONS;     // index of virtual ZB Launch Ball button
+const int MAX_BUTTONS = MAX_EXT_BUTTONS + VIRTUAL_BUTTONS;  // total button slots
 
 // LedWiz output port type codes
 // These values are part of the external USB interface
@@ -88,7 +91,8 @@ const int PortTypeGPIOPWM      = 1;      // GPIO port, PWM enabled
 const int PortTypeGPIODig      = 2;      // GPIO port, digital out
 const int PortTypeTLC5940      = 3;      // TLC5940 port
 const int PortType74HC595      = 4;      // 74HC595 port
-const int PortTypeVirtual      = 5;      // Virtual port - visible to host software, but not connected to a physical output
+const int PortTypeVirtual      = 5;      // Virtual port - visible to host software, but not connected 
+                                         //  to a physical output
 
 // LedWiz output port flag bits
 const uint8_t PortFlagActiveLow  = 0x01; // physical output is active-low
@@ -118,6 +122,11 @@ struct LedWizPortCfg
 } __attribute__((packed));
 
 
+// Convert a physical pin name to a wire pin name
+#define PINNAME_TO_WIRE(p) \
+    uint8_t((p) == NC ? 0xFF : \
+      (((p) & 0xF000 ) >> (PORT_SHIFT - 5)) | (((p) & 0xFF) >> 2))
+
 struct Config
 {
     // set all values to factory defaults
@@ -146,9 +155,9 @@ struct Config
         orientation = OrientationFront;
 
         // assume a basic setup with no expansion boards
-        expan.nMain = 0;
-        expan.nPower = 0;
-        expan.nChime = 0;
+        expan.typ = 0;
+        expan.vsn = 0;
+        memset(expan.ext, 0, sizeof(expan.ext));
 
         // assume no plunger is attached
         plunger.enabled = false;
@@ -157,34 +166,41 @@ struct Config
 #if TEST_CONFIG_EXPAN || TEST_CONFIG_CAB // $$$
         plunger.enabled = true;
         plunger.sensorType = PlungerType_TSL1410RS;
-        plunger.sensorPin[0] = PTE20; // SI
-        plunger.sensorPin[1] = PTE21; // SCLK
-        plunger.sensorPin[2] = PTB0;  // AO1 = PTB0 = ADC0_SE8
-        plunger.sensorPin[3] = PTE22; // AO2 (parallel mode) = PTE22 = ADC0_SE3
+        plunger.sensorPin[0] = PINNAME_TO_WIRE(PTE20); // SI
+        plunger.sensorPin[1] = PINNAME_TO_WIRE(PTE21); // SCLK
+        plunger.sensorPin[2] = PINNAME_TO_WIRE(PTB0);  // AO1 = PTB0 = ADC0_SE8
+        plunger.sensorPin[3] = PINNAME_TO_WIRE(PTE22); // AO2 (parallel mode) = PTE22 = ADC0_SE3
 #endif
         
         // default plunger calibration button settings
-        plunger.cal.btn = PTE29;
-        plunger.cal.led = PTE23;
+        plunger.cal.btn = PINNAME_TO_WIRE(PTE29);
+        plunger.cal.led = PINNAME_TO_WIRE(PTE23);
         
         // set the default plunger calibration
         plunger.cal.setDefaults();
         
         // disable the ZB Launch Ball by default
-        plunger.zbLaunchBall.port = 0;
-        plunger.zbLaunchBall.btn = 0;
+        plunger.zbLaunchBall.port = 0;                  // 0 = disabled
+        plunger.zbLaunchBall.keytype = 2;               // keyboard key
+        plunger.zbLaunchBall.keycode = 0x28;            // Enter key (USB scan code)
+        plunger.zbLaunchBall.pushDistance = 63;         // about 1/16"
         
         // assume no TV ON switch
-        TVON.statusPin = NC;
-        TVON.latchPin = NC;
-        TVON.relayPin = NC;
-        TVON.delayTime = 7;
+        TVON.statusPin = PINNAME_TO_WIRE(NC);
+        TVON.latchPin = PINNAME_TO_WIRE(NC);
+        TVON.relayPin = PINNAME_TO_WIRE(NC);
+        TVON.delayTime = 700;   // 7 seconds
 #if TEST_CONFIG_EXPAN //$$$
-        TVON.statusPin = PTD2;
-        TVON.latchPin = PTE0;
-        TVON.relayPin = PTD3;
-        TVON.delayTime = 7;
+        TVON.statusPin = PINNAME_TO_WIRE(PTD2);
+        TVON.latchPin = PINNAME_TO_WIRE(PTE0);
+        TVON.relayPin = PINNAME_TO_WIRE(PTD3);
+        TVON.delayTime = 700;   // 7 seconds
 #endif
+
+        // assume no night mode switch or indicator lamp
+        nightMode.btn = 0;
+        nightMode.flags = 0;
+        nightMode.port = 0;
         
         // assume no TLC5940 chips
         tlc5940.nchips = 0;
@@ -193,11 +209,11 @@ struct Config
 #endif
 
         // default TLC5940 pin assignments
-        tlc5940.sin = PTC6;
-        tlc5940.sclk = PTC5;
-        tlc5940.xlat = PTC10;
-        tlc5940.blank = PTC7;
-        tlc5940.gsclk = PTA1;
+        tlc5940.sin = PINNAME_TO_WIRE(PTC6);
+        tlc5940.sclk = PINNAME_TO_WIRE(PTC5);
+        tlc5940.xlat = PINNAME_TO_WIRE(PTC10);
+        tlc5940.blank = PINNAME_TO_WIRE(PTC7);
+        tlc5940.gsclk = PINNAME_TO_WIRE(PTA1);
         
         // assume no 74HC595 chips
         hc595.nchips = 0;
@@ -206,57 +222,55 @@ struct Config
 #endif
     
         // default 74HC595 pin assignments
-        hc595.sin = PTA5;
-        hc595.sclk = PTA4;
-        hc595.latch = PTA12;
-        hc595.ena = PTD4;
+        hc595.sin = PINNAME_TO_WIRE(PTA5);
+        hc595.sclk = PINNAME_TO_WIRE(PTA4);
+        hc595.latch = PINNAME_TO_WIRE(PTA12);
+        hc595.ena = PINNAME_TO_WIRE(PTD4);
         
         // initially configure with no LedWiz output ports
         outPort[0].typ = PortTypeDisabled;
-        for (int i = 0 ; i < sizeof(specialPort)/sizeof(specialPort[0]) ; ++i)
-            specialPort[i].typ = PortTypeDisabled;
-        
+            
         // initially configure with no input buttons
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
-            button[i].pin = 0;   // 0 == index of NC in USB-to-PinName mapping
+            button[i].set(PINNAME_TO_WIRE(NC), BtnTypeNone, 0);
 
 #if TEST_CONFIG_EXPAN | TEST_CONFIG_CAB
         for (int i = 0 ; i < 24 ; ++i) {
             static int bp[] = {
-                21, // 1 = PTC2
-                12, // 2 = PTB3
-                11, // 3 = PTB2
-                10, // 4 = PTB1
-                54, // 5 = PTE30
+                PINNAME_TO_WIRE(PTC2),  // 1
+                PINNAME_TO_WIRE(PTB3),  // 2
+                PINNAME_TO_WIRE(PTB2),  // 3
+                PINNAME_TO_WIRE(PTB1),  // 4
+                PINNAME_TO_WIRE(PTE30), // 5 
 #if TEST_CONFIG_EXPAN
-                30, // 6 = PTC11
-#elif TEST_CONFIG_CAG
-                51, // 6 = PTE22
+                PINNAME_TO_WIRE(PTC11), // 6 
+#elif TEST_CONFIG_CAB
+                PINNAME_TO_WIRE(PTE22), // 6 
 #endif
-                48, // 7 = PTE5
-                47, // 8 = PTE4
-                46, // 9 = PTE3
-                45, // 10 = PTE2
-                16, // 11 = PTB11
-                15, // 12 = PTB10
-                14, // 13 = PTB9
-                13, // 14 = PTB8
-                31, // 15 = PTC12
-                32, // 16 = PTC13
-                33, // 17 = PTC16
-                34, // 18 = PTC17
-                7,  // 19 = PTA16
-                8,  // 20 = PTA17
-                55, // 21 = PTE31
-                41, // 22 = PTD6
-                42, // 23 = PTD7
-                44  // 24 = PTE1
+                PINNAME_TO_WIRE(PTE5),  // 7
+                PINNAME_TO_WIRE(PTE4),  // 8
+                PINNAME_TO_WIRE(PTE3),  // 9
+                PINNAME_TO_WIRE(PTE2),  // 10
+                PINNAME_TO_WIRE(PTB11), // 11 
+                PINNAME_TO_WIRE(PTB10), // 12 
+                PINNAME_TO_WIRE(PTB9),  // 13
+                PINNAME_TO_WIRE(PTB8),  // 14
+                PINNAME_TO_WIRE(PTC12), // 15 
+                PINNAME_TO_WIRE(PTC13), // 16 
+                PINNAME_TO_WIRE(PTC16), // 17 
+                PINNAME_TO_WIRE(PTC17), // 18 
+                PINNAME_TO_WIRE(PTA16), // 19 
+                PINNAME_TO_WIRE(PTA17), // 20 
+                PINNAME_TO_WIRE(PTE31), // 21 
+                PINNAME_TO_WIRE(PTD6),  // 22
+                PINNAME_TO_WIRE(PTD7),  // 23
+                PINNAME_TO_WIRE(PTE1)   // 24
             };               
             button[i].set(bp[i], 
 #if TEST_CONFIG_EXPAN
                 BtnTypeKey, i+4);       // keyboard key A, B, C... 
 #elif TEST_CONFIG_CAB
-                BtnTypeJoystick, i);    // joystick button 0, 1, ...
+                BtnTypeJoystick, i+1);  // joystick button 0, 1, ...
 #endif
 
         }
@@ -268,13 +282,13 @@ struct Config
         button[23].flags = 0x01;  // pulse button
         
         button[22].typ = BtnTypeModKey;
-        button[22].val = 0x02;  // left shift
+        button[22].val = 0xE1;  // left shift
         
-        button[21].typ = BtnTypeMedia;
-        button[21].val = 0x02;  // vol down
+        button[21].typ = BtnTypeKey;
+        button[21].val = 0x81;  // vol down
         
-        button[20].typ = BtnTypeMedia;
-        button[20].val = 0x01;  // vol up
+        button[20].typ = BtnTypeKey;
+        button[20].val = 0x80;  // vol up
         
 #endif
         
@@ -304,8 +318,8 @@ struct Config
             for (int i = 0 ; i < 16 ; ++i)
                 outPort[n++].set(PortTypeTLC5940, i, PortFlagGamma);
             
-            // 17 = knocker
-            outPort[n++].set(PortTypeGPIODig, 27);
+            // 17 = knocker (PTC8)
+            outPort[n++].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC8));
             
             // 18-49 = power board outputs 1-32 (TLC ports 32-63)
             for (int i = 0 ; i < 32 ; ++i)
@@ -326,39 +340,39 @@ struct Config
 
 #if TEST_CONFIG_CAB
 #if TEST_KEEP_PRINTF
-        outPort[ 0].set(PortTypeGPIOPWM, 0);     // port 1  = PTA1 -> NC to keep debug printf
-        outPort[ 1].set(PortTypeGPIOPWM, 0);     // port 2  = PTA2 -> NC to keep debug printf
+        outPort[ 0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(NC));       // port 1  = NC to keep debug printf (PTA1 is UART)
+        outPort[ 1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(NC));       // port 2  = NC to keep debug printf (PTA2 is UART)
 #else
-        outPort[ 0].set(PortTypeGPIOPWM, 1);     // port 1  = PTA1
-        outPort[ 1].set(PortTypeGPIOPWM, 2);     // port 2  = PTA2
+        outPort[ 0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA1));     // port 1  = PTA1
+        outPort[ 1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA2));     // port 2  = PTA2
 #endif
-        outPort[ 2].set(PortTypeGPIOPWM, 39);    // port 3  = PTD4
-        outPort[ 3].set(PortTypeGPIOPWM, 5);     // port 4  = PTA12
-        outPort[ 4].set(PortTypeGPIOPWM, 3);     // port 5  = PTA4
-        outPort[ 5].set(PortTypeGPIOPWM, 4);     // port 6  = PTA5
-        outPort[ 6].set(PortTypeGPIOPWM, 6);     // port 7  = PTA13
-        outPort[ 7].set(PortTypeGPIOPWM, 40);    // port 8  = PTD5
-        outPort[ 8].set(PortTypeGPIOPWM, 35);    // port 9  = PTD0
-        outPort[ 9].set(PortTypeGPIOPWM, 38);    // port 10 = PTD3
-        outPort[10].set(PortTypeGPIODig, 37);    // port 11 = PTD2
-        outPort[11].set(PortTypeGPIODig, 27);    // port 12 = PCT8
-        outPort[12].set(PortTypeGPIODig, 28);    // port 13 = PCT9
-        outPort[13].set(PortTypeGPIODig, 26);    // port 14 = PTC7
-        outPort[14].set(PortTypeGPIODig, 19);    // port 15 = PTC0
-        outPort[15].set(PortTypeGPIODig, 22);    // port 16 = PTC3
-        outPort[16].set(PortTypeGPIODig, 23);    // port 17 = PTC4
-        outPort[17].set(PortTypeGPIODig, 24);    // port 18 = PTC5
-        outPort[18].set(PortTypeGPIODig, 25);    // port 19 = PTC6
-        outPort[19].set(PortTypeGPIODig, 29);    // port 20 = PTC10
-        outPort[20].set(PortTypeGPIODig, 30);    // port 21 = PTC11
-        outPort[21].set(PortTypeGPIODig, 43);    // port 22 = PTE0
+        outPort[ 2].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTD4));     // port 3  = PTD4
+        outPort[ 3].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA12));    // port 4  = PTA12
+        outPort[ 4].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA4));     // port 5  = PTA4
+        outPort[ 5].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA5));     // port 6  = PTA5
+        outPort[ 6].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA13));    // port 7  = PTA13
+        outPort[ 7].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTD5));     // port 8  = PTD5
+        outPort[ 8].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTD0));     // port 9  = PTD0
+        outPort[ 9].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTD3));     // port 10 = PTD3
+        outPort[10].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTD2));     // port 11 = PTD2
+        outPort[11].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC8));     // port 12 = PTC8
+        outPort[12].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC9));     // port 13 = PTC9
+        outPort[13].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC7));     // port 14 = PTC7
+        outPort[14].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC0));     // port 15 = PTC0
+        outPort[15].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC3));     // port 16 = PTC3
+        outPort[16].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC4));     // port 17 = PTC4
+        outPort[17].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC5));     // port 18 = PTC5
+        outPort[18].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC6));     // port 19 = PTC6
+        outPort[19].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC10));    // port 20 = PTC10
+        outPort[20].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC11));    // port 21 = PTC11
+        outPort[21].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTE0));     // port 22 = PTE0
 #endif
 
 #if 0
         // configure the on-board RGB LED as outputs 1,2,3
-        outPort[0].set(PortTypeGPIOPWM, 17, PortFlagActiveLow);     // PTB18 = LED1 = Red LED
-        outPort[1].set(PortTypeGPIOPWM, 18, PortFlagActiveLow);     // PTB19 = LED2 = Green LED
-        outPort[2].set(PortTypeGPIOPWM, 36, PortFlagActiveLow);     // PTD1  = LED3 = Blue LED
+        outPort[0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(LED1), PortFlagActiveLow);     // PTB18 = LED1 = Red LED
+        outPort[1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(LED2), PortFlagActiveLow);     // PTB19 = LED2 = Green LED
+        outPort[2].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(LED3), PortFlagActiveLow);     // PTD1  = LED3 = Blue LED
         outPort[3].typ = PortTypeDisabled;
 #endif
     }        
@@ -377,7 +391,7 @@ struct Config
     
     // Pinscape Controller unit number.  This is the nominal unit number,
     // from 1 to 16.  We report this in the status query; DOF uses it to
-    // distinguish multiple Pinscape units.  Note that this doesn't affect 
+    // distinguish among Pinscape units.  Note that this doesn't affect 
     // the LedWiz unit numbering, which is implied by the USB Product ID.
     uint8_t psUnitNo;
             
@@ -402,9 +416,10 @@ struct Config
     // --- EXPANSION BOARDS ---
     struct
     {
-        int nMain;      // number of main interface boards (usually 1 max)
-        int nPower;     // number of MOSFET power boards
-        int nChime;     // number of chime boards
+        uint8_t typ;        // expansion board set type:
+                            //    1 -> Pinscape expansion boards
+        uint8_t vsn;        // board set interface version
+        uint8_t ext[3];     // board set type-specific extended data
         
     } expan;
     
@@ -430,21 +445,27 @@ struct Config
         // Potentiometer:             AO (AnalogIn),   NC,               NC,             NC
         // AEDR8300:                  A (InterruptIn), B (InterruptIn),  NC,             NC
         // AS5304:                    A (InterruptIn), B (InterruptIn),  NC,             NC
-        PinName sensorPin[4];
+        //
+        // Note!  These are stored in uint8_t WIRE format, not PinName format.
+        uint8_t sensorPin[4];
         
-        // Pseudo LAUNCH BALL button.  
+        // ZB LAUNCH BALL button setup.
         //
         // This configures the "ZB Launch Ball" feature in DOF, based on Zeb's (of 
         // zebsboards.com) scheme for using a mechanical plunger as a Launch button.
         // Set the port to 0 to disable the feature.
         //
         // The port number is an LedWiz port number that we monitor for activation.
-        // This port isn't connected to a physical device; rather, the host turns it
-        // on to indicate that the pseudo Launch button mode is in effect.  
+        // This port isn't meant to be connected to a physical device, although it
+        // can be if desired.  It's primarily to let the host tell the controller
+        // when the ZB Launch feature is active.  The port numbering starts at 1;
+        // set this to zero to disable the feature.
         //
-        // The button number gives the button that we "press" when a launch occurs.
-        // This can be connected to the physical Launch button, or can simply be
-        // an otherwise unused button.
+        // The key type and code has the same meaning as for a button mapping.  This
+        // sets the key input sent to the PC when the plunger triggers a launch when
+        // the mode is active.  For example, set keytype=2 and keycode=0x28 to send
+        // the Enter key (which is the key almost all PC pinball software uses for
+        // plunger and Launch button input).
         //
         // The "push distance" is the distance, in 1/1000 inch units, for registering a 
         // push on the plunger as a button push.  If the player pushes the plunger 
@@ -455,9 +476,10 @@ struct Config
         // Pub").
         struct
         {
-            int port;
-            int btn;
-            int pushDistance;
+            uint8_t port;
+            uint8_t keytype;
+            uint8_t keycode;
+            uint16_t pushDistance;
         
         } zbLaunchBall;
            
@@ -465,13 +487,13 @@ struct Config
         struct
         {
             // has the plunger been calibrated?
-            int calibrated;
+            bool calibrated;
         
             // calibration button switch pin
-            PinName btn;
+            uint8_t btn;
         
             // calibration button indicator light pin
-            PinName led;
+            uint8_t led;
             
             // Plunger calibration min, zero, and max.  These are in terms of the
             // unsigned 16-bit scale (0x0000..0xffff) that we use for the raw sensor
@@ -530,14 +552,14 @@ struct Config
         // secondary power supply is turned off, and remains LOW until the LATCH
         // pin is raised high AND the secondary PSU is turned on.  Once HIGH,
         // it remains HIGH as long as the secondary PSU is on.
-        PinName statusPin;
+        uint8_t statusPin;
     
         // PSU2 power status latch (DigitalOut pin)
-        PinName latchPin;
+        uint8_t latchPin;
         
         // TV ON relay pin (DigitalOut pin).  This pin controls the TV switch 
         // relay.  Raising the pin HIGH turns the relay ON (energizes the coil).
-        PinName relayPin;
+        uint8_t relayPin;
         
         // TV ON delay time, in 1/100 second units.  This is the interval between 
         // sensing that the secondary power supply has turned on and pulsing the 
@@ -546,6 +568,15 @@ struct Config
     
     } TVON;
     
+    // --- Night Mode ---
+    struct
+    {
+        uint8_t btn;        // night mode button number (1..MAX_BUTTONS, 0=disabled)
+        uint8_t flags;      // flags:
+                            //    0x01 = on/off switch (if not set, it's a momentary button)
+        uint8_t port;       // indicator output port number (1..MAX_OUT_PORTS, 0=disabled)
+    } nightMode;
+    
 
     // --- TLC5940NT PWM Controller Chip Setup ---
     struct
@@ -553,13 +584,13 @@ struct Config
         // number of TLC5940NT chips connected in daisy chain
         int nchips;
         
-        // pin connections
-        PinName sin;        // Serial data - must connect to SPIO MOSI -> PTC6 or PTD2
-        PinName sclk;       // Serial clock - must connect to SPIO SCLK -> PTC5 or PTD1
+        // pin connections (wire pin IDs)
+        uint8_t sin;        // Serial data - must connect to SPIO MOSI -> PTC6 or PTD2
+        uint8_t sclk;       // Serial clock - must connect to SPIO SCLK -> PTC5 or PTD1
                             // (but don't use PTD1, since it's hard-wired to the on-board blue LED)
-        PinName xlat;       // XLAT (latch) signal - connect to any GPIO pin
-        PinName blank;      // BLANK signal - connect to any GPIO pin
-        PinName gsclk;      // Grayscale clock - must connect to a PWM-out capable pin
+        uint8_t xlat;       // XLAT (latch) signal - connect to any GPIO pin
+        uint8_t blank;      // BLANK signal - connect to any GPIO pin
+        uint8_t gsclk;      // Grayscale clock - must connect to a PWM-out capable pin
 
     } tlc5940; 
     
@@ -571,10 +602,10 @@ struct Config
         int nchips;
         
         // pin connections
-        PinName sin;        // Serial data - use any GPIO pin
-        PinName sclk;       // Serial clock - use any GPIO pin
-        PinName latch;      // Latch - use any GPIO pin
-        PinName ena;        // Enable signal - use any GPIO pin
+        uint8_t sin;        // Serial data - use any GPIO pin
+        uint8_t sclk;       // Serial clock - use any GPIO pin
+        uint8_t latch;      // Latch - use any GPIO pin
+        uint8_t ena;        // Enable signal - use any GPIO pin
     
     } hc595;
 
@@ -584,7 +615,6 @@ struct Config
 
     // --- LedWiz Output Port Setup ---
     LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 
-    LedWizPortCfg specialPort[1];          // special ports (Night Mode indicator, etc)
 
 };
 

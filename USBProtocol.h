@@ -134,7 +134,7 @@
 // format here accordingly.
 // 
 //
-// 2B. Configuration query.
+// 2B. Configuration report.
 // This is requested by sending custom protocol message 65 4 (see below).
 // In reponse, the device sends one report to the host using this format:
 //
@@ -151,18 +151,29 @@
 //                         has been sent from the host
 //    The remaining bytes are reserved for future use.
 //
-// 2C. Device ID query.
+// 2C. Device ID report.
 // This is requested by sending custom protocol message 65 7 (see below).
 // In response, the device sends one report to the host using this format:
 //
 //    bytes 0:1 = 0x9000.  This has bit pattern 10010 in the high 5 bits
 //                to distinguish this from other report types.
-//    bytes 2-11 = Unique CPU ID.  This is the ID stored in the CPU at the
-//                factory, guaranteed to be unique across Kinetis devices.
-//                This can be used by the host to distinguish devices when
-//                two or more controllers are attached.
+//    byte 2    = ID type.  This is the same ID type sent in the request.
+//    bytes 3-12 = requested ID.  The ID is 80 bits in big-endian byte
+//                order.  For IDs longer than 80 bits, we truncate to the
+//                low-order 80 bits (that is, the last 80 bits).
 //
-// 2D. Configuration variable query.
+//                ID type 1 = CPU ID.  This is the globally unique CPU ID
+//                  stored in the KL25Z CPU.
+//
+//                ID type 2 = OpenSDA ID.  This is the globally unique ID
+//                  for the connected OpenSDA controller, if known.  This
+//                  allow the host to figure out which USB MSD (virtual
+//                  disk drive), if any, represents the OpenSDA module for
+//                  this Pinscape USB interface.  This is primarily useful
+//                  to determine which MSD to write in order to update the
+//                  firmware on a given Pinscape unit.
+//
+// 2D. Configuration variable report.
 // This is requested by sending custom protocol message 65 9 (see below).
 // In response, the device sends one report to the host using this format:
 //
@@ -173,6 +184,20 @@
 //   bytes 3-8 = Current value of the variable, in the format for the
 //               individual variable type.  The variable formats are
 //               described in the CONFIGURATION VARIABLES section below.
+//
+// 2E. Software build information report.
+// This is requested by sending custom protocol message 65 10 (see below).
+// In response, the device sends one report using this format:
+//
+//   bytes 0:1 = 0xA0.  This has bit pattern 10100 in the high 5 bits
+//               to distinguish it from other report types.
+//   bytes 2:5 = Build date.  This is returned as a 32-bit integer,
+//               little-endian as usual, encoding a decimal value
+//               in the format YYYYMMDD giving the date of the build.
+//               E.g., Feb 16 2016 is encoded as 20160216 (decimal).
+//   bytes 6:9 = Build time.  This is a 32-bit integer, little-endian,
+//               encoding a decimal value in the format HHMMSS giving
+//               build time on a 24-hour clock.
 //
 //
 // WHY WE USE THIS HACKY APPROACH TO DIFFERENT REPORT TYPES
@@ -263,16 +288,18 @@
 //
 // Note that there's no special first byte to indicate the PBA message
 // type, as there is in an SBA.  The first byte of a PBA is simply the
-// first output setting.  The way the LedWiz creators conceived this, the 
-// SBA distinguishable from a PBA because 64 isn't a valid output setting, 
-// hence a message that starts with a byte value of 64 isn't a valid PBA 
-// message.
+// first output setting.  The way the LedWiz creators conceived this, an
+// SBA message is distinguishable from a PBA because there's no such thing
+// as a brightness level 64, hence 64 is never valid as a byte in an PBA
+// message, hence a message starting with 64 must be something other than
+// an PBA message.
 //
 // Our extended protocol uses the same principle, taking advantage of the
-// other byte value ranges that are invalid in PBA messages.  To be a valid
-// PBA message, the first byte must be in the range 0-49 or 129-132.  As
-// already mentioned, byte value 64 indicates an SBA message.  This leaves
-// these ranges available for other uses: 50-63, 65-128, and 133-255.
+// many other byte values that are also invalid in PBA messages.  To be a 
+// valid PBA message, the first byte must be in the range 0-49 or 129-132.  
+// As already mentioned, byte value 64 indicates an SBA message, so we
+// can't use that one for private extensions.  This still leaves many
+// other byte values for us, though, namely 50-63, 65-128, and 133-255.
 
 
 // --- PRIVATE EXTENDED MESSAGES ---
@@ -301,13 +328,10 @@
 //        3 -> Send pixel dump.  The device sends one complete image snapshot from the
 //             plunger sensor, as as series of pixel dump messages.  (The message format
 //             isn't big enough to allow the whole image to be sent in one message, so
-//             the image is broken up into as many messages as necessary.)  After sending
-//             the pixels, the device sends the special suffix messages with additional
-//             data about the sensor.  See the "pixel dump message" section above.  The 
-//             device then resumes sending normal joystick messages.  If the plunger 
-//             sensor isn't an imaging type, no pixel messages are sent, but the extra 
-//             suffix reports are still sent.  If no plunger sensor is installed, no
-//             reports are sent.  Parameters:
+//             the image is broken up into as many messages as necessary.)  The device
+//             then resumes sending normal joystick messages.  If the plunger sensor 
+//             isn't an imaging type, or no sensor is installed, no pixel messages are 
+//             sent.  Parameters:
 //
 //               third byte = bit flags:
 //                  0x01 = low res mode.  The device rescales the sensor pixel array
@@ -316,6 +340,11 @@
 //                         no effect on the sensor operation; it merely reduces the
 //                         USB transmission time to allow for a faster frame rate for
 //                         viewing in the config tool.
+//
+//               fourth byte = extra exposure time in 100us (.1ms) increments.  For
+//                  imaging sensors, we'll add this delay to the minimum exposure 
+//                  time.  This allows the caller to explicitly adjust the exposure
+//                  level for calibration purposes.
 //
 //        4 -> Query configuration.  The device sends a special configuration report,
 //             (see above; see also USBJoystick.cpp), then resumes sending normal 
@@ -329,9 +358,23 @@
 //             type 66 messages since the last reboot, then automatically reboots the
 //             device to put the changes into effect.
 //
+//               third byte = delay time in seconds.  The device will wait this long
+//               before disconnecting, to allow the PC to perform any cleanup tasks
+//               while the device is still attached (e.g., modifying Windows device
+//               driver settings)
+//
 //        7 -> Query device ID.  The device replies with a special device ID report
 //             (see above; see also USBJoystick.cpp), then resumes sending normal
 //             joystick reports.
+//
+//             The third byte of the message is the ID index to retrieve:
+//
+//                 1 = CPU ID: returns the KL25Z globally unique CPU ID.
+//
+//                 2 = OpenSDA ID: returns the OpenSDA TUID.  This must be patched
+//                     into the firmware by the PC host when the .bin file is
+//                     installed onto the device.  This will return all 'X' bytes
+//                     if the value wasn't patched at install time.
 //
 //        8 -> Engage/disengage night mode.  The third byte of the message is 1 to
 //             engage night mode, 0 to disengage night mode.  (This mode isn't stored
@@ -343,13 +386,17 @@
 //             array index.  The device replies with a configuration variable report
 //             (see above) with the current setting for the requested variable.
 //
+//       10 -> Query software build information.  No parameters.  This replies with
+//             the software build information report (see above).
+//
 // 66  -> Set configuration variable.  The second byte of the message is the config
 //        variable number, and the remaining bytes give the new value for the variable.
-//        The value format is specific to each variable; see the list below for details.
-//        This message only sets the value in RAM - it doesn't write the value to flash
-//        and doesn't put the change into effect immediately.  To put updates into effect,
-//        the host must send a type 65 subtype 6 message (see above), which saves updates
-//        to flash and reboots the device.
+//        The value format is specific to each variable; see the CONFIGURATION VARIABLES
+//        section below for a list of the variables and their formats.  This command
+//        only sets the value in RAM; it doesn't write the value to flash and doesn't 
+//        put the change into effect.  To save the new settings, the host must send a 
+//        type 65 subtype 6 message (see above).  That saves the settings to flash and
+//        reboots the device, which makes the new settings active.
 //
 // 200-228 -> Set extended output brightness.  This sets outputs N to N+6 to the
 //        respective brightness values in the 2nd through 8th bytes of the message
@@ -364,12 +411,13 @@
 //               ...
 //               228 = outputs 197-203
 //
-//        This message is the only way to address ports 33 and higher, since standard
-//        LedWiz messages are inherently limited to ports 1-32.
+//        This message is the way to address ports 33 and higher.  Original LedWiz
+//        protocol messages can't access ports above 32, since the protocol is
+//        hard-wired for exactly 32 ports.
 //
-//        Note that these extended output messages differ from regular LedWiz settings
+//        Note that the extended output messages differ from regular LedWiz commands
 //        in two ways.  First, the brightness is the ONLY attribute when an output is
-//        set using this mode - there's no separate ON/OFF setting per output as there 
+//        set using this mode.  There's no separate ON/OFF state per output as there 
 //        is with the SBA/PBA messages.  To turn an output OFF with this message, set
 //        the intensity to 0.  Setting a non-zero intensity turns it on immediately
 //        without regard to the SBA status for the port.  Second, the brightness is
@@ -384,6 +432,13 @@
 //        message was the last thing sent to a port, the LedWiz ON/OFF status and
 //        flash modes are ignored, and the fixed brightness is set.  Outputs 33 and
 //        higher inherently can't be addressed or affected by SBA/PBA messages.
+//
+//        (The precedence scheme is designed to accommodate a mix of legacy and DOF
+//        software transparently.  The behavior described is really just to ensure
+//        transparent interoperability; it's not something that host software writers
+//        should have to worry about.  We expect that anyone writing new software will
+//        just use the extended protocol and ignore the old LedWiz commands, since
+//        the extended protocol is easier to use and more powerful.)
 
 
 // ------- CONFIGURATION VARIABLES -------
@@ -392,18 +447,51 @@
 // of the message is the variable ID, and the rest of the bytes give the new
 // value, in a variable-specific format.  16-bit values are little endian.
 //
-// 1  -> USB device ID.  Bytes 3-4 give the 16-bit USB Vendor ID; bytes
-//       5-6 give the 16-bit USB Product ID.  For LedWiz emulation, use
-//       vendor 0xFAFA and product 0x00EF + unit# (where unit# is the
-//       nominal LedWiz unit number, from 1 to 16).  If LedWiz emulation
-//       isn't desired or causes host conflicts, you can use our private
-//       ID assigned by http://pid.codes (a registry for open-source USB
-//       devices) of vendor 0x1209 and product 0xEAEA.  (You can also use
-//       any other values that don't cause a conflict on your PC, but we
-//       recommend using one of these pre-assigned values if possible.)
+// 0  -> QUERY ONLY: Describe the configuration variables.  The device
+//       sends a config variable query report with the following fields:
+//         
+//         byte 3  -> number of scalar (non-array) variables (these are
+//                    numbered sequentially from 1 to N)
+//         byte 4  -> number of array variables (these are numbered
+//                    sequentially from 256-N to 255)
+//          
+//       The description query is meant to allow the host to capture all
+//       configuration settings on the device without having to know what
+//       the variables mean or how many there are.  This is useful for
+//       backing up the settings in a file on the PC, for example, or for
+//       capturing them to restore after a firmware update.  This allows
+//       more flexible interoperability between unsynchronized versions 
+//       of the firmware and the host software.
 //
-// 2  -> Pinscape Controller unit number for DOF.  Byte 3 is the new
-//       unit number, from 1 to 16.
+// 1  -> USB device ID.  This sets the USB vendor and product ID codes
+//       to use when connecting to the PC.  For LedWiz emulation, use
+//       vendor 0xFAFA and product 0x00EF + unit# (where unit# is the
+//       nominal LedWiz unit number, from 1 to 16).  If you have any
+//       REAL LedWiz units in your system, we recommend starting the
+//       Pinscape LedWiz numbering at 8 to avoid conflicts with the 
+//       real LedWiz units.  If you don't have any real LedWiz units,
+//       you can number your Pinscape units starting from 1.
+//
+//       If LedWiz emulation isn't desired or causes host conflicts, 
+//       use our private ID: Vendor 0x1209, product 0xEAEA.  (These IDs
+//       are registered with http://pid.codes, a registry for open-source 
+//       USB devices, so they're guaranteed to be free of conflicts with
+//       other properly registered devices).  The device will NOT appear
+//       as an LedWiz if you use the private ID codes, but DOF (R3 or 
+//       later) will still recognize it as a Pinscape controller.
+//
+//         bytes 3:4 -> USB Vendor ID
+//         bytes 5:6 -> USB Product ID
+//
+// 2  -> Pinscape Controller unit number for DOF.  The Pinscape unit
+//       number is independent of the LedWiz unit number, and indepedent
+//       of the USB vendor/product IDs.  DOF (R3 and later) uses this to 
+//       identify the unit for the extended Pinscape functionality.
+//       For easiest DOF configuration, we recommend numbering your
+//       units sequentially starting at 1 (regardless of whether or not
+//       you have any real LedWiz units).
+//
+//         byte 3 -> unit number, from 1 to 16
 //
 // 3  -> Enable/disable joystick reports.  Byte 2 is 1 to enable, 0 to
 //       disable.  When disabled, the device registers as a generic HID 
@@ -450,11 +538,13 @@
 //
 // 8  -> ZB Launch Ball setup.  This configures the ZB Launch Ball feature.  Byte
 //       3 is the LedWiz port number (1-255) mapped to the "ZB Launch Ball" output
-//       in DOF.  Set the port to 0 to disable the feature.  Byte 4 is the button
-//       number (1-32) that we'll "press" when the feature is activated.  Bytes 5-6
+//       in DOF.  Set the port to 0 to disable the feature.   Byte 4 is the key type
+//       and byte 5 is the key code for the key to send to the PC when a launch is
+//       triggered.  These have the same meanings as for a regular key mapping.  For
+//       example, set type=2 and code=0x28 for the keyboard Enter key.  Bytes 6-7
 //       give the "push distance" for activating the button by pushing forward on
-//       the plunger knob, in 1/1000 inch increments (e.g., 80 represents 0.08", 
-//       which is the recommended setting).
+//       the plunger knob, in 1/1000 inch increments (e.g., 63 represents 0.063", 
+//       or about 1/16", which is the recommended setting).
 //
 // 9  -> TV ON relay setup.  This requires external circuitry implemented on the
 //       Expansion Board (or an equivalent circuit as described in the Build Guide).
@@ -488,86 +578,7 @@
 //          byte 6 = LATCH pin - LATCH signal (any GPIO pin)
 //          byte 7 = ENA pin - ENABLE signal (any GPIO pin)
 //
-// 12 -> Input button setup.  This sets up one button; it can be repeated for each
-//       button to be configured.  There are 32 button slots, numbered 1-32.  Each
-//       key can be configured as a joystick button, a regular keyboard key, a
-//       keyboard modifier key (such as Shift, Ctrl, or Alt), or a media control
-//       key (such as volume up/down).
-//
-//       The bytes of the message are:
-//          byte 3 = Button number (1-32)
-//          byte 4 = GPIO pin to read for button input
-//          byte 5 = key type reported to PC when button is pushed:
-//                    1 = joystick button -> byte 6 is the button number, 1-32
-//                    2 = regular keyboard key -> byte 6 is the USB key code (see below)
-//                    3 = keyboard modifier key -> byte 6 is the USB modifier code (see below)
-//                    4 = media control key -> byte 6 is the USB key code (see below)
-//                    5 = special button -> byte 6 is the special button code (see below)
-//          byte 6 = key code, which depends on the key type in byte 5
-//          byte 7 = flags - a combination of these bit values:
-//                    0x01 = pulse mode.  This reports a physical on/off switch's state
-//                           to the host as a brief key press whenever the switch changes
-//                           state.  This is useful for the VPinMAME Coin Door button,
-//                           which requires the End key to be pressed each time the
-//                           door changes state.
-//          
-// 13 -> LedWiz output port setup.  This sets up one output port; it can be repeated
-//       for each port to be configured.  There are 203 possible slots for output ports, 
-//       numbered 1 to 203.  The number of ports visible to the host is determined by
-//       the first DISABLED port (type 0).  For example, if ports 1-32 are set as GPIO
-//       outputs and port 33 is disabled, the host will see 32 ports, regardless of
-//       the settings for post 34 and higher.
-//
-//       The bytes of the message are:
-//         byte 3 = LedWiz port number (1 to maximum number or ports)
-//         byte 4 = physical output type:
-//                   0 = Disabled.  This output isn't used, and isn't visible to the
-//                       LedWiz/DOF software on the host.  The FIRST disabled port
-//                       determines the number of ports visible to the host - ALL ports
-//                       after the first disabled port are also implicitly disabled.
-//                   1 = GPIO PWM output: connected to GPIO pin specified in byte 5,
-//                       operating in PWM mode.  Note that only a subset of KL25Z GPIO
-//                       ports are PWM-capable.
-//                   2 = GPIO Digital output: connected to GPIO pin specified in byte 5,
-//                       operating in digital mode.  Digital ports can only be set ON
-//                       or OFF, with no brightness/intensity control.  All pins can be
-//                       used in this mode.
-//                   3 = TLC5940 port: connected to TLC5940 output port number specified 
-//                       in byte 5.  Ports are numbered sequentially starting from port 0
-//                       for the first output (OUT0) on the first chip in the daisy chain.
-//                   4 = 74HC595 port: connected to 74HC595 output port specified in byte 5.
-//                       As with the TLC5940 outputs, ports are numbered sequentially from 0
-//                       for the first output on the first chip in the daisy chain.
-//                   5 = Virtual output: this output port exists for the purposes of the
-//                       LedWiz/DOF software on the host, but isn't physically connected
-//                       to any output device.  This can be used to create a virtual output
-//                       for the DOF ZB Launch Ball signal, for example, or simply as a
-//                       placeholder in the LedWiz port numbering.  The physical output ID 
-//                       (byte 5) is ignored for this port type.
-//         byte 5 = physical output ID, interpreted according to the value in byte 4
-//         byte 6 = flags: a combination of these bit values:
-//                   0x01 = active-high output (0V on output turns attached device ON)
-//                   0x02 = noisemaker device: disable this output when "night mode" is engaged
-//                   0x04 = apply gamma correction to this output
-//
-//       Note that the on-board LED segments can be used as LedWiz output ports.  This
-//       is useful for testing a new installation with DOF or other PC software without
-//       having to connect any external devices.  Assigning the on-board LED segments to
-//       output ports overrides their normal status/diagnostic display use, so the normal
-//       status flash pattern won't appear when they're used this way.
-//
-//       Special port numbers:  if the LedWiz port number is one of these special values,
-//       the physical output is used for a special purpose.  These ports aren't visible
-//       to the PC as LedWiz ports; they're for internal use by the controller.  The
-//       special port numbers are:
-//
-//         254 = Night Mode indicator lamp.  This port is turned on when night mode
-//               is engaged, and turned off when night mode is disengaged.  This can
-//               be used, for example, to control an indicator LED inside a lighted
-//               momentary pushbutton switch used to activate night mode.  The light 
-//               provides visual feedback that the mode is turned on.
-//
-// 14 -> Disconnect reboot timeout.  The reboot timeout allows the controller software
+// 12 -> Disconnect reboot timeout.  The reboot timeout allows the controller software
 //       to automatically reboot the KL25Z after it detects that the USB connection is
 //       broken.  On some hosts, the device isn't able to reconnect after the initial
 //       connection is lost.  The reboot timeout is a workaround for these cases.  When
@@ -576,7 +587,7 @@
 //       timeout period.  Bytes 3 give the new reboot timeout in seconds.  Setting this
 //       to 0 disables the reboot timeout.
 //
-// 15 -> Plunger calibration.  In most cases, the calibration is set internally by the
+// 13 -> Plunger calibration.  In most cases, the calibration is set internally by the
 //       device by running the calibration procedure.  However, it's sometimes useful
 //       for the host to be able to get and set the calibration, such as to back up
 //       the device settings on the PC, or to save and restore the current settings
@@ -586,169 +597,192 @@
 //         bytes 5:6 = maximum retraction point (unsigned 16-bit little-endian)
 //         byte  7   = measured plunger release travel time in milliseconds
 //
-// 16 -> Expansion board configuration.  This doesn't affect the controller behavior
+// 14 -> Expansion board configuration.  This doesn't affect the controller behavior
 //       directly; the individual options related to the expansion boards (such as 
 //       the TLC5940 and 74HC595 setup) still need to be set separately.  This is
 //       stored so that the PC config UI can store and recover the information to
 //       present in the UI.  For the "classic" KL25Z-only configuration, simply set 
 //       all of the fields to zero.
 //
-//         byte 3 = number of main interface boards
-//         byte 4 = number of MOSFET power boards
-//         byte 5 = number of chime boards
+//         byte 3 = board set type.  At the moment, the Pinscape expansion boards
+//                  are the only ones supported in the software.  This allows for
+//                  adding new designs or independent designs in the future.
+//                    0 = Standalone KL25Z (no expansion boards)
+//                    1 = Pinscape expansion boards
+//
+//         byte 4 = board set interface revision.  This *isn't* the version number
+//                  of the board itself, but rather of its software interface.  In
+//                  other words, this doesn't change every time the EAGLE layout
+//                  for the board changes.  It only changes when a revision is made
+//                  that affects the software, such as a GPIO pin assignment.
+//
+//         The remaining bytes depend on the board set type.  Currently, only
+//         the Pinscape expansion boards are supported; for those, the bytes are
+//         used to store these values:
+//
+//         byte 5 = number of main interface boards
+//         byte 6 = number of MOSFET power boards
+//         byte 7 = number of chime boards
+//
+// 15 -> Night mode setup.  
+//
+//       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none.  This selects
+//                a physically wired button that can be used to control night mode.
+//                The button can also be used as normal for PC input if desired.
+//       byte 4 = flags:
+//                0x01 -> the wired input is an on/off switch; night mode will be
+//                        active when the input is switched on.  If this bit isn't
+//                        set, the input is a momentary button; pushing the button
+//                        toggles night mode.
+//       byte 5 = indicator output number - 1..MAX_OUT_PORTS, or 0 for none.  This
+//                selects an output port that will be turned on when night mode is
+//                activated.  Night mode activation overrides any setting made by
+//                the host.
+//
+//
+// ARRAY VARIABLES:  Each variable below is an array.  For each get/set message,
+// byte 3 gives the array index.  These are grouped at the top end of the variable 
+// ID range to distinguish this special feature.  On QUERY, set the index byte to 0 
+// to query the number of slots; the reply will be a report for the array index
+// variable with index 0, with the first (and only) byte after that indicating
+// the maximum array index.
+//
+// 254 -> Input button setup.  This sets up one button; it can be repeated for each
+//        button to be configured.  There are 32 button slots, numbered 1-32.  Each
+//        slot can be configured as a joystick button, a regular keyboard key, or a
+//        media control key (mute, volume up, volume down).
+//
+//        The bytes of the message are:
+//          byte 3 = Button number (1-32)
+//          byte 4 = GPIO pin to read for button input
+//          byte 5 = key type reported to PC when button is pushed:
+//                    0 = none (no PC input reported when button pushed)
+//                    1 = joystick button -> byte 6 is the button number, 1-32
+//                    2 = regular keyboard key -> byte 6 is the USB key code (see below)
+//          byte 6 = key code, which depends on the key type in byte 5
+//          byte 7 = flags - a combination of these bit values:
+//                    0x01 = pulse mode.  This reports a physical on/off switch's state
+//                           to the host as a brief key press whenever the switch changes
+//                           state.  This is useful for the VPinMAME Coin Door button,
+//                           which requires the End key to be pressed each time the
+//                           door changes state.
+//
+// 255 -> LedWiz output port setup.  This sets up one output port; it can be repeated
+//        for each port to be configured.  There are 128 possible slots for output ports, 
+//        numbered 1 to 128.  The number of ports atcually active is determined by
+//        the first DISABLED port (type 0).  For example, if ports 1-32 are set as GPIO
+//        outputs and port 33 is disabled, we'll report to the host that we have 32 ports,
+//        regardless of the settings for post 34 and higher.
+//
+//        The bytes of the message are:
+//          byte 3 = LedWiz port number (1 to MAX_OUT_PORTS)
+//          byte 4 = physical output type:
+//                    0 = Disabled.  This output isn't used, and isn't visible to the
+//                        LedWiz/DOF software on the host.  The FIRST disabled port
+//                        determines the number of ports visible to the host - ALL ports
+//                        after the first disabled port are also implicitly disabled.
+//                    1 = GPIO PWM output: connected to GPIO pin specified in byte 5,
+//                        operating in PWM mode.  Note that only a subset of KL25Z GPIO
+//                        ports are PWM-capable.
+//                    2 = GPIO Digital output: connected to GPIO pin specified in byte 5,
+//                        operating in digital mode.  Digital ports can only be set ON
+//                        or OFF, with no brightness/intensity control.  All pins can be
+//                        used in this mode.
+//                    3 = TLC5940 port: connected to TLC5940 output port number specified 
+//                        in byte 5.  Ports are numbered sequentially starting from port 0
+//                        for the first output (OUT0) on the first chip in the daisy chain.
+//                    4 = 74HC595 port: connected to 74HC595 output port specified in byte 5.
+//                        As with the TLC5940 outputs, ports are numbered sequentially from 0
+//                        for the first output on the first chip in the daisy chain.
+//                    5 = Virtual output: this output port exists for the purposes of the
+//                        LedWiz/DOF software on the host, but isn't physically connected
+//                        to any output device.  This can be used to create a virtual output
+//                        for the DOF ZB Launch Ball signal, for example, or simply as a
+//                        placeholder in the LedWiz port numbering.  The physical output ID 
+//                        (byte 5) is ignored for this port type.
+//          byte 5 = physical output port, interpreted according to the value in byte 4
+//          byte 6 = flags: a combination of these bit values:
+//                    0x01 = active-high output (0V on output turns attached device ON)
+//                    0x02 = noisemaker device: disable this output when "night mode" is engaged
+//                    0x04 = apply gamma correction to this output
+//
+//        Note that the on-board LED segments can be used as LedWiz output ports.  This
+//        is useful for testing a new installation with DOF or other PC software without
+//        having to connect any external devices.  Assigning the on-board LED segments to
+//        output ports overrides their normal status/diagnostic display use, so the normal
+//        status flash pattern won't appear when they're used this way.
 //
 
 
 // --- PIN NUMBER MAPPINGS ---
 //
-// In USB messages that specify GPIO pin assignments, pins are identified with
-// our own private numbering scheme.  Our numbering scheme only includes the 
-// ports connected to external header pins on the KL25Z board, so this is only
-// a sparse subset of the full GPIO port set.  These are numbered in order of
-// pin name.  The special value 0 = NC = Not Connected can be used where
-// appropriate to indicate a disabled or unused pin.
-//
-//     0 = NC (not connected)
-//     1 = PTA1
-//     2 = PTA2
-//     3 = PTA4
-//     4 = PTA5
-//     5 = PTA12
-//     6 = PTA13
-//     7 = PTA16
-//     8 = PTA17
-//     9 = PTB0
-//    10 = PTB1
-//    11 = PTB2
-//    12 = PTB3
-//    13 = PTB8
-//    14 = PTB9
-//    15 = PTB10
-//    16 = PTB11
-//    17 = PTB18    (on-board LED Red segment - not exposed as a header pin)
-//    18 = PTB19    (on-board LED Green segment - not exposed as a header pin)
-//    19 = PTC0
-//    20 = PTC1
-//    21 = PTC2
-//    22 = PTC3
-//    23 = PTC4
-//    24 = PTC5
-//    25 = PTC6
-//    26 = PTC7
-//    27 = PTC8
-//    28 = PTC9
-//    29 = PTC10
-//    30 = PTC11
-//    31 = PTC12
-//    32 = PTC13
-//    33 = PTC16
-//    34 = PTC17
-//    35 = PTD0
-//    36 = PTD1     (on-board LED Blue segment)
-//    37 = PTD2
-//    38 = PTD3
-//    39 = PTD4
-//    40 = PTD5
-//    41 = PTD6
-//    42 = PTD7
-//    43 = PTE0
-//    44 = PTE1
-//    45 = PTE2
-//    46 = PTE3
-//    47 = PTE4
-//    48 = PTE5
-//    49 = PTE20
-//    50 = PTE21
-//    51 = PTE22
-//    52 = PTE23
-//    53 = PTE29
-//    54 = PTE30
-//    55 = PTE31
+// In USB messages that specify GPIO pin assignments, pins are identified by
+// 8-bit integers.  The special value 0xFF means NC (not connected).  All actual
+// pins are mapped with the port number in the top 3 bits and the pin number in
+// the bottom 5 bits.  Port A=0, B=1, ..., E=4.  For example, PTC7 is port C (2)
+// pin 7, so it's represented as (2 << 5) | 7.
+
 
 // --- USB KEYBOARD SCAN CODES ---
 //
-// Use the standard USB HID keyboard codes for regular keys.  See the
-// HID Usage Tables in the official USB specifications for a full list.
-// Here are the most common codes for quick references:
+// For regular keyboard keys, we use the standard USB HID scan codes
+// for the US keyboard layout.  The scan codes are defined by the USB
+// HID specifications; you can find a full list in the official USB
+// specs.  Some common codes are listed below as a quick reference.
 //
-//    A-Z              -> 4-29
-//    top row numbers  -> 30-39
-//    Return           -> 40
-//    Escape           -> 41
-//    Backspace        -> 42
-//    Tab              -> 43
-//    Spacebar         -> 44
-//    -_               -> 45
-//    =+               -> 46
-//    [{               -> 47
-//    ]}               -> 48
-//    \|               -> 49
-//    ;:               -> 51
-//    '"               -> 52
-//    `~               -> 53
-//    ,<               -> 54
-//    .>               -> 55
-//    /?               -> 56
-//    Caps Lock        -> 57
-//    F1-F12           -> 58-69
-//    F13-F24          -> 104-115
-//    Print Screen     -> 70
-//    Scroll Lock      -> 71
-//    Pause            -> 72
-//    Insert           -> 73
-//    Home             -> 74
-//    Page Up          -> 75
-//    Del              -> 76
-//    End              -> 77
-//    Page Down        -> 78
-//    Right Arrow      -> 79
-//    Left Arrow       -> 80
-//    Down Arrow       -> 81
-//    Up Arrow         -> 82
-//    Num Lock/Clear   -> 83
-//    Keypad / * - +   -> 84 85 86 87
-//    Keypad Enter     -> 88
-//    Keypad 1-9       -> 89-97
-//    Keypad 0         -> 98
-//    Keypad .         -> 99
-//  
-
-
-// --- USB KEYBOARD MODIFIER KEY CODES ---
+//    Key name         -> USB scan code (hex)
+//    A-Z              -> 04-1D
+//    top row 1!->0)   -> 1E-27
+//    Return           -> 28
+//    Escape           -> 29
+//    Backspace        -> 2A
+//    Tab              -> 2B
+//    Spacebar         -> 2C
+//    -_               -> 2D
+//    =+               -> 2E
+//    [{               -> 2F
+//    ]}               -> 30
+//    \|               -> 31
+//    ;:               -> 33
+//    '"               -> 34
+//    `~               -> 35
+//    ,<               -> 36
+//    .>               -> 37
+//    /?               -> 38
+//    Caps Lock        -> 39
+//    F1-F12           -> 3A-45
+//    F13-F24          -> 68-73
+//    Print Screen     -> 46
+//    Scroll Lock      -> 47
+//    Pause            -> 48
+//    Insert           -> 49
+//    Home             -> 4A
+//    Page Up          -> 4B
+//    Del              -> 4C
+//    End              -> 4D
+//    Page Down        -> 4E
+//    Right Arrow      -> 4F
+//    Left Arrow       -> 50
+//    Down Arrow       -> 51
+//    Up Arrow         -> 52
+//    Num Lock/Clear   -> 53
+//    Keypad / * - +   -> 54 55 56 57
+//    Keypad Enter     -> 58
+//    Keypad 1-9       -> 59-61
+//    Keypad 0         -> 62
+//    Keypad .         -> 63
+//    Mute             -> 7F
+//    Volume Up        -> 80
+//    Volume Down      -> 81
+//    Left Control     -> E0
+//    Left Shift       -> E1
+//    Left Alt         -> E2
+//    Left GUI         -> E3
+//    Right Control    -> E4
+//    Right Shift      -> E5
+//    Right Alt        -> E6
+//    Right GUI        -> E7
 //
-// Use these codes for modifier keys in the button mappings
-//
-//    0x01 = Left Control
-//    0x02 = Left Shift
-//    0x04 = Left Alt
-//    0x08 = Left GUI ("Windows" key)
-//    0x10 = Right Control
-//    0x20 = Right Shift
-//    0x40 = Right Alt
-//    0x80 = Right GUI ("Windows" key)
-
-
-// --- USB KEYBOARD MEDIA KEY CODES ---
-//
-// Use these for media control keys in the button mappings
-//
-//    0x01 = Volume Up
-//    0x02 = Volume Down
-//    0x04 = Mute on/off
-
-
-// --- SPECIAL BUTTON KEY CODES ---
-//
-// Use these for special keys in the button mappings
-//
-//    0x01 = Night mode switch, momentary switch mode.  Pushing this button 
-//           engages night mode, disabling all LedWiz outputs marked with the 
-//           "noisemaker" flag.  Other outputs are unaffected.  Pushing
-//           the button again disengages night mode.  Use this option if the
-//           physical button attached to the input is a momentary switch type.
-//
-//    0x02 = Night mode switch, toggle switch mode.  When this switch is on,
-//           night mode is engaged; when the switch is off, night mode is 
-//           disengaged.  Use this option if the physical switch attached to
-//           to the input is a toggle switch (not a momentary switch).
+// Note that the Mute and Volume Up & Down keys are sent to the host as
+// media control keys rather than regular keyboard keys.
 

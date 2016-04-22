@@ -53,7 +53,9 @@ bool USBJoystick::update()
 
    // Fill the report according to the Joystick Descriptor
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
+#define putbe(idx, val) (report.data[(idx)+1] = (val) & 0xff, report.data[idx] = ((val) >> 8) & 0xff)
 #define putl(idx, val) (put(idx, val), put((idx)+2, (val) >> 16))
+#define putlbe(idx, val) (put((idx)+2, val), put(idx, (val) >> 16))
    put(0, _status);
    put(2, 0);  // second word of status - zero in high bit identifies as normal joystick report
    put(4, _buttonsLo);
@@ -167,8 +169,7 @@ bool USBJoystick::sendPlungerPix(int &idx, int npix, const uint8_t *pix)
     return sendTO(&report, 100);
 }
 
-
-bool USBJoystick::reportID()
+bool USBJoystick::reportID(int index)
 {
     HID_REPORT report;
 
@@ -179,10 +180,72 @@ bool USBJoystick::reportID()
     uint16_t s = 0x9000;
     put(0, s);
     
-    // write the 80-bit ID
-    put(2, SIM->UIDMH);
-    putl(4, SIM->UIDML);
-    putl(8, SIM->UIDL);
+    // add the requested ID index
+    report.data[2] = (uint8_t)index;
+    
+    // figure out which ID we're reporting
+    switch (index)
+    {
+    case 1:
+        // KL25Z CPU ID
+        putbe(3, SIM->UIDMH);
+        putlbe(5, SIM->UIDML);
+        putlbe(9, SIM->UIDL);
+        break;
+        
+    case 2:
+        // OpenSDA ID.  Copy the low-order 80 bits of the OpenSDA ID.
+        // (The stored value is 128 bits = 16 bytes; we only want the last
+        // 80 bits = 10 bytes.  So skip ahead 16 and back up 10 to get
+        // the starting point.)
+        extern const char *getOpenSDAID();
+        memcpy(&report.data[3], getOpenSDAID() + 16 - 10, 10);
+        break;
+    }
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::reportBuildInfo(const char *date)
+{
+    HID_REPORT report;
+
+    // initially fill the report with zeros
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate that it's a build
+    // info report
+    uint16_t s = 0xA000;
+    put(0, s);
+    
+    // Parse the date.  This is given in the standard __DATE__ " " __TIME
+    // macro format, "Mon dd yyyy hh:mm:ss" (e.g., "Feb 16 2016 12:15:06").
+    static const char mon[][4] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" 
+    };
+    long dd = (atol(date + 7) * 10000L) // YYYY0000
+        + (atol(date + 4));             // 000000DD
+    for (int i = 0 ; i < 12 ; ++i)
+    {
+        if (memcmp(mon[i], date, 3) == 0)
+        {
+            dd += (i+1)*100;         // 0000MM00
+            break;
+        }
+    }
+    
+    // parse the time into a long formatted as decimal HHMMSS (e.g.,
+    // "12:15:06" turns into 121506 decimal)
+    long tt = (atol(date+12)*10000)
+        + (atol(date+15)*100)
+        + (atol(date+18));
+    
+    // store the build date and time
+    putl(2, dd);
+    putl(6, tt);
     
     // send the report
     report.length = reportLen;
@@ -390,14 +453,14 @@ static const uint8_t reportDescriptorKB[] =
         LOGICAL_MAXIMUM(1), 0x01,
         REPORT_SIZE(1), 0x01,
         REPORT_COUNT(1), 0x07,
-        USAGE(1), 0xE9,             // Volume Up
-        USAGE(1), 0xEA,             // Volume Down
-        USAGE(1), 0xE2,             // Mute
-        USAGE(1), 0xB5,             // Next Track
-        USAGE(1), 0xB6,             // Previous Track
-        USAGE(1), 0xB7,             // Stop
-        USAGE(1), 0xCD,             // Play / Pause
-        INPUT(1), 0x02,             // Input (Data, Variable, Absolute)
+        USAGE(1), 0xE2,             // Mute -> 0x01
+        USAGE(1), 0xE9,             // Volume Up -> 0x02
+        USAGE(1), 0xEA,             // Volume Down -> 0x04
+        USAGE(1), 0xB5,             // Next Track -> 0x08
+        USAGE(1), 0xB6,             // Previous Track -> 0x10
+        USAGE(1), 0xB7,             // Stop -> 0x20
+        USAGE(1), 0xCD,             // Play / Pause -> 0x40
+        INPUT(1), 0x02,             // Input (Data, Variable, Absolute) -> 0x80
         REPORT_COUNT(1), 0x01,
         INPUT(1), 0x01,
     END_COLLECTION(0),

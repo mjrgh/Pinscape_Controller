@@ -96,21 +96,13 @@ public:
     // sensor like the TSL1410R, sending the full pixel array by USB takes 
     // so long that the frame rate is way below regular video rates.
     //
-    // 'visMode' is the visualization mode.  This is currently unused.  (In
-    // a preliminary design, the CCD sensor was going to pre-process the pixels
-    // through some filters, such as noise reduction and contrast enhnacement,
-    // before detecting the edge.  'visMode' was meant to select how much of
-    // this processing to apply to the pixels transmitted to the host, to allow
-    // the user to see each stage of the processing from raw sensor pixels to
-    // fully processed pixels.  But the filtering process proved to be too slow, 
-    // so in the end we removed it and now just do the edge detection directly
-    // on the raw pixels.  This makes the visualization mode unnecessary.
-    // However, we're keeping the parameter in case it becomes useful in the
-    // future.  Note that this could be used for special displays that don't 
-    // reflect actual pre-processing that would be done in normal edge
-    // detection, but instead visualize the internals of the algorithm, as
-    // a debugging or optimization tool.)
-    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags, uint8_t visMode)
+    // 'exposureTime' is the amount of extra time to add to the exposure,
+    // in 100us (.1ms) increments.  For imaging sensors, the frame we report
+    // is exposed for the minimum exposure time plus this added time.  This
+    // allows the host to take readings at different exposure levels for
+    // calibration purposes.  Non-imaging sensors ignore this.
+    virtual void sendStatusReport(
+        class USBJoystick &js, uint8_t flags, uint8_t exposureTime)
     {
         // read the current position
         int pos = 0xFFFF;
