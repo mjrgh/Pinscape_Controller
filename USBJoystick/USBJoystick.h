@@ -301,7 +301,7 @@ class USBJoystick: public USBHID {
 
          /* USB descriptor overrides */
          virtual const uint8_t *configurationDesc();
-         virtual const uint8_t *reportDescN(int n);
+         virtual const uint8_t *reportDesc(int idx, uint16_t &len);
  
          /* USB descriptor string overrides */
          virtual const uint8_t *stringImanufacturerDesc();

@@ -1,24 +1,16 @@
 // Pinscape Controller TLC5940 interface
 //
 // Based on Spencer Davis's mbed TLC5940 library.  Adapted for the
-// KL25Z, and simplified to just the functions needed for this
-// application.  In particular, this version doesn't include support 
-// for dot correction programming or status input.  This version also
-// uses a different approach for sending the grayscale data updates,
-// sending updates during the blanking interval rather than overlapping
-// them with the PWM cycle.  This results in very slightly longer 
-// blanking intervals when updates are pending, effectively reducing 
-// the PWM "on" duty cycle (and thus the output brightness) by about 
-// 0.3%.  This shouldn't be perceptible to users, so it's a small
-// trade-off for the advantage gained, which is much better signal 
-// stability when using multiple TLC5940s daisy-chained together.
-// I saw a lot of instability when using the overlapped approach,
-// which seems to be eliminated entirely when sending updates during
-// the blanking interval.
+// KL25Z and modified to use SPI with DMA to transmit data.  The DMA
+// scheme results in greatly reduced CPU load.  This version is also
+// simplified to remove dot correction and status input support, which
+// the Pinscape Controller app doesn't use.
 
  
 #ifndef TLC5940_H
 #define TLC5940_H
+
+#include "FastPWM.h"
 
 // Data Transmission Mode.
 //
@@ -65,9 +57,9 @@
 #define DATA_UPDATE_INSIDE_BLANKING  0
 
 #include "mbed.h"
-#include "FastPWM.h"
 #include "SimpleDMA.h"
 #include "DMAChannels.h"
+
 
 /**
   * SPI speed used by the mbed to communicate with the TLC5940
@@ -120,33 +112,15 @@
   */
 #define GSCLK_SPEED    350000
 
-/**
-  *  This class controls a TLC5940 PWM driver IC.
-  *
-  *  Using the TLC5940 class to control an LED:
-  *  @code
-  *  #include "mbed.h"
-  *  #include "TLC5940.h"
-  *  
-  *  // Create the TLC5940 instance
-  *  TLC5940 tlc(p7, p5, p21, p9, p10, p11, p12, 1);
-  *  
-  *  int main()
-  *  {   
-  *      // Enable the first LED
-  *      tlc.set(0, 0xfff);
-  *      
-  *      while(1)
-  *      {
-  *      }
-  *  }
-  *  @endcode
-  */
 class TLC5940
 {
 public:
+    uint64_t spi_total_time;//$$$
+    uint32_t spi_runs;//$$$
+
     /**
       *  Set up the TLC5940
+      *
       *  @param SCLK - The SCK pin of the SPI bus
       *  @param MOSI - The MOSI pin of the SPI bus
       *  @param GSCLK - The GSCLK pin of the TLC5940(s)
@@ -162,6 +136,8 @@ public:
           xlat(XLAT),
           nchips(nchips)
     {
+        spi_total_time = 0; spi_runs = 0; // $$$
+        
         // start up initially disabled
         enabled = false;
         
@@ -188,12 +164,12 @@ public:
         // startup data from the registers.  Include some extra bits - there
         // are some cases (such as after sending dot correct commands) where
         // an extra bit per chip is required, and the initial state is 
-        // somewhat unpredictable, so send extra just to make sure we cover
-        // all bases.  This does no harm; extra bits just fall off the end of
-        // the daisy chain, and since we want all registers set to 0, we can
+        // unpredictable, so send extra bits to make sure we cover all bases.  
+        // This does no harm; extra bits just fall off the end of the daisy 
+        // chain, and since we want all registers initially set to 0, we can 
         // send arbitrarily many extra 0's.
         for (int i = 0 ; i < nchips*25 ; ++i)
-            spi.write(0);
+            spi.write(0x00);
             
         // do an initial XLAT to latch all of these "0" values into the
         // grayscale registers
@@ -206,7 +182,7 @@ public:
         // copy that we can asynchronously update.
         dmalen = nchips*24;
         livebuf = new uint8_t[dmalen*2];
-        memset(livebuf, 0, dmalen*2);
+        memset(livebuf, 0x00, dmalen*2);
         
         // start with buffer 0 live, with no new data pending
         workbuf = livebuf + dmalen;
@@ -218,16 +194,16 @@ public:
         // allows our blanking interrupt handler return almost immediately.
         // The DMA transfer is from our internal DMA buffer to SPI0, which is
         // the SPI controller physically connected to the TLC5940s.
-        sdma.source(livebuf, true, 8);
+        SPI0->C2 &= ~SPI_C2_TXDMAE_MASK;
+        sdma.attach(this, &TLC5940::dmaDone);
         sdma.destination(&SPI0->D, false, 8);
         sdma.trigger(Trigger_SPI0_TX);
-        sdma.attach(this, &TLC5940::dmaDone);
         
         // Configure the GSCLK output's frequency
         gsclk.period(1.0/GSCLK_SPEED);
         
         // mark that we need an initial update
-        dirty = true;
+        forceUpdate = true;
         needXlat = false;
     }
      
@@ -255,7 +231,7 @@ public:
         }
         
         // do a full update with the new setting
-        dirty = true;
+        forceUpdate = true;
     }
     
     // Start the clock running
@@ -270,12 +246,17 @@ public:
         // GS clocks.  Running reset on a timer therefore causes the calls to
         // slip out of phase with the actual full cycles, which causes 
         // premature blanking that shows up as visible flicker.  To get the
-        // reset cycle to line up exactly with a full PWM cycle, it works
-        // better to set up a new timer on each cycle, *after* we've finished
-        // with the somewhat unpredictable overhead of the interrupt handler.
-        // This seems to get us close enough to exact alignment with the cycle 
-        // phase to eliminate visible artifacts.
-        resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
+        // reset cycle to line up more precisely with a full PWM cycle, it
+        // works better to set up a new timer at the end of each cycle.  That
+        // organically accounts for the time spent in the interrupt handler.
+        // This doesn't result in perfectly uniform timing, since interrupt
+        // latency varies slightly on each interrupt, but it does guarantee
+        // that the blanking will never be premature - all variation will go
+        // into the tail end of the cycle after the 4096 GS clocks.  That
+        // might cause some brightness variation, but it won't cause flicker,
+        // and in practice any brightness variation from this seems to be too 
+        // small to be visible.
+        armReset();
     }
     
      /*
@@ -286,23 +267,32 @@ public:
         // validate the index
         if (idx >= 0 && idx < nchips*16)
         {
-            // this is a critical section, since we're updating a static buffer and
-            // can call this routine from application context or interrupt context
-            __disable_irq();
-            
             // If the buffer isn't dirty, it means that the previous working buffer
             // was swapped into the live buffer on the last blanking interval.  This
             // means that the working buffer hasn't been updated to the live data yet,
             // so we need to copy it now.
+            //
+            // If 'dirty' is false, it can't change to true asynchronously - it can
+            // only transition from false to true in application (non-ISR) context.
+            // If it's true, though, the interrupt handler can change it to false
+            // asynchronously, and can also swap the 'live' and 'work' buffer pointers.
+            // This means we must do the whole update atomically if 'dirty' is true.
+            __disable_irq();
             if (!dirty) 
             {
+                // Buffer is clean, so the interrupt handler won't touch 'dirty'
+                // or the live/work buffer pointers.  This means we can do the
+                // rest of our work with interrupts on.
+                __enable_irq();
+                
+                // get the current live data into our work buffer
                 memcpy(workbuf, livebuf, dmalen);
-                dirty = true;
             }
 
-            // Figure the DMA buffer location of the data.  The DMA buffer has the
-            // packed bit format that we send across the wire, with 12 bits per output,
-            // arranged from last output to first output (N = number of outputs = nchips*16):
+            // Figure the DMA buffer location of the output we're changing.  The DMA 
+            // buffer has the packed bit format that we send across the wire, with 12 
+            // bits per output, arranged from last output to first output (N = number 
+            // of outputs = nchips*16):
             //
             //       byte 0  =  high 8 bits of output N-1
             //            1  =  low 4 bits of output N-1 | high 4 bits of output N-2
@@ -333,8 +323,18 @@ public:
                 workbuf[di+2]  = uint8_t(data & 0xff);
             }
             
-            // end the critical section
-            __enable_irq();
+            // if we weren't dirty before, we are now
+            if (!dirty)
+            {
+                // we need an update
+                dirty = true;
+            }
+            else
+            {            
+                // The buffer was already dirty, so we had to write the buffer with
+                // interrupts off.  We're done, so we can re-enable interrupts now.
+                __enable_irq();
+            }
         }
     }
     
@@ -345,7 +345,7 @@ public:
     void update(bool force = false)
     {
         if (force)
-            dirty = true;
+            forceUpdate = true;
     }
 
 private:
@@ -372,7 +372,11 @@ private:
     
     // Dirty: true means that the non-live buffer has new pending data.  False means
     // that the non-live buffer is empty.
-    bool dirty;
+    volatile bool dirty;
+    
+    // Force an update: true means that we'll send our GS data to the chips even if
+    // the buffer isn't dirty.
+    volatile bool forceUpdate;
     
     // Enabled: this enables or disables all outputs.  When this is true, we assert the
     // BLANK signal continuously.
@@ -383,7 +387,7 @@ private:
 
     // use a PWM out for the grayscale clock - this provides a stable
     // square wave signal without consuming CPU
-    PwmOut gsclk;
+    FastPWM gsclk;
 
     // Digital out pins used for the TLC5940
     DigitalOut blank;
@@ -398,50 +402,14 @@ private:
     
     // Do we need an XLAT signal on the next blanking interval?
     volatile bool needXlat;
-    volatile bool newGSData;//$$$
-
+    
     // Reset the grayscale cycle and send the next data update
     void reset()
     {
         // start the blanking cycle
         startBlank();
         
-        // if we have pending grayscale data, update the DMA data
-        /*$$$bool*/ newGSData = false;
-        uint8_t *dmasrc;
-        if (dirty) 
-        {
-            // swap live and working buffers
-            uint8_t *tmp = livebuf;
-            livebuf = workbuf;
-            workbuf = tmp;
-            
-            // Set the new DMA source.  Set the starting address in the
-            // DMA controller to the *second* byte, since we have to send
-            // the first byte via the CPU instead of DMA - this is required
-            // because of a problematic interaction that occurs if the DMA
-            // controller initiates the transfer; the problem is outlined 
-            // in the KL25Z hardware reference manual.
-            dmasrc = livebuf;
-            sdma.source(livebuf + 1, true, 8);            
-            
-            // no longer dirty
-            dirty = false;
-            
-            // note the new data
-            newGSData = true;
-        }
-        else //$$$
-        { 
-            // send all 1 bits for diagnostics - in case of XLAT
-            // glitches, this turns all outputs on, which makes the
-            // glitch immediately apparent
-            static uint8_t dummy = 0xff;
-            dmasrc = &dummy;
-            sdma.source(&dummy, false, 8); 
-        } //$$$
-
-#ifndef DATA_UPDATE_INSIDE_BLANKING
+#if !DATA_UPDATE_INSIDE_BLANKING
         // We're configured to send new GS data during the GS cycle,
         // not during the blanking interval, so end the blanking
         // interval now, before we start sending the new data.  Ending
@@ -454,34 +422,111 @@ private:
         endBlank();
 #endif
 
-        // send out the DMA contents if we have new data
-        //$$$if (newGSData)
+        // if we have pending grayscale data, update the DMA data
+        bool sendGS = true; // $$$
+        if (dirty)
         {
-            // The hardware reference manual says that the CPU has to send
-            // the first byte of a DMA transfer explicitly.  This is required
-            // to avoid a hardware deadlock condition that happens due to
-            // a timing interaction between the SPI and DMA controllers.
-            // The correct sequence per the manual is:
-            //
-            //  - set up the DMA registers, starting at the 2nd byte to send
-            //  - write the first byte directly to the SPI data register
-            //  - enable TXDMAE in the SPI controller
-            sdma.start(dmalen - 1);
-            spi.write(dmasrc[0]);
-            SPI0->C2 |= SPI_C2_TXDMAE_MASK;
+            // The working buffer has changes since our last update.  Swap
+            // the live and working buffers so that we send the latest updates.
+            uint8_t *tmp = livebuf;
+            livebuf = workbuf;
+            workbuf = tmp;
+            
+            // the working buffer is no longer dirty
+            dirty = false;
+            sendGS = true;
         }
+        else if (forceUpdate)
+        {
+            // send the GS data and consume the forced update flag
+            sendGS = true;
+            forceUpdate = false;
+        }
+
+        // Set the new DMA source to the live buffer.  Note that we start
+        // the DMA transfer with the *second* byte - the first byte must
+        // be sent by the CPU rather than the DMA module, as outlined in
+        // the KL25Z hardware reference manual.
+
+        // Start the new DMA transfer.
+        // 
+        // The hardware reference manual says that the CPU has to send
+        // the first byte of a DMA transfer explicitly.  This is required
+        // to avoid a hardware deadlock condition that happens due to
+        // a timing interaction between the SPI and DMA controllers.
+        // The correct sequence per the manual is:
+        //
+        //  - reset the SPI controller 
+        //  - set up the DMA registers, starting at the 2nd byte to send
+        //  - read the SPI status register (SPI0->S), wait for SPTEF to be set
+        //  - write the first byte to the SPI data register (SPI0->D)
+        //  - enable TXDMAE in the SPI control register (SPI0->C2)
+        //
+        if (sendGS)
+        {
+#if 1 // $$$
+            Timer t; t.start(); //$$$
+            uint8_t *p = livebuf;
+            for (int i = dmalen ; i != 0 ; --i) {
+                while (!(SPI0->S & SPI_S_SPTEF_MASK)) ;
+                SPI0->D = *p++;
+            }
+            needXlat = true;
+            
+            spi_total_time += t.read_us();
+            spi_runs += 1;
+#else
+            // disable DMA on SPI0
+            SPI0->C2 &= ~SPI_C2_TXDMAE_MASK;
+            
+            // reset SPI0
+            SPI0->C1 &= ~SPI_C1_SPE_MASK;
+
+            // set up a transfer from the second byte of the buffer
+            sdma.source(livebuf + 1, true, 8);
+            sdma.start(dmalen - 1, false);
+
+            // enable SPI0
+            SPI0->C1 |= SPI_C1_SPE_MASK;
+
+            // wait for the TX buffer to clear, then write the first byte manually
+            while (!(SPI0->S & SPI_S_SPTEF_MASK)) ;
+            SPI0->D = livebuf[0];
+            
+            // enable DMA to carry out the rest of the transfer
+            SPI0->C2 |= SPI_C2_TXDMAE_MASK;
+            
+            // we'll need a translate on the next blanking cycle
+            needXlat = true;
+#endif
+        }
+        
+#if !DATA_UPDATE_INSIDE_BLANKING
+        // arm the reset handler
+        armReset();
+#endif
+    }
+
+    // arm the reset handler - this fires at the end of each GS cycle    
+    void armReset()
+    {
+        resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
     }
 
     void startBlank()
     {
+        //static int i=0; i=(i+1)%200; extern void diagLED(int,int,int); diagLED(i<100,i>=100,0);//$$$
+
         // turn off the grayscale clock, and assert BLANK to end the grayscale cycle
         gsclk.write(0);
-        blank = 0;  // for a slight delay - chip requires 20ns GSCLK up to BLANK up
+        blank = (enabled ? 1 : 0);  // for the slight delay (20ns) required after GSCLK goes low
         blank = 1;        
     }
             
     void endBlank()
     {
+       //static int i=0; i=(i+1)%200; extern void diagLED(int,int,int); diagLED(-1,i<100,-1);//$$$
+
         // if we've sent new grayscale data since the last blanking
         // interval, latch it by asserting XLAT
         if (needXlat)
@@ -494,11 +539,11 @@ private:
 
         // End the blanking interval and restart the grayscale clock.  Note
         // that we keep the blanking on if the chips are globally disabled.
-        blank = enabled ? 0 : 1;
-        gsclk.write(.5);
-        
-        // set up the next blanking interrupt
-        resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
+        if (enabled)
+        {
+            blank = 0;
+            gsclk.write(.5);
+        }
     }
     
     // Interrupt handler for DMA completion.  The DMA controller calls this
@@ -507,18 +552,24 @@ private:
     // grayscale cycle.    
     void dmaDone()
     {
+        //static int i=0; i=(i+1)%200; extern void diagLED(int,int,int); diagLED(i<100,-1,-1);//$$$
+        
         // disable DMA triggering in the SPI controller until we set
         // up the next transfer
         SPI0->C2 &= ~SPI_C2_TXDMAE_MASK;
+        SPI0->C1 &= ~SPI_C1_SPE_MASK;
 
         // mark that we need to assert XLAT to latch the new
         // grayscale data during the next blanking interval
-        needXlat = newGSData;//$$$ true;
+        needXlat = true;
         
 #if DATA_UPDATE_INSIDE_BLANKING
         // we're doing the gs update within the blanking cycle, so end
         // the blanking cycle now that the transfer has completed
         endBlank();
+
+        // set up the next blanking interrupt
+        armReset();
 #endif
     }
 

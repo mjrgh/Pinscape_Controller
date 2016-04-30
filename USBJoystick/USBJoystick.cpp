@@ -55,7 +55,7 @@ bool USBJoystick::update()
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
 #define putbe(idx, val) (report.data[(idx)+1] = (val) & 0xff, report.data[idx] = ((val) >> 8) & 0xff)
 #define putl(idx, val) (put(idx, val), put((idx)+2, (val) >> 16))
-#define putlbe(idx, val) (put((idx)+2, val), put(idx, (val) >> 16))
+#define putlbe(idx, val) (putbe((idx)+2, val), putbe(idx, (val) >> 16))
    put(0, _status);
    put(2, 0);  // second word of status - zero in high bit identifies as normal joystick report
    put(4, _buttonsLo);
@@ -496,7 +496,7 @@ static const uint8_t reportDescriptorLW[] =
 };
 
 
-const uint8_t *USBJoystick::reportDescN(int idx) 
+const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len) 
 {    
     switch (idx)
     {
@@ -506,12 +506,12 @@ const uint8_t *USBJoystick::reportDescN(int idx)
         // feature is enabled.
         if (enableJoystick)
         {
-            reportLength = sizeof(reportDescriptorJS);
+            len = sizeof(reportDescriptorJS);
             return reportDescriptorJS;
         }
         else
         {
-            reportLength = sizeof(reportDescriptorLW);
+            len = sizeof(reportDescriptorLW);
             return reportDescriptorLW;
         }
         
@@ -519,18 +519,18 @@ const uint8_t *USBJoystick::reportDescN(int idx)
         // Interface 1 is the keyboard, only if it's enabled
         if (useKB)
         {
-            reportLength = sizeof(reportDescriptorKB);
+            len = sizeof(reportDescriptorKB);
             return reportDescriptorKB;
         }
         else
         {
-            reportLength = 0;
+            len = 0;
             return 0;
         }
         
     default:
         // Unknown interface ID
-        reportLength = 0;
+        len = 0;
         return 0;
     }
 } 
@@ -544,13 +544,51 @@ const uint8_t *USBJoystick::reportDescN(int idx)
     return stringImanufacturerDescriptor;
 }
 
-const uint8_t *USBJoystick::stringIserialDesc() {
-    static const uint8_t stringIserialDescriptor[] = {
-        0x16,                                                           /*bLength*/
-        STRING_DESCRIPTOR,                                              /*bDescriptorType 0x03*/
-        '0',0,'1',0,'2',0,'3',0,'4',0,'5',0,'6',0,'7',0,'8',0,'9',0,    /*bString iSerial - 0123456789*/
-    };
-    return stringIserialDescriptor;
+const uint8_t *USBJoystick::stringIserialDesc() 
+{
+    // set up a buffer with the length prefix and descriptor type
+    static uint8_t buf[2 + (3+16+1)*2];
+    uint8_t *dst = buf;
+    *dst++ = sizeof(buf);
+    *dst++ = STRING_DESCRIPTOR;
+
+    // Create an ASCII version of our unique serial number string:
+    //
+    //   PSCxxxxxxxxxxxxxxxxi
+    //
+    // where:
+    //   
+    //   xxx... = decimal representation of low 64 bits of CPU ID (16 hex digits)
+    //   i      = interface type:  first character is J if joystick is enabled,
+    //             L = LedWiz/control interface only, no input
+    //             J = Joystick + LedWiz
+    //             K = Keyboard + LedWiz
+    //             C = Joystick + Keyboard + LedWiz ("C" for combo)
+    //
+    // The suffix for the interface type resolves a problem on some Windows systems
+    // when switching between interface types.  Windows can cache device information
+    // that includes the interface descriptors, and it won't recognize a change in
+    // the interfaces once the information is cached, causing connection failures.
+    // The cache key includes the device serial number, though, so this can be 
+    // resolved by changing the serial number when the interface setup changes.
+    char xbuf[3+16+1+1];
+    uint32_t x = SIM->UIDML;
+    static char ifcCode[] = "LJKC";
+    sprintf(xbuf, "PSC%08lX%08lX%c", 
+        SIM->UIDML, 
+        SIM->UIDL, 
+        ifcCode[(enableJoystick ? 0x01 : 0x00) | (useKB ? 0x02 : 0x00)]);
+
+    // copy the ascii bytes into the descriptor buffer, converting to unicode
+    // 16-bit little-endian characters
+    for (char *src = xbuf ; *src != '\0' && dst < buf + sizeof(buf) ; )
+    {
+        *dst++ = *src++;
+        *dst++ = '\0';
+    }
+    
+    // return the buffer    
+    return buf;
 }
 
 const uint8_t *USBJoystick::stringIproductDesc() {
@@ -568,8 +606,8 @@ const uint8_t *USBJoystick::stringIproductDesc() {
 
 const uint8_t *USBJoystick::configurationDesc() 
 {
-    int rptlen0 = reportDescLengthN(0);
-    int rptlen1 = reportDescLengthN(1);
+    int rptlen0 = reportDescLength(0);
+    int rptlen1 = reportDescLength(1);
     if (useKB)
     {
         const int cfglenKB = 
@@ -587,7 +625,7 @@ const uint8_t *USBJoystick::configurationDesc()
             DEFAULT_CONFIGURATION,          // bConfigurationValue
             0x00,                           // iConfiguration
             C_RESERVED | C_SELF_POWERED,    // bmAttributes
-            C_POWER(0),                     // bMaxPowerHello World from Mbed
+            C_POWER(0),                     // bMaxPower
         
             // ***** INTERFACE 0 - JOYSTICK/LEDWIZ ******
             INTERFACE_DESCRIPTOR_LENGTH,    // bLength
@@ -661,7 +699,7 @@ const uint8_t *USBJoystick::configurationDesc()
             E_INTERRUPT,                    // bmAttributes
             LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
             MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
-            1,                              // bInterval (milliseconds)
+            1                               // bInterval (milliseconds)
         };
 
         // Keyboard + joystick interfaces
@@ -685,7 +723,7 @@ const uint8_t *USBJoystick::configurationDesc()
             DEFAULT_CONFIGURATION,          // bConfigurationValue
             0x00,                           // iConfiguration
             C_RESERVED | C_SELF_POWERED,    // bmAttributes
-            C_POWER(0),                     // bMaxPowerHello World from Mbed
+            C_POWER(0),                     // bMaxPower
         
             INTERFACE_DESCRIPTOR_LENGTH,    // bLength
             INTERFACE_DESCRIPTOR,           // bDescriptorType
@@ -721,7 +759,7 @@ const uint8_t *USBJoystick::configurationDesc()
             E_INTERRUPT,                    // bmAttributes
             LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
             MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
-            1,                              // bInterval (milliseconds)
+            1                               // bInterval (milliseconds)
         };
 
         return configurationDescriptorNoKB;

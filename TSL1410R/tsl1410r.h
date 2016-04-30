@@ -352,9 +352,9 @@ public:
         adc_dma.destination(pixDMA ? pix2 : pix1, true);
 
         // start the DMA transfers
-        clkDn_dma.start(nPixSensor*4);
-        adc_dma.start(nPixSensor);
-        clkUp_dma.start(nPixSensor*4);
+        clkDn_dma.start(nPixSensor*4, true);
+        adc_dma.start(nPixSensor, true);
+        clkUp_dma.start(nPixSensor*4, true);
             
         // start the next integration cycle by pulsing SI and one clock
         si = 1;

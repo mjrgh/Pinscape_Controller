@@ -104,12 +104,7 @@ int getChannel() { return _channel; }
 *
 * @param length - number of BYTES to be moved by the DMA
 */
-int start(uint32_t length);
-
-/**
-* Start a new transfer with the same parameters as last time
-*/
-int restart(uint32_t length);
+int start(uint32_t length, bool wait);
 
 /**
 * Is the DMA channel busy

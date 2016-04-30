@@ -291,9 +291,9 @@ void *xmalloc(size_t siz)
     for (;;)
     {
         diagLED(1, 0, 0);
-        wait(.2);
+        wait_us(200000);
         diagLED(1, 0, 1);
-        wait(.2);
+        wait_us(200000);
     }
 }
 
@@ -1713,21 +1713,212 @@ public:
         bool waitForConnect, bool enableJoystick, bool useKB) 
         : USBJoystick(vendor_id, product_id, product_release, waitForConnect, enableJoystick, useKB)
     {
-        suspended_ = false;
+        sleeping_ = false;
+        reconnectPending_ = false;
+        timer_.start();
+    }
+    
+    // show diagnostic LED feedback for connect state
+    void diagFlash()
+    {
+        if (!configured() || sleeping_)
+        {
+            // flash once if sleeping or twice if disconnected
+            for (int j = isConnected() ? 1 : 2 ; j > 0 ; --j)
+            {
+                // short red flash
+                diagLED(1, 0, 0);
+                wait_us(50000);
+                diagLED(0, 0, 0);
+                wait_us(50000);
+            }
+        }
     }
     
     // are we connected?
     int isConnected()  { return configured(); }
     
-    // Are we in suspend mode?
-    int isSuspended() const { return suspended_; }
+    // Are we in sleep mode?  If true, this means that the hardware has
+    // detected no activity on the bus for 3ms.  This happens when the
+    // cable is physically disconnected, the computer is turned off, or
+    // the connection is otherwise disabled.
+    bool isSleeping() const { return sleeping_; }
+
+    // If necessary, attempt to recover from a broken connection.
+    //
+    // This is a hack, to work around an apparent timing bug in the
+    // KL25Z USB implementation that I haven't been able to solve any
+    // other way.
+    //
+    // The issue: when we have an established connection, and the
+    // connection is broken by physically unplugging the cable or by
+    // rebooting the PC, the KL25Z sometimes fails to reconnect when
+    // the physical connection is re-established.  The failure is 
+    // sporadic; I'd guess it happens about 25% of the time, but I 
+    // haven't collected any real statistics on it.  
+    //
+    // The proximate cause of the failure is a deadlock in the SETUP
+    // protocol between the host and device that happens around the
+    // point where the PC is requesting the configuration descriptor.
+    // The exact point in the protocol where this occurs varies slightly;
+    // it can occur a message or two before or after the Get Config
+    // Descriptor packet.  No matter where it happens, the nature of
+    // the deadlock is the same: the PC thinks it sees a STALL on EP0
+    // from the device, so it terminates the connection attempt, which
+    // stops further traffic on the cable.  The KL25Z USB hardware sees
+    // the lack of traffic and triggers a SLEEP interrupt (a misnomer
+    // for what should have been called a BROKEN CONNECTION interrupt).
+    // Both sides simply stop talking at this point, so the connection
+    // is effectively dead.  
+    //
+    // The strange thing is that, as far as I can tell, the KL25Z isn't
+    // doing anything to trigger the STALL on its end.  Both the PC
+    // and the KL25Z are happy up until the very point of the failure 
+    // and show no signs of anything wrong in the protocol exchange.
+    // In fact, every detail of the protocol exchange up to this point
+    // is identical to every successful exchange that does finish the
+    // whole setup process successfully, on both the KL25Z and Windows
+    // sides of the connection.  I can't find any point of difference
+    // between successful and unsuccessful sequences that suggests why
+    // the fateful message fails.  This makes me suspect that whatever
+    // is going wrong is inside the KL25Z USB hardware module, which 
+    // is a pretty substantial black box - it has a lot of internal 
+    // state that's inaccessible to the software.  Further bolstering 
+    // this theory is a little experiment where I found that I could 
+    // reproduce the exact sequence of events of a failed reconnect 
+    // attempt in an *initial* connection, which is otherwise 100% 
+    // reliable, by inserting a little bit of artifical time padding 
+    // (200us per event) into the SETUP interrupt handler.  My
+    // hypothesis is that the STALL event happens because the KL25Z
+    // USB hardware is too slow to respond to a message.  I'm not 
+    // sure why this would only happen after a disconnect and not
+    // during the initial connection; maybe there's some reset work
+    // in the hardware that takes a substantial amount of time after
+    // a disconnect.
+    //
+    // The solution: the problem happens during the SETUP exchange,
+    // after we've been assigned a bus address.  It only happens on
+    // some percentage of connection requests, so if we can simply
+    // start over when the failure occurs, we'll eventually succeed
+    // simply because not every attempt fails.  The ideal would be
+    // to get the success rate up to 100%, but I can't figure out how
+    // to fix the underlying problem, so this is the next best thing.
+    //
+    // We can detect when the failure occurs by noticing when a SLEEP
+    // interrupt happens while we have an assigned bus address.
+    //
+    // To start a new connection attempt, we have to make the *host*
+    // try again.  The logical connection is initiated solely by the
+    // host.  Fortunately, it's easy to get the host to initiate the
+    // process: if we disconnect on the device side, it effectively
+    // makes the device look to the PC like it's electrically unplugged.
+    // When we reconnect on the device side, the PC thinks a new device
+    // has been plugged in and initiates the logical connection setup.
+    // We have to remain disconnected for a macroscopic interval for
+    // this to happen - 5ms seems to do the trick.
+    // 
+    // Here's the full algorithm:
+    //
+    // 1. In the SLEEP interrupt handler, if we have a bus address,
+    // we disconnect the device.  This happens in ISR context, so we
+    // can't wait around for 5ms.  Instead, we simply set a flag noting
+    // that the connection has been broken, and we note the time and
+    // return.
+    //
+    // 2. In our main loop, whenever we find that we're disconnected,
+    // we call recoverConnection().  The main loop's job is basically a
+    // bunch of device polling.  We're just one more device to poll, so
+    // recoverConnection() will be called soon after a disconnect, and
+    // then will be called in a loop for as long as we're disconnected.
+    //
+    // 3. In recoverConnection(), we check the flag we set in the SLEEP
+    // handler.  If set, we wait until 5ms has elapsed from the SLEEP
+    // event time that we noted, then we'll reconnect and clear the flag.
+    // This gives us the required 5ms (or longer) delay between the
+    // disconnect and reconnect, ensuring that the PC will notice and
+    // will start over with the connection protocol.
+    //
+    // 4. The main loop keeps calling recoverConnection() in a loop for
+    // as long as we're disconnected, so if the new connection attempt
+    // triggered in step 3 fails, the SLEEP interrupt will happen again,
+    // we'll disconnect again, the flag will get set again, and 
+    // recoverConnection() will reconnect again after another suitable
+    // delay.  This will repeat until the connection succeeds or hell
+    // freezes over.  
+    //
+    // Each disconnect happens immediately when a reconnect attempt 
+    // fails, and an entire successful connection only takes about 25ms, 
+    // so our loop can retry at more than 30 attempts per second.  
+    // In my testing, lost connections almost always reconnect in
+    // less than second with this code in place.
+    void recoverConnection()
+    {
+        // if a reconnect is pending, reconnect
+        if (reconnectPending_)
+        {
+            // Loop until we reach 5ms after the last sleep event.
+            for (bool done = false ; !done ; )
+            {
+                // If we've reached the target time, reconnect.  Do the
+                // time check and flag reset atomically, so that we can't
+                // have another sleep event sneak in after we've verified
+                // the time.  If another event occurs, it has to happen
+                // before we check, in which case it'll update the time
+                // before we check it, or after we clear the flag, in
+                // which case it will reset the flag and we'll do another
+                // round the next time we call this routine.
+                __disable_irq();
+                if (uint32_t(timer_.read_us() - lastSleepTime_) > 5000)
+                {
+                    connect(false);
+                    reconnectPending_ = false;
+                    done = true;
+                }
+                __enable_irq();
+            }
+        }
+    }
     
 protected:
-    virtual void suspendStateChanged(unsigned int suspended)
-        { suspended_ = suspended; }
-
-    // are we suspended?
-    int suspended_; 
+    // Handle a USB SLEEP interrupt.  This interrupt signifies that the
+    // USB hardware module hasn't seen any token traffic for 3ms, which 
+    // means that we're either physically or logically disconnected. 
+    //
+    // Important: this runs in ISR context.
+    //
+    // Note that this is a specialized sense of "sleep" that's unrelated 
+    // to the similarly named power modes on the PC.  This has nothing
+    // to do with suspend/sleep mode on the PC, and it's not a low-power
+    // mode on the KL25Z.  They really should have called this interrupt 
+    // DISCONNECT or BROKEN CONNECTION.)
+    virtual void sleepStateChanged(unsigned int sleeping)
+    { 
+        // note the new state
+        sleeping_ = sleeping;
+        
+        // If we have a non-zero bus address, we have at least a partial
+        // connection to the host (we've made it at least as far as the
+        // SETUP stage).  Explicitly disconnect, and the pending reconnect
+        // flag, and remember the time of the sleep event.
+        if (USB0->ADDR != 0x00)
+        {
+            disconnect();
+            lastSleepTime_ = timer_.read_us();
+            reconnectPending_ = true;
+        }
+    }
+    
+    // is the USB connection asleep?
+    volatile bool sleeping_; 
+    
+    // flag: reconnect pending after sleep event
+    volatile bool reconnectPending_;
+    
+    // time of last sleep event while connected
+    volatile uint32_t lastSleepTime_;
+    
+    // timer to keep track of interval since last sleep event
+    Timer timer_;
 };
 
 // ---------------------------------------------------------------------------
@@ -3003,18 +3194,6 @@ private:
     inline void firingMode(int m) 
     {
         firing = m;
-#if 0 // $$$   
-        lwPin[3]->set(0);
-        lwPin[4]->set(0);
-        lwPin[5]->set(0);
-        switch (m)
-        {
-        case 1: lwPin[3]->set(255); break;       // red
-        case 2: lwPin[4]->set(255); break;       // green
-        case 3: lwPin[5]->set(255); break;       // blue
-        case 4: lwPin[3]->set(255); lwPin[5]->set(255); break;   // purple
-        }
-#endif //$$$
     }
     
     // Find the most recent local maximum in the history data, up to
@@ -3290,13 +3469,14 @@ private:
 //
 // Reboot - resets the microcontroller
 //
-void reboot(USBJoystick &js)
+void reboot(USBJoystick &js, bool disconnect = true, long pause_us = 2000000L)
 {
     // disconnect from USB
-    js.disconnect();
+    if (disconnect)
+        js.disconnect();
     
     // wait a few seconds to make sure the host notices the disconnect
-    wait(2.5f);
+    wait_us(pause_us);
     
     // reset the device
     NVIC_SystemReset();
@@ -3734,11 +3914,10 @@ int main(void)
     // enable the 74HC595 chips, if present
     init_hc595(cfg);
     
-    // Initialize the LedWiz ports.  Note that it's important to wait until
-    // after initializing the various off-board output port controller chip
-    // sybsystems (TLC5940, 74HC595), since pins attached to peripheral
-    // controllers will need to address their respective controller objects,
-    // which don't exit until we initialize those subsystems.
+    // Initialize the LedWiz ports.  Note that the ordering here is important:
+    // this has to come after we create the TLC5940 and 74HC595 object instances
+    // (which we just did above), since we need to access those objects to set
+    // up ports assigned to the respective chips.
     initLwOut(cfg);
 
     // start the TLC5940 clock
@@ -3767,13 +3946,14 @@ int main(void)
         {
             // short yellow flash
             diagLED(1, 1, 0);
-            wait(0.05);
+            wait_us(50000);
             diagLED(0, 0, 0);
             
             // reset the flash timer
             connectTimer.reset();
         }
     }
+    connected = true;
     
     // Last report timer for the joytick interface.  We use the joystick timer 
     // to throttle the report rate, because VP doesn't benefit from reports any 
@@ -3781,8 +3961,6 @@ int main(void)
     Timer jsReportTimer;
     jsReportTimer.start();
     
-    Timer plungerIntervalTimer; plungerIntervalTimer.start(); // $$$
-
     // Time since we successfully sent a USB report.  This is a hacky workaround
     // for sporadic problems in the USB stack that I haven't been able to figure
     // out.  If we go too long without successfully sending a USB report, we'll
@@ -3826,7 +4004,11 @@ int main(void)
     // set up the ZB Launch Ball monitor
     ZBLaunchBall zbLaunchBall;
     
-    Timer dbgTimer; dbgTimer.start(); // $$$  plunger debug report timer
+    // enable the peripheral chips
+    if (tlc5940 != 0)
+        tlc5940->enable(true);
+    if (hc595 != 0)
+        hc595->enable(true);
     
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -4006,12 +4188,6 @@ int main(void)
             // rotate X and Y according to the device orientation in the cabinet
             accelRotate(x, y);
 
-#if 0
-            // $$$ report velocity in x axis and timestamp in y axis
-            x = int(plungerReader.getVelocity() * 1.0 * JOYMAX);
-            y = (plungerReader.getTimestamp() / 1000) % JOYMAX;
-#endif
-
             // send the joystick report
             jsOK = js.update(x, y, zrep, jsButtons, statusFlags);
             
@@ -4050,12 +4226,12 @@ int main(void)
 #endif
 
         // check for connection status changes
-        bool newConnected = js.isConnected() && !js.isSuspended();
+        bool newConnected = js.isConnected() && !js.isSleeping();
         if (newConnected != connected)
         {
-            // give it a few seconds to stabilize
+            // give it a moment to stabilize
             connectChangeTimer.start();
-            if (connectChangeTimer.read() > 3)
+            if (connectChangeTimer.read_us() > 100000)
             {
                 // note the new status
                 connected = newConnected;
@@ -4064,34 +4240,10 @@ int main(void)
                 connectChangeTimer.stop();
                 connectChangeTimer.reset();
                 
-                // adjust to the new status
-                if (connected)
+                // if we're newly disconnected, clean up for PC suspend mode or power off
+                if (!connected)
                 {
-                    // We're newly connected.  This means we just powered on, we were
-                    // just plugged in to the PC USB port after being unplugged, or the
-                    // PC just came out of sleep/suspend mode and resumed the connection.
-                    // In any of these cases, we can now assume that the PC power supply
-                    // is on (the PC must be on for the USB connection to be running, and
-                    // if the PC is on, its power supply is on).  This also means that 
-                    // power to any external output controller chips (TLC5940, 74HC595)
-                    // is now on, because those have to be powered from the PC power
-                    // supply to allow for a reliable data connection to the KL25Z.
-                    // We can thus now set clear initial output state in those chips and
-                    // enable their outputs.
-                    if (tlc5940 != 0)
-                    {
-                        tlc5940->update(true);
-                        tlc5940->enable(true);
-                    }
-                    if (hc595 != 0)
-                    {
-                        hc595->update(true);
-                        hc595->enable(true);
-                    }
-                }
-                else
-                {
-                    // We're no longer connected.  Turn off all outputs.
+                    // turn off all outputs
                     allOutputsOff();
                     
                     // The KL25Z runs off of USB power, so we might (depending on the PC
@@ -4124,84 +4276,107 @@ int main(void)
         // if we're disconnected, initiate a new connection
         if (!connected)
         {
-            // The "connected" variable means that we're either disconnected
-            // or that the connection has been suspended (e.g., the host is in 
-            // a sleep mode).  If the connection was lost entirely, explicitly
-            // initiate a reconnection.
-            if (!js.isConnected())
-                js.connect(false);
+            // show USB HAL debug events
+            extern void HAL_DEBUG_PRINTEVENTS(const char *prefix);
+            HAL_DEBUG_PRINTEVENTS(">DISC");
+            
+            // show immediate diagnostic feedback
+            js.diagFlash();
+            
+            // clear any previous diagnostic LED display
+            diagLED(0, 0, 0);
             
             // set up a timer to monitor the reboot timeout
             Timer rebootTimer;
             rebootTimer.start();
             
-            // wait for reconnect or reboot
-            connectTimer.reset();
-            connectTimer.start();
-            while (!js.isConnected() || js.isSuspended())
+            // set up a timer for diagnostic displays
+            Timer diagTimer;
+            diagTimer.reset();
+            diagTimer.start();
+
+            // loop until we get our connection back            
+            while (!js.isConnected() || js.isSleeping())
             {
-                // show a diagnostic flash every 2 seconds
-                if (connectTimer.read_us() > 2000000)
+                // try to recover the connection
+                js.recoverConnection();
+                
+                // show a diagnostic flash every couple of seconds
+                if (diagTimer.read_us() > 2000000)
                 {
-                    // flash once if suspended or twice if disconnected
-                    for (int j = js.isConnected() ? 1 : 2 ; j > 0 ; --j)
-                    {
-                        // short red flash
-                        diagLED(1, 0, 0);
-                        wait(0.05f);
-                        diagLED(0, 0, 0);
-                        wait(0.05f);
-                    }
+                    // flush the USB HAL debug events, if in debug mode
+                    HAL_DEBUG_PRINTEVENTS(">NC");
+                    
+                    // show diagnostic feedback
+                    js.diagFlash();
                     
                     // reset the flash timer
-                    connectTimer.reset();
+                    diagTimer.reset();
                 }
                 
                 // if the disconnect reboot timeout has expired, reboot
                 if (cfg.disconnectRebootTimeout != 0 
                     && rebootTimer.read() > cfg.disconnectRebootTimeout)
-                    reboot(js);
+                    reboot(js, false, 0);
+            }
+            
+            // if we made it out of that loop alive, we're connected again!
+            connected = true;
+            HAL_DEBUG_PRINTEVENTS(">C");
+
+            // Enable peripheral chips and update them with current output data
+            if (tlc5940 != 0)
+            {
+                tlc5940->update(true);
+                tlc5940->enable(true);
+            }
+            if (hc595 != 0)
+            {
+                hc595->update(true);
+                hc595->enable(true);
             }
         }
 
-    // $$$
-#if 0
-        if (dbgTimer.read() > 10) {
-            dbgTimer.reset();
-            if (plungerSensor != 0 && (cfg.plunger.sensorType == PlungerType_TSL1410RS || cfg.plunger.sensorType == PlungerType_TSL1410RP))
-            {
-                PlungerSensorTSL1410R *ps = (PlungerSensorTSL1410R *)plungerSensor;
-                uint32_t nRuns;
-                uint64_t totalTime;
-                ps->ccd.getTimingStats(totalTime, nRuns);
-                printf("average plunger read time: %f ms (total=%f, n=%d)\r\n", totalTime / 1000.0f / nRuns, totalTime, nRuns);
-            }
-        }
-#endif
-    // end $$$
-        
         // provide a visual status indication on the on-board LED
         if (calBtnState < 2 && hbTimer.read_us() > 1000000) 
         {
-            if (jsOKTimer.read() > 5)
+            static int spiTimeUpdate = 0; // $$$
+            if (spiTimeUpdate++ > 10 && tlc5940 != 0) {
+                spiTimeUpdate = 0;
+                printf("Average SPI time: %lf us\r\n", double(tlc5940->spi_total_time) / tlc5940->spi_runs);
+            }
+            
+            if (jsOKTimer.read_us() > 1000000)
             {
                 // USB freeze - show red/yellow.
-                // Our outgoing joystick messages aren't going through, even though we
-                // think we're still connected.  This indicates that one or more of our
-                // USB endpoints have stopped working, which can happen as a result of
-                // bugs in the USB HAL or latency responding to a USB IRQ.  Show a
-                // distinctive diagnostic flash to signal the error.  I haven't found a 
-                // way to recover from this class of error other than rebooting the MCU, 
-                // so the goal is to fix the HAL so that this error never happens.  
                 //
-                // NOTE!  This diagnostic code *hopefully* shouldn't occur.  It happened
-                // in the past due to a number of bugs in the mbed KL25Z USB HAL that
-                // I've since fixed.  I think I found all of the cases that caused it,
-                // but I'm leaving the diagnostics here in case there are other bugs
-                // still lurking that can trigger the same symptoms.
-                jsOKTimer.stop();
+                // It's been more than a second since we successfully sent a joystick
+                // update message.  This must mean that something's wrong on the USB
+                // connection, even though we haven't detected an outright disconnect.
+                // Show a distinctive diagnostic LED pattern when this occurs.
                 hb = !hb;
                 diagLED(1, hb, 0);
+                
+                // If the reboot-on-disconnect option is in effect, treat this condition
+                // as equivalent to a disconnect, since something is obviously wrong
+                // with the USB connection.  
+                if (cfg.disconnectRebootTimeout != 0)
+                {
+                    // The reboot timeout is in effect.  If we've been incommunicado for
+                    // longer than the timeout, reboot.  If we haven't reached the time
+                    // limit, keep running for now, and leave the OK timer running so 
+                    // that we can continue to monitor this.
+                    if (jsOKTimer.read() > cfg.disconnectRebootTimeout)
+                        reboot(js, false, 0);
+                }
+                else
+                {
+                    // There's no reboot timer, so just keep running with the diagnostic
+                    // pattern displayed.  Since we're not waiting for any other timed
+                    // conditions in this state, stop the timer so that it doesn't 
+                    // overflow if this condition persists for a long time.
+                    jsOKTimer.stop();
+                }
             }
             else if (cfg.plunger.enabled && !cfg.plunger.cal.calibrated)
             {

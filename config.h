@@ -18,9 +18,9 @@
 //
 
 // $$$ TESTING CONFIGURATIONS
-#define TEST_CONFIG_EXPAN     0
-#define TEST_CONFIG_CAB       1
-#define TEST_KEEP_PRINTF      0
+#define TEST_CONFIG_EXPAN     1
+#define TEST_CONFIG_CAB       0
+#define TEST_KEEP_PRINTF      1
 
 
 #ifndef CONFIG_H
@@ -141,12 +141,12 @@ struct Config
         // has a unit #8, so we'll use that as our default.  This can be changed from 
         // the config tool, but for the sake of convenience, it's better to pick a
         // default that most people won't have to change.
-        usbVendorID = 0xFAFA;      // LedWiz vendor code
+        usbVendorID = 0xFAFA;      // LedWiz vendor code 
         usbProductID = 0x00F7;     // LedWiz product code for unit #8
         psUnitNo = 8;
         
         // set a disconnect reboot timeout of 10 seconds by default
-        disconnectRebootTimeout = 10;
+        disconnectRebootTimeout = 60; // $$$
         
         // enable joystick reports
         joystickEnabled = true;
@@ -340,8 +340,8 @@ struct Config
 
 #if TEST_CONFIG_CAB
 #if TEST_KEEP_PRINTF
-        outPort[ 0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(NC));       // port 1  = NC to keep debug printf (PTA1 is UART)
-        outPort[ 1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(NC));       // port 2  = NC to keep debug printf (PTA2 is UART)
+        outPort[ 0].set(PortTypeVirtual, PINNAME_TO_WIRE(NC));       // port 1  = NC to keep debug printf (PTA1 is UART)
+        outPort[ 1].set(PortTypeVirtual, PINNAME_TO_WIRE(NC));       // port 2  = NC to keep debug printf (PTA2 is UART)
 #else
         outPort[ 0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA1));     // port 1  = PTA1
         outPort[ 1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA2));     // port 2  = PTA2
