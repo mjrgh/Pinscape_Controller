@@ -15,13 +15,6 @@
 
 // --------------------------------------------------------------
 //
-// PWM controllers
-//
-const int DMAch_TLC5940 = 0;    // TLC5940 PWM controller chips
-
-
-// --------------------------------------------------------------
-//
 // Plunger Sensors
 //
 // Plunger sensors are mutually exclusive since there's only one
@@ -32,5 +25,13 @@ const int DMAch_TLC5940 = 0;    // TLC5940 PWM controller chips
 const int DMAch_CLKUP   = 1;    // Clock Up signal generator
 const int DMAch_ADC     = 2;    // ADC (analog input) sample transfer
 const int DMAch_CLKDN   = 3;    // Clock Down signal generator
+
+
+// --------------------------------------------------------------
+//
+// Free channels - not currently assigned.
+//
+const int DMAch_Unused0 = 0;
+
 
 #endif

@@ -1,26 +1,44 @@
 // Pinscape Controller Configuration
 //
-// New for 2016:  dynamic configuration!  To configure the controller, connect
-// the KL25Z to your PC, install the .bin file, and run the Windows config tool.  
-// There's no need (as there was in the past) to edit this file or to compile a 
-// custom version of the binary (.bin) to customize setup options.
+// New for 2016:  dynamic configuration!  To configure the controller,
+// connect the KL25Z to your PC, install the STANDARD pre-compiled .bin 
+// file, and run the Windows config tool.  There's no need (as there was in 
+// the past) to edit the source code or to compile a custom version of the 
+// binary just to customize setup options.
 //
-// In earlier versions, configuration was largely handled with compile-time
-// constants.  To customize the setup, you had to create a private forked copy
-// of the source code, edit the constants defined in config.h, and compile a
-// custom binary.  That's no longer necessary!
+// In earlier versions, configuration was handled mostly with #ifdef and
+// similar constructs.  To customize the setup, you had to create a private 
+// forked copy of the source code, edit the constants defined in config.h, 
+// and compile a custom binary.  That's no longer necessary!
 //
 // The new approach is to do everything (or as much as possible, anyway)
 // via the Windows config tool.  You shouldn't have to recompile a custom
 // version just to make a configurable change.  Of course, you're still free
-// to create a custom version if you need to add or change features in ways
-// that weren't anticipated in the original design. 
+// to create a custom version if you want to add entirely new features or 
+// make changes that go beyond what the setup tool exposes.
 //
 
-// $$$ TESTING CONFIGURATIONS
-#define TEST_CONFIG_EXPAN     1
-#define TEST_CONFIG_CAB       0
-#define TEST_KEEP_PRINTF      1
+// Pre-packaged configuration selection.
+//
+// IMPORTANT!  If you just want to create a custom configuration, DON'T
+// modify this file, DON'T use these macros, and DON'T compiler on mbed.
+// Instead, use the unmodified standard build and configure your system
+// using the Pinscape Config Tool on Windows.  That's easier and better
+// because the config tool will be able to back up your settings to a
+// local file on your PC, and will automatically preserve your settings
+// across upgrades.  You won't have to worry about merging your changes
+// into every update of the repository source code, since you'll never
+// have to change the source code.
+//
+// The different configurations here are purely for testing purposes.  
+// The standard build uses the STANDARD_CONFIG settings, which are the 
+// same as the original version where you had to modify config.h by hand 
+// to customize your system.
+// 
+#define STANDARD_CONFIG       1     // standard settings, based on v1 base settings
+#define TEST_CONFIG_EXPAN     0     // configuration for the expansion boards
+#define TEST_KEEP_PRINTF      0     // for debugging purposes, keep printf() enabled
+                                    // by leaving the SDA UART GPIO pins unallocated
 
 
 #ifndef CONFIG_H
@@ -143,10 +161,18 @@ struct Config
         // default that most people won't have to change.
         usbVendorID = 0xFAFA;      // LedWiz vendor code 
         usbProductID = 0x00F7;     // LedWiz product code for unit #8
-        psUnitNo = 8;
+        
+        // Set the default Pinscape unit number to #1.  This is a separate identifier
+        // from the LedWiz ID, so you don't have to worry about making this different
+        // from your LedWiz units.  Each Pinscape unit should have a unique value for
+        // this ID, though.
+        //
+        // Note that Pinscape unit #1 corresponds to DOF Pinscape #51, PS 2 -> DOF 52,
+        // and so on - just add 50 to get the DOF ID.
+        psUnitNo = 1;
         
         // set a disconnect reboot timeout of 10 seconds by default
-        disconnectRebootTimeout = 60; // $$$
+        disconnectRebootTimeout = 10;
         
         // enable joystick reports
         joystickEnabled = true;
@@ -163,7 +189,7 @@ struct Config
         plunger.enabled = false;
         plunger.sensorType = PlungerType_None;
         
-#if TEST_CONFIG_EXPAN || TEST_CONFIG_CAB // $$$
+#if TEST_CONFIG_EXPAN || STANDARD_CONFIG
         plunger.enabled = true;
         plunger.sensorType = PlungerType_TSL1410RS;
         plunger.sensorPin[0] = PINNAME_TO_WIRE(PTE20); // SI
@@ -173,8 +199,9 @@ struct Config
 #endif
         
         // default plunger calibration button settings
-        plunger.cal.btn = PINNAME_TO_WIRE(PTE29);
-        plunger.cal.led = PINNAME_TO_WIRE(PTE23);
+        plunger.cal.features = 0x03;                   // 0x01 = enable button, 0x02 = enable indicator lamp
+        plunger.cal.btn = PINNAME_TO_WIRE(PTE29);      // button input (DigitalIn port)
+        plunger.cal.led = PINNAME_TO_WIRE(PTE23);      // button output (DigitalOut port)
         
         // set the default plunger calibration
         plunger.cal.setDefaults();
@@ -190,7 +217,9 @@ struct Config
         TVON.latchPin = PINNAME_TO_WIRE(NC);
         TVON.relayPin = PINNAME_TO_WIRE(NC);
         TVON.delayTime = 700;   // 7 seconds
-#if TEST_CONFIG_EXPAN //$$$
+        
+#if TEST_CONFIG_EXPAN
+        // expansion board TV ON wiring
         TVON.statusPin = PINNAME_TO_WIRE(PTD2);
         TVON.latchPin = PINNAME_TO_WIRE(PTE0);
         TVON.relayPin = PINNAME_TO_WIRE(PTD3);
@@ -204,11 +233,18 @@ struct Config
         
         // assume no TLC5940 chips
         tlc5940.nchips = 0;
-#if TEST_CONFIG_EXPAN // $$$
+        
+#if TEST_CONFIG_EXPAN
+        // for expansion board testing purposes, assume the common setup
+        // with one main board and one power board
         tlc5940.nchips = 4;
 #endif
 
-        // default TLC5940 pin assignments
+        // Default TLC5940 pin assignments.  Note that it's harmless to set
+        // these to valid pins even if no TLC5940 chips are actually present,
+        // since the main program won't allocate the connections if 'nchips'
+        // is zero.  This means that the pins are free to be used for other
+        // purposes (such as output ports) if not using TLC5940 chips.
         tlc5940.sin = PINNAME_TO_WIRE(PTC6);
         tlc5940.sclk = PINNAME_TO_WIRE(PTC5);
         tlc5940.xlat = PINNAME_TO_WIRE(PTC10);
@@ -217,11 +253,16 @@ struct Config
         
         // assume no 74HC595 chips
         hc595.nchips = 0;
-#if TEST_CONFIG_EXPAN // $$$
+
+#if TEST_CONFIG_EXPAN
+        // for expansion board testing purposes, assume one chime board
         hc595.nchips = 1;
 #endif
     
-        // default 74HC595 pin assignments
+        // Default 74HC595 pin assignments.  As with the TLC5940 pins, it's
+        // harmless to assign pins here even if no 74HC595 chips are used,
+        // since the main program won't actually allocate the pins if 'nchips'
+        // is zero.
         hc595.sin = PINNAME_TO_WIRE(PTA5);
         hc595.sclk = PINNAME_TO_WIRE(PTA4);
         hc595.latch = PINNAME_TO_WIRE(PTA12);
@@ -234,18 +275,24 @@ struct Config
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
             button[i].set(PINNAME_TO_WIRE(NC), BtnTypeNone, 0);
 
-#if TEST_CONFIG_EXPAN | TEST_CONFIG_CAB
+#if STANDARD_CONFIG | TEST_CONFIG_EXPAN
+        // For the standard configuration, assign 24 input ports to
+        // joystick buttons 1-24.  Assign the same GPIO pins used
+        // in the original v1 default configuration.  For expansion
+        // board testing purposes, also assign the input ports, with
+        // the noted differences.
         for (int i = 0 ; i < 24 ; ++i) {
-            static int bp[] = {
+            static const int bp[] = {
                 PINNAME_TO_WIRE(PTC2),  // 1
                 PINNAME_TO_WIRE(PTB3),  // 2
                 PINNAME_TO_WIRE(PTB2),  // 3
                 PINNAME_TO_WIRE(PTB1),  // 4
                 PINNAME_TO_WIRE(PTE30), // 5 
 #if TEST_CONFIG_EXPAN
-                PINNAME_TO_WIRE(PTC11), // 6 
-#elif TEST_CONFIG_CAB
-                PINNAME_TO_WIRE(PTE22), // 6 
+                PINNAME_TO_WIRE(PTC11), // 6 - expansion boards use PTC11 for this, since PTE22
+                                        //     is reserved for a plunger connection
+#elif STANDARD_CONFIG
+                PINNAME_TO_WIRE(PTE22), // 6 - original standalone setup uses PTE22
 #endif
                 PINNAME_TO_WIRE(PTE5),  // 7
                 PINNAME_TO_WIRE(PTE4),  // 8
@@ -268,35 +315,40 @@ struct Config
             };               
             button[i].set(bp[i], 
 #if TEST_CONFIG_EXPAN
-                BtnTypeKey, i+4);       // keyboard key A, B, C... 
-#elif TEST_CONFIG_CAB
-                BtnTypeJoystick, i+1);  // joystick button 0, 1, ...
+                // For expansion board testing only, assign the inputs
+                // to keyboard keys A, B, etc.  This isn't useful; it's
+                // just for testing purposes.  Note that the USB key code
+                // for "A" is 4, "B" is 5, and so on sequentially through 
+                // the alphabet.
+                BtnTypeKey, i+4);
+#elif STANDARD_CONFIG
+                // For the standard configuration, assign the input to
+                // joystick buttons 1-24, as in the original v1 default
+                // configuration.
+                BtnTypeJoystick, i+1);
 #endif
 
         }
 #endif
         
-#if 0
-        button[23].typ = BtnTypeJoystick;
-        button[23].val = 5;  // B
-        button[23].flags = 0x01;  // pulse button
-        
-        button[22].typ = BtnTypeModKey;
-        button[22].val = 0xE1;  // left shift
-        
-        button[21].typ = BtnTypeKey;
-        button[21].val = 0x81;  // vol down
-        
-        button[20].typ = BtnTypeKey;
-        button[20].val = 0x80;  // vol up
-        
-#endif
-        
-
-#if TEST_CONFIG_EXPAN // $$$
-        // CONFIGURE EXPANSION BOARD PORTS
+#if TEST_CONFIG_EXPAN
+        // For testing purposes, configure the basic complement of 
+        // expansion board ports.  AS MENTIONED ABOVE, THIS IS PURELY FOR
+        // TESTING.  DON'T USE THIS METHOD TO CONFIGURE YOUR EXPANSION 
+        // BOARDS FOR ACTUAL DEPLOYMENT.  It's much easier and cleaner
+        // to use the unmodified standard build, and customize your
+        // installation with the Pinscape Config Tool on Windows.
         //
-        // We have the following hardware attached:
+        // For this testing setup, we'll configure one main board, one
+        // power board, and one chime board.  The *physical* ports on
+        // the board are shown below.  The logical (LedWiz/DOF) numbering
+        // ISN'T sequential through the physical ports, because we want
+        // to arrange the DOF ports so that the most important and most
+        // common toys are assigned to ports 1-32.  Those ports are
+        // special because they're accessible to ALL software on the PC,
+        // including older LedWiz-only software such as Future Pinball.
+        // Ports above 32 are accessible only to modern DOF software,
+        // like Visual Pinball and PinballX.
         //
         //   Main board
         //     TLC ports 0-15  -> flashers
@@ -338,10 +390,19 @@ struct Config
         }
 #endif
 
-#if TEST_CONFIG_CAB
+#if STANDARD_CONFIG
+        //
+        // For the standard build, set up the original complement
+        // of 22 ports from the v1 default onfiguration.  
+        //
+        // IMPORTANT!  As mentioned above, don't edit this file to
+        // customize this for your machine.  Instead, use the unmodified
+        // standard build, and customize your installation using the
+        // Pinscape Config Tool on Windows.
+        //
 #if TEST_KEEP_PRINTF
-        outPort[ 0].set(PortTypeVirtual, PINNAME_TO_WIRE(NC));       // port 1  = NC to keep debug printf (PTA1 is UART)
-        outPort[ 1].set(PortTypeVirtual, PINNAME_TO_WIRE(NC));       // port 2  = NC to keep debug printf (PTA2 is UART)
+        outPort[ 0].set(PortTypeVirtual, PINNAME_TO_WIRE(NC));       // port 1  = NC to keep debug printf (PTA1 is SDA UART)
+        outPort[ 1].set(PortTypeVirtual, PINNAME_TO_WIRE(NC));       // port 2  = NC to keep debug printf (PTA2 is SDA UART)
 #else
         outPort[ 0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA1));     // port 1  = PTA1
         outPort[ 1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(PTA2));     // port 2  = PTA2
@@ -366,14 +427,6 @@ struct Config
         outPort[19].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC10));    // port 20 = PTC10
         outPort[20].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTC11));    // port 21 = PTC11
         outPort[21].set(PortTypeGPIODig, PINNAME_TO_WIRE(PTE0));     // port 22 = PTE0
-#endif
-
-#if 0
-        // configure the on-board RGB LED as outputs 1,2,3
-        outPort[0].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(LED1), PortFlagActiveLow);     // PTB18 = LED1 = Red LED
-        outPort[1].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(LED2), PortFlagActiveLow);     // PTB19 = LED2 = Green LED
-        outPort[2].set(PortTypeGPIOPWM, PINNAME_TO_WIRE(LED3), PortFlagActiveLow);     // PTD1  = LED3 = Blue LED
-        outPort[3].typ = PortTypeDisabled;
 #endif
     }        
     
@@ -488,6 +541,12 @@ struct Config
         {
             // has the plunger been calibrated?
             bool calibrated;
+            
+            // Feature enable mask:
+            //
+            //  0x01 = calibration button enabled
+            //  0x02 = indicator light enabled
+            uint8_t features;
         
             // calibration button switch pin
             uint8_t btn;
@@ -571,10 +630,10 @@ struct Config
     // --- Night Mode ---
     struct
     {
-        uint8_t btn;        // night mode button number (1..MAX_BUTTONS, 0=disabled)
+        uint8_t btn;        // night mode button number (1..MAX_BUTTONS, 0 = no button)
         uint8_t flags;      // flags:
                             //    0x01 = on/off switch (if not set, it's a momentary button)
-        uint8_t port;       // indicator output port number (1..MAX_OUT_PORTS, 0=disabled)
+        uint8_t port;       // indicator output port number (1..MAX_OUT_PORTS, 0 = no indicator)
     } nightMode;
     
 

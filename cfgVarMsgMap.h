@@ -73,8 +73,9 @@ void v_func(uint8_t *data)
         
     case 7:
         // Plunger calibration button and indicator light pin assignments
-        v_byte(plunger.cal.btn, 2);
-        v_byte(plunger.cal.led, 3);
+        v_byte(plunger.cal.features, 2);
+        v_byte(plunger.cal.btn, 3);
+        v_byte(plunger.cal.led, 4);
         break;
         
     case 8:

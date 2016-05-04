@@ -2521,8 +2521,10 @@ void TVTimerInt()
 // if any of the pins are configured as NC.
 void startTVTimer(Config &cfg)
 {
-    // only start the timer if the status sense circuit pins are configured
-    if (cfg.TVON.statusPin != 0xFF 
+    // only start the timer if the pins are configured and the delay
+    // time is nonzero
+    if (cfg.TVON.delayTime != 0
+        && cfg.TVON.statusPin != 0xFF 
         && cfg.TVON.latchPin != 0xFF 
         && cfg.TVON.relayPin != 0xFF)
     {
@@ -2623,6 +2625,17 @@ void saveConfigToFlash()
 
 // ---------------------------------------------------------------------------
 //
+// Pixel dump mode - the host requested a dump of image sensor pixels
+// (helpful for installing and setting up the sensor and light source)
+//
+bool reportPlungerStat = false;
+uint8_t reportPlungerStatFlags; // plunger pixel report flag bits (see ccdSensor.h)
+uint8_t reportPlungerStatTime;  // extra exposure time for plunger pixel report
+
+
+
+// ---------------------------------------------------------------------------
+//
 // Night mode setting updates
 //
 
@@ -2631,7 +2644,7 @@ static void setNightMode(bool on)
 {
     // set the new night mode flag in the noisy output class
     nightMode = on;
-
+    
     // update the special output pin that shows the night mode state
     int port = int(cfg.nightMode.port) - 1;
     if (port >= 0 && port < numOutputs)
@@ -2775,6 +2788,9 @@ public:
 
         // no history yet
         histIdx = 0;
+        
+        // initialize the filter
+        initFilter();
     }
 
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -3096,7 +3112,61 @@ public:
     }
     
     // Get the current value to report through the joystick interface
-    int16_t getPosition() const { return z; }
+    int16_t getPosition() 
+    { 
+        if (firing <= 1)
+        {
+            // figure the last average
+            int lastAvg = int(filterSum / filterN);
+            
+            // figure the direction of this sample relative to the average,
+            // and shift it in to our bit mask of recent direction data
+            if (z != lastAvg)
+            {
+                filterDir <<= 1;
+                if (z > lastAvg) filterDir |= 1;
+            }
+            filterDir &= 0xff;              // limit to 8 samples
+            
+            // if we've been moving consistently in one direction (all 1's
+            // or all 0's in the direction history vector), reset the average
+            if (filterDir == 0x00 || filterDir == 0xff) 
+            {
+                // motion away from the average - reset the average
+                filterDir = 0x5555;
+                filterN = 1;
+                filterSum = (lastAvg + z)/2;
+                return int16_t(filterSum);
+            }
+            else
+            {
+                // we're diretionless - return the new average, with the 
+                // new sample included
+                filterSum += z;
+                ++filterN;
+                return int16_t(filterSum / filterN);
+            }
+        }
+        else
+        {
+            // firing mode - skip the filter
+            filterN = 1;
+            filterSum = z;
+            filterDir = 0x5555;
+            return z;
+        }
+    }
+    
+    void initFilter()
+    {
+        filterSum = 0;
+        filterN = 1;
+        filterDir = 0x5555;
+    }
+    int64_t filterSum;
+    int64_t filterN;
+    uint16_t filterDir;
+    
     
     // Get the current velocity (joystick distance units per microsecond)
     float getVelocity() const { return vz; }
@@ -3517,25 +3587,6 @@ void accelRotate(int &x, int &y)
 
 // ---------------------------------------------------------------------------
 //
-// Device status.  We report this on each update so that the host config
-// tool can detect our current settings.  This is a bit mask consisting
-// of these bits:
-//    0x0001  -> plunger sensor enabled
-//    0x8000  -> RESERVED - must always be zero
-//
-// Note that the high bit (0x8000) must always be 0, since we use that
-// to distinguish special request reply packets.
-uint16_t statusFlags;
-    
-// Pixel dump mode - the host requested a dump of image sensor pixels
-// (helpful for installing and setting up the sensor and light source)
-bool reportPlungerStat = false;
-uint8_t reportPlungerStatFlags; // plunger pixel report flag bits (see ccdSensor.h)
-uint8_t reportPlungerStatTime;  // extra exposure time for plunger pixel report
-
-
-// ---------------------------------------------------------------------------
-//
 // Calibration button state:
 //  0 = not pushed
 //  1 = pushed, not yet debounced
@@ -3686,9 +3737,6 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
                 // set the configuration parameters from the message
                 cfg.psUnitNo = newUnitNo;
                 cfg.plunger.enabled = data[3] & 0x01;
-                
-                // update the status flags
-                statusFlags = (statusFlags & ~0x01) | (data[3] & 0x01);
                 
                 // save the configuration
                 saveConfigToFlash();
@@ -3968,14 +4016,19 @@ int main(void)
     Timer jsOKTimer;
     jsOKTimer.start();
     
-    // set the initial status flags
-    statusFlags = (cfg.plunger.enabled ? 0x01 : 0x00);
-
-    // initialize the calibration buttons, if present
-    DigitalIn *calBtn = (cfg.plunger.cal.btn == 0xFF ? 0 : 
-        new DigitalIn(wirePinName(cfg.plunger.cal.btn)));
-    DigitalOut *calBtnLed = (cfg.plunger.cal.led == 0xFF ? 0 :
-        new DigitalOut(wirePinName(cfg.plunger.cal.led)));
+    // Initialize the calibration button and lamp, if enabled.  To be enabled,
+    // the pin has to be assigned to something other than NC (0xFF), AND the
+    // corresponding feature enable flag has to be set.
+    DigitalIn *calBtn = 0;
+    DigitalOut *calBtnLed = 0;
+    
+    // calibration button input - feature flag 0x01
+    if ((cfg.plunger.cal.features & 0x01) && cfg.plunger.cal.btn != 0xFF)
+        calBtn = new DigitalIn(wirePinName(cfg.plunger.cal.btn));
+        
+    // calibration button indicator lamp output - feature flag 0x02
+    if ((cfg.plunger.cal.features & 0x02) && cfg.plunger.cal.led != 0xFF)
+        calBtnLed = new DigitalOut(wirePinName(cfg.plunger.cal.led));
 
     // initialize the calibration button 
     calBtnTimer.start();
@@ -4023,6 +4076,10 @@ int main(void)
         lwt.start();
         while (js.readLedWizMsg(lwm) && lwt.read_us() < 5000)
             handleInputMsg(lwm, js);
+            
+        // send TLC5940 data updates if applicable
+        if (tlc5940 != 0)
+            tlc5940->send();
        
         // check for plunger calibration
         if (calBtn != 0 && !calBtn->read())
@@ -4154,6 +4211,11 @@ int main(void)
         
         // flag:  did we successfully send a joystick report on this round?
         bool jsOK = false;
+        
+        // figure the current status flags for joystick reports
+        uint16_t statusFlags =
+            (cfg.plunger.enabled ? 0x01 : 0x00)
+            | (nightMode ? 0x02 : 0x00);
 
         // If it's been long enough since our last USB status report, send
         // the new report.  VP only polls for input in 10ms intervals, so
@@ -4207,9 +4269,9 @@ int main(void)
         
         // If joystick reports are turned off, send a generic status report
         // periodically for the sake of the Windows config tool.
-        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 200000)
+        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 5000)
         {
-            jsOK = js.updateStatus(0);
+            jsOK = js.updateStatus(statusFlags);
             jsReportTimer.reset();
         }
 
@@ -4231,7 +4293,7 @@ int main(void)
         {
             // give it a moment to stabilize
             connectChangeTimer.start();
-            if (connectChangeTimer.read_us() > 100000)
+            if (connectChangeTimer.read_us() > 1000000)
             {
                 // note the new status
                 connected = newConnected;
@@ -4301,6 +4363,10 @@ int main(void)
                 // try to recover the connection
                 js.recoverConnection();
                 
+                // send TLC5940 data if necessary
+                if (tlc5940 != 0)
+                    tlc5940->send();
+                
                 // show a diagnostic flash every couple of seconds
                 if (diagTimer.read_us() > 2000000)
                 {
@@ -4327,25 +4393,19 @@ int main(void)
             // Enable peripheral chips and update them with current output data
             if (tlc5940 != 0)
             {
-                tlc5940->update(true);
                 tlc5940->enable(true);
+                tlc5940->update(true);
             }
             if (hc595 != 0)
             {
-                hc595->update(true);
                 hc595->enable(true);
+                hc595->update(true);
             }
         }
 
         // provide a visual status indication on the on-board LED
         if (calBtnState < 2 && hbTimer.read_us() > 1000000) 
         {
-            static int spiTimeUpdate = 0; // $$$
-            if (spiTimeUpdate++ > 10 && tlc5940 != 0) {
-                spiTimeUpdate = 0;
-                printf("Average SPI time: %lf us\r\n", double(tlc5940->spi_total_time) / tlc5940->spi_runs);
-            }
-            
             if (jsOKTimer.read_us() > 1000000)
             {
                 // USB freeze - show red/yellow.

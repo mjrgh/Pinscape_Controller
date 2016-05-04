@@ -18,7 +18,9 @@
 // plug-and-play installation experience on Windows.  Our joystick report
 // looks like this (see USBJoystick.cpp for the formal HID report descriptor):
 //
-//    ss     status bits:  0x01 -> plunger enabled
+//    ss     status bits:  
+//              0x01 -> plunger enabled
+//              0x02 -> night mode engaged
 //    00     2nd byte of status (reserved)
 //    00     3rd byte of status (reserved)
 //    00     always zero for joystick reports
@@ -377,8 +379,8 @@
 //                     if the value wasn't patched at install time.
 //
 //        8 -> Engage/disengage night mode.  The third byte of the message is 1 to
-//             engage night mode, 0 to disengage night mode.  (This mode isn't stored
-//             persistently; night mode is disengaged after a reset or power cycle.)
+//             engage night mode, 0 to disengage night mode.  The current mode isn't 
+//             stored persistently; night mode is always off after a reset.
 //
 //        9 -> Query configuration variable.  The second byte is the config variable
 //             number (see the CONFIGURATION VARIABLES section below).  For the array
@@ -446,6 +448,8 @@
 // Message type 66 (see above) sets one configuration variable.  The second byte
 // of the message is the variable ID, and the rest of the bytes give the new
 // value, in a variable-specific format.  16-bit values are little endian.
+// Any bytes at the end of the message not otherwise specified are reserved
+// for future use and should always be set to 0 in the message data.
 //
 // 0  -> QUERY ONLY: Describe the configuration variables.  The device
 //       sends a config variable query report with the following fields:
@@ -493,72 +497,103 @@
 //
 //         byte 3 -> unit number, from 1 to 16
 //
-// 3  -> Enable/disable joystick reports.  Byte 2 is 1 to enable, 0 to
-//       disable.  When disabled, the device registers as a generic HID 
-/        device, and only sends the private report types used by the
-//       Windows config tool.
+// 3  -> Enable/disable joystick reports.  
 //
-// 4  -> Accelerometer orientation.  Byte 3 is the new setting:
-//        
-//        0 = ports at front (USB ports pointing towards front of cabinet)
-//        1 = ports at left
-//        2 = ports at right
-//        3 = ports at rear
+//         byte 2 -> 1 to enable, 0 to disable
 //
-// 5  -> Plunger sensor type.  Byte 3 is the type ID:
+//       When joystick reports are disabled, the device registers as a generic HID 
+//       device, and only sends the private report types used by the Windows config 
+//       tool.  It won't appear to Windows as a USB game controller or joystick.
 //
-//         0 = none (disabled)
-//         1 = TSL1410R linear image sensor, 1280x1 pixels, serial mode
-//        *2 = TSL1410R, parallel mode
-//         3 = TSL1412R linear image sensor, 1536x1 pixels, serial mode
-//        *4 = TSL1412R, parallel mode
-//         5 = Potentiometer with linear taper, or any other device that
-//             represents the position reading with a single analog voltage
-//        *6 = AEDR8300 optical quadrature sensor, 75lpi
-//        *7 = AS5304 magnetic quadrature sensor, 160 steps per 2mm
+//       Note that this doesn't affect whether the device also registers a keyboard
+//       interface.  A keyboard interface will appear if and only if any buttons
+//       (including virtual buttons, such as the ZB Launch Ball feature) are assigned 
+//       to generate keyboard key input.
 //
-//       * The sensor types marked with asterisks (*) are planned but not 
-//       currently implemented.  Selecting these types will effectively
-//       disable the plunger.
+// 4  -> Accelerometer orientation.
 //
-// 6  -> Plunger pin assignments.  Bytes 3-6 give the pin assignments for
-//       pins 1, 2, 3, and 4.  These use the Pin Number Mappings listed
-//       below.  The meaning of each pin depends on the plunger type:
+//        byte 3 -> orientation:
+//           0 = ports at front (USB ports pointing towards front of cabinet)
+//           1 = ports at left
+//           2 = ports at right
+//           3 = ports at rear
 //
-//         TSL1410R/1412R, serial:    SI (DigitalOut), CLK (DigitalOut), AO (AnalogIn),  NC
-//         TSL1410R/1412R, parallel:  SI (DigitalOut), CLK (DigitalOut), AO1 (AnalogIn), AO2 (AnalogIn)
-//         Potentiometer:             AO (AnalogIn),   NC,               NC,             NC
-//         AEDR8300:                  A (InterruptIn), B (InterruptIn),  NC,             NC
-//         AS5304:                    A (InterruptIn), B (InterruptIn),  NC,             NC
+// 5  -> Plunger sensor type.
 //
-// 7  -> Plunger calibration button pin assignments.  Byte 3 is the DigitalIn
-//       pin for the button switch; byte 4 is the DigitalOut pin for the indicator
-//       lamp.  Either can be set to NC to disable the function.  (Use the Pin
-//       Number Mappins listed below for both bytes.)
+//        byte 3 -> plunger type:
+//           0 = none (disabled)
+//           1 = TSL1410R linear image sensor, 1280x1 pixels, serial mode
+//          *2 = TSL1410R, parallel mode
+//           3 = TSL1412R linear image sensor, 1536x1 pixels, serial mode
+//          *4 = TSL1412R, parallel mode
+//           5 = Potentiometer with linear taper, or any other device that
+//               represents the position reading with a single analog voltage
+//          *6 = AEDR8300 optical quadrature sensor, 75lpi
+//          *7 = AS5304 magnetic quadrature sensor, 160 steps per 2mm
 //
-// 8  -> ZB Launch Ball setup.  This configures the ZB Launch Ball feature.  Byte
-//       3 is the LedWiz port number (1-255) mapped to the "ZB Launch Ball" output
-//       in DOF.  Set the port to 0 to disable the feature.   Byte 4 is the key type
-//       and byte 5 is the key code for the key to send to the PC when a launch is
-//       triggered.  These have the same meanings as for a regular key mapping.  For
-//       example, set type=2 and code=0x28 for the keyboard Enter key.  Bytes 6-7
-//       give the "push distance" for activating the button by pushing forward on
-//       the plunger knob, in 1/1000 inch increments (e.g., 63 represents 0.063", 
-//       or about 1/16", which is the recommended setting).
+//       * The sensor types marked with asterisks (*) are reserved for types
+//       that aren't currently implemented but could be added in the future.  
+//       Selecting these types will effectively disable the plunger.  
+//
+// 6  -> Plunger pin assignments.
+//
+//         byte 3 -> pin assignment 1
+//         byte 4 -> pin assignment 2
+//         byte 5 -> pin assignment 3
+//         byte 6 -> pin assignment 4
+//
+//       All of the pins use the standard GPIO port format (see "GPIO pin number
+//       mappings" below).  The actual use of the four pins depends on the plunger
+//       type, as shown below.  "NC" means that the pin isn't used at all for the
+//       corresponding plunger type.
+//
+//         Plunger Type              Pin 1            Pin 2             Pin 3           Pin 4
+//
+//         TSL1410R/1412R, serial    SI (DigitalOut)  CLK (DigitalOut)  AO (AnalogIn)   NC
+//         TSL1410R/1412R, parallel  SI (DigitalOut)  CLK (DigitalOut)  AO1 (AnalogIn)  AO2 (AnalogIn)
+//         Potentiometer             AO (AnalogIn)    NC                NC              NC
+//         AEDR8300                  A (InterruptIn)  B (InterruptIn)   NC              NC
+//         AS5304                    A (InterruptIn)  B (InterruptIn)   NC              NC
+//
+// 7  -> Plunger calibration button pin assignments.
+//
+//         byte 3 -> features enabled/disabled: bit mask consisting of:
+//                   0x01  button input is enabled
+//                   0x02  lamp output is enabled
+//         byte 4 -> DigitalIn pin for the button switch
+//         byte 5 -> DigitalOut pin for the indicator lamp
+//
+//       Note that setting a pin to NC (Not Connected) will disable it even if the
+//       corresponding feature enable bit (in byte 3) is set.
+//
+// 8  -> ZB Launch Ball setup.  This configures the ZB Launch Ball feature.
+//
+//         byte 3    -> LedWiz port number (1-255) mapped to "ZB Launch Ball" in DOF
+//         byte 4    -> key type
+//         byte 5    -> key code
+//         bytes 6:7 -> "push" distance, in 1/1000 inch increments (16 bit little endian)
+//
+//       Set the port number to 0 to disable the feature.  The key type and key code
+//       fields use the same conventions as for a button mapping (see below).  The
+//       recommended push distance is 63, which represents .063" ~ 1/16".
 //
 // 9  -> TV ON relay setup.  This requires external circuitry implemented on the
 //       Expansion Board (or an equivalent circuit as described in the Build Guide).
-//       Byte 3 is the GPIO DigitalIn pin for the "power status" input, using the 
-//       Pin Number Mappings below.  Byte 4 is the DigitalOut pin for the "latch"
-//       output.  Byte 5 is the DigitalOut pin for the relay trigger.  Bytes 6-7
-//       give the delay time in 10ms increments as an unsigned 16-bit value (e.g.,
-//       550 represents 5.5 seconds).  
+//
+//         byte 3    -> "power status" input pin (DigitalIn)
+//         byte 4    -> "latch" output (DigitalOut)
+//         byte 5    -> relay trigger output (DigitalOut)
+//         bytes 6:7 -> delay time in 10ms increments (16 bit little endian);
+//                      e.g., 550 (0x26 0x02) represents 5.5 seconds
+//
+//       Set the delay time to 0 to disable the feature.  The pin assignments will
+//       be ignored if the feature is disabled.
 //
 // 10 -> TLC5940NT setup.  This chip is an external PWM controller, with 32 outputs
 //       per chip and a serial data interface that allows the chips to be daisy-
 //       chained.  We can use these chips to add an arbitrary number of PWM output 
-//       ports for the LedWiz emulation.  Set the number of chips to 0 to disable
-//       the feature.  The bytes of the message are:
+//       ports for the LedWiz emulation.
+//
 //          byte 3 = number of chips attached (connected in daisy chain)
 //          byte 4 = SIN pin - Serial data (must connect to SPIO MOSI -> PTC6 or PTD2)
 //          byte 5 = SCLK pin - Serial clock (must connect to SPIO SCLK -> PTC5 or PTD1)
@@ -566,17 +601,23 @@
 //          byte 7 = BLANK pin - BLANK signal (any GPIO pin)
 //          byte 8 = GSCLK pin - Grayscale clock signal (must be a PWM-out capable pin)
 //
+//       Set the number of chips to 0 to disable the feature.  The pin assignments are 
+//       ignored if the feature is disabled.
+//
 // 11 -> 74HC595 setup.  This chip is an external shift register, with 8 outputs per
 //       chip and a serial data interface that allows daisy-chaining.  We use this
 //       chips to add extra digital outputs for the LedWiz emulation.  In particular,
 //       the Chime Board (part of the Expansion Board suite) uses these to add timer-
-//       protected outputs for coil devices (knockers, chimes, bells, etc).  Set the
-//       number of chips to 0 to disable the feature.  The message bytes are:
+//       protected outputs for coil devices (knockers, chimes, bells, etc).
+//
 //          byte 3 = number of chips attached (connected in daisy chain)
 //          byte 4 = SIN pin - Serial data (any GPIO pin)
 //          byte 5 = SCLK pin - Serial clock (any GPIO pin)
 //          byte 6 = LATCH pin - LATCH signal (any GPIO pin)
 //          byte 7 = ENA pin - ENABLE signal (any GPIO pin)
+//
+//       Set the number of chips to 0 to disable the feature.  The pin assignments are
+//       ignored if the feature is disabled.
 //
 // 12 -> Disconnect reboot timeout.  The reboot timeout allows the controller software
 //       to automatically reboot the KL25Z after it detects that the USB connection is
@@ -584,8 +625,10 @@
 //       connection is lost.  The reboot timeout is a workaround for these cases.  When
 //       the software detects that the connection is no longer active, it will reboot
 //       the KL25Z automatically if a new connection isn't established within the
-//       timeout period.  Bytes 3 give the new reboot timeout in seconds.  Setting this
-//       to 0 disables the reboot timeout.
+//       timeout period.  Set the timeout to 0 to disable the feature (i.e., the device
+//       will never automatically reboot itself on a broken connection).
+//
+//          byte 3 -> reboot timeout in seconds; 0 = disabled
 //
 // 13 -> Plunger calibration.  In most cases, the calibration is set internally by the
 //       device by running the calibration procedure.  However, it's sometimes useful
@@ -616,24 +659,31 @@
 //                  for the board changes.  It only changes when a revision is made
 //                  that affects the software, such as a GPIO pin assignment.
 //
-//         The remaining bytes depend on the board set type.  Currently, only
-//         the Pinscape expansion boards are supported; for those, the bytes are
-//         used to store these values:
+//                  For Pinscape expansion boards (board set type = 1):
+//                    0 = first release (Feb 2016)
 //
-//         byte 5 = number of main interface boards
-//         byte 6 = number of MOSFET power boards
-//         byte 7 = number of chime boards
+//         bytes 5:8 = additional hardware-specific data.  These slots are used
+//                  to store extra data specific to the expansion boards selected.
+//
+//                  For Pinscape expansion boards (board set type = 1):
+//                    byte 5 = number of main interface boards
+//                    byte 6 = number of MOSFET power boards
+//                    byte 7 = number of chime boards
 //
 // 15 -> Night mode setup.  
 //
 //       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none.  This selects
 //                a physically wired button that can be used to control night mode.
 //                The button can also be used as normal for PC input if desired.
+//                Note that night mode can still be activated via a USB command
+//                even if no button is assigned.
+//
 //       byte 4 = flags:
 //                0x01 -> the wired input is an on/off switch; night mode will be
 //                        active when the input is switched on.  If this bit isn't
 //                        set, the input is a momentary button; pushing the button
 //                        toggles night mode.
+//
 //       byte 5 = indicator output number - 1..MAX_OUT_PORTS, or 0 for none.  This
 //                selects an output port that will be turned on when night mode is
 //                activated.  Night mode activation overrides any setting made by
@@ -714,7 +764,7 @@
 //
 
 
-// --- PIN NUMBER MAPPINGS ---
+// --- GPIO PIN NUMBER MAPPINGS ---
 //
 // In USB messages that specify GPIO pin assignments, pins are identified by
 // 8-bit integers.  The special value 0xFF means NC (not connected).  All actual

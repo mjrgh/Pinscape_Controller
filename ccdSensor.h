@@ -10,6 +10,36 @@
 
 #include "plunger.h"
 
+// Scan method selection:
+//
+//  1 = Meet in the middle.  We start two scans concurrently, one from 
+//      the dark end of the sensor and one from the bright end.  For
+//      the scan from the dark end, we stop when we reach a pixel that's
+//      brighter than the average dark level by 2/3 of the gap between 
+//      the dark and bright levels.  For the scan from the bright end,
+//      we stop when we reach a pixel that's darker by 2/3 of the gap.
+//      Each time we stop, we look to see if the other scan has reached
+//      the same place.  If so, the two scans converged on a common
+//      point, which we take to be the edge between the dark and bright
+//      sections.  If the two scans haven't converged yet, we switch to
+//      the other scan and continue it.  We repeat this process until
+//      the two converge.  The benefit of this approach vs the older
+//      one-way scan is that it's much more tolerant of noise, and the
+//      degree of noise tolerance is dictated by how noisy the signal
+//      actually is.  The dynamic degree of tolerance is good because
+//      higher noise tolerance tends to result in reduced resolution.
+//
+//  0 = One-way scan.  We simply start at the brighter end and scan
+//      until we find a pixel darker than a threshold level (halfway
+//      between the respective brightness levels at the bright and 
+//      dark ends of the sensor).  The original algorithm simply
+//      stopped there.  This version is slightly improved: it scans
+//      for a few more pixels to make sure that the majority of the
+//      adjacent pixels are also in shadow, to help reject false
+//      edges from sensor noise or optical shadows that make one 
+//      pixel read darker than it should.
+//
+#define SCAN_METHOD 1
 
 // PlungerSensor interface implementation for the CCD
 class PlungerSensorCCD: public PlungerSensor
@@ -24,9 +54,6 @@ public:
         // set the midpoint history arbitrarily to the absolute halfway point
         memset(midpt, 127, sizeof(midpt));
         midptIdx = 0;
-        
-        // no history readings yet
-        histIdx = 0;
     }
     
     // initialize
@@ -55,9 +82,6 @@ public:
         int pixpos;
         if (process(pix, n, pixpos))
         {            
-            // run the position through the anti-jitter filter
-            filter(pixpos);
-
             // Normalize to the 16-bit range.  Our reading from the 
             // sensor is a pixel position, 0..n-1.  To rescale to the
             // normalized range, figure pixpos*65535/(n-1).
@@ -165,8 +189,8 @@ public:
         int delta6 = abs(a-b)/6;
         int crossoverHi = mid + delta6;
         int crossoverLo = mid - delta6;
-            
-#if 1 // $$$
+           
+#if SCAN_METHOD == 1
         // Scan inward from the each end, looking for edges.  Each time we
         // find an edge from one direction, we'll see if the scan from the
         // other direction agrees.  If it does, we have a winner.  If they
@@ -235,7 +259,8 @@ public:
             }
         }
         
-#else // $$$    
+#else // SCAN_METHOD == 0
+
         // Old method - single-sided scan with a little local noise suppression.
         // Scan from the bright side looking, for a pixel that drops below the
         // midpoint brightess.  To reduce false positives from noise, check to
@@ -275,62 +300,8 @@ public:
         
         // no edge found
         return false;
-#endif
-    }
-    
-    // Filter a result through the jitter reducer.  We tend to have some
-    // very slight jitter - by a pixel or two - even when the plunger is
-    // stationary.  This happens due to analog noise.  In the theoretical
-    // ideal, analog noise wouldn't be a factor for this sensor design,
-    // in that we'd have enough contrast between the bright and dark
-    // regions that there'd be no ambiguity as to where the shadow edge
-    // falls.  But in the real system, the shadow edge isn't perfectly
-    // sharp on the scale of our pixels, so the edge isn't an ideal
-    // digital 0-1 discontinuity but rather a ramp of gray levels over
-    // a few pixels.  Our edge detector picks the pixel where we cross
-    // the midpoint brightness threshold.  The exact midpoint can vary
-    // a little from frame to frame due to exposure length variations,
-    // light source variations, other stray light sources in the cabinet, 
-    // ADC error, sensor pixel noise, and electrical noise.  As the 
-    // midpoint varies, the pixel that qualifies as the edge position 
-    // can move by a pixel or two from one from to the next, even 
-    // though the physical shadow isn't moving.  This all adds up to
-    // some slight jitter in the final position reading.
-    //
-    // To reduce the jitter, we keep a short history of recent readings.
-    // When we see a new reading that's close to the whole string of
-    // recent readings, we peg the new reading to the consensus of the
-    // recent history.  This smooths out these small variations without
-    // affecting response time or resolution.
-    void filter(int &pos)
-    {        
-        // check to see if it's close to all of the history elements
-        const int dpos = 2;
-        long sum = 0;
-        for (int i = 0 ; i < countof(hist) ; ++i)
-        {
-            int ipos = hist[i];
-            sum += ipos;
-            if (pos > ipos + dpos || pos < ipos - dpos)
-            {
-                // not close enough - add the new position to the
-                // history and use it as-is
-                hist[histIdx++] = pos;
-                histIdx %= countof(hist);
-                return;
-            }
-        }
-        
-        // We're close to all recent readings, so use the average
-        // of the recent readings.  Don't add the new reading to the
-        // the history in this case.  If the edge is about halfway
-        // between two pixels, the history will be about 50/50 on
-        // an ongoing basis, so if just kept adding samples we'd
-        // still jitter (just at a slightly reduced rate).  By
-        // stalling the history when it looks like we're stationary,
-        // we'll just pick one of the pixels and stay there as long
-        // as the plunger stays where it is.
-        pos = sum/countof(hist);
+
+#endif // SCAN_METHOD
     }
     
     // Send a status report to the joystick interface.
@@ -382,9 +353,7 @@ public:
 
         // process the pixels and read the position
         int pos;
-        if (process(pix, n, pos))
-            filter(pos);
-        else
+        if (!process(pix, n, pos))
             pos = 0xFFFF;
         
         // note the processing time
@@ -464,11 +433,6 @@ protected:
     // is running.
     int dir;
 
-    // History of recent position readings.  We keep a short history of
-    // readings so that we can apply some filtering to the data.
-    uint16_t hist[8];
-    int histIdx;    
-    
     // History of midpoint brightness levels for the last few successful
     // scans.  This is a circular buffer that we write on each scan where
     // we successfully detect a shadow edge.  (It's circular, so we
