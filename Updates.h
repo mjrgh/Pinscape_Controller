@@ -14,20 +14,19 @@
 // trouble to a lot of people.  The goal of the new approach is that everyone can
 // use the same standard binary build, and set options from the Windows tool.
 //
-// TSL1410R and 1412R parallel mode support:  these sensors are physically built
-// out of two separate pixel arrays, which can be read independently.  Past
-// versions only supported "serial" mode pixel transfer, where we read all of 
-// the first array's pixels before reading any of the second array's pixels.
-// In parallel mode, we can read pixels from both arrays at the same time.  The
-// limiting factor in image read speed is the amount of time it takes for the
-// ADC to transfer charge from a pixel and stabilize on a reading.  The KL25Z
-// has multiple ADC hardware channels, so we can read multiple analog values
-// concurrently - it takes the same amount of time for one ADC reading to
-// stabilize as two readings.  So by reading from the two sensor sections 
-// concurrently, we can essentially double the transfer speed.  Faster pixel
-// transfer allows for more accurate motion tracking when the plunger is
-// moving at high speed, allowing for more realistic plunger action on the
-// virtual side.
+// TSL1410R and 1412R high-speed scanning: the software now takes advantage
+// of the KL25Z's fastest hardware features to scan the optical sensors at much
+// higher speed than in the past.  The software can now read these sensors at
+// full resolution in about 2.5ms, which means a frame rate of about 400 frames
+// per second.  That's fast enough that we can capture images of the plunger
+// moving at full release speed without any significant motion blur, and fast
+// enough to capture the position throughout a release motion without any
+// aliasing from the bounce-back at the end of the travel.  In past versions,
+// the frame rate wasn't high enough to avoid either blur or aliasing, so it
+// was necessary to use heuristics to guess when a release was happening.  The
+// heuristics worked pretty well, but at the cost of some slight lag while we
+// waited to see what was happening.  The new higher rate allows for essentially
+// zero lag, as well as more precise position sensing.
 //
 // Keyboard mappings for buttons: button inputs can now be mapped to keyboard
 // keys.  Joystick buttons are of course also still supported.  Some software on
