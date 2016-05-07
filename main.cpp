@@ -1651,7 +1651,7 @@ void processButtons(Config &cfg)
                     // that the list isn't full.  If neither of these apply, add the key.
                     if (nkeys < 7)
                     {
-                        bool found;
+                        bool found = false;
                         for (int j = 0 ; j < nkeys ; ++j)
                         {
                             if (keys[j] == val)
