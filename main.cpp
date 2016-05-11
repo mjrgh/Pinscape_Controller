@@ -3108,66 +3108,19 @@ public:
             // add the new reading to the history
             hist[histIdx++] = r;
             histIdx %= countof(hist);
+            
+            // figure the filtered value
+            zf = applyFilter();
         }
     }
     
     // Get the current value to report through the joystick interface
-    int16_t getPosition() 
-    { 
-        if (firing <= 1)
-        {
-            // figure the last average
-            int lastAvg = int(filterSum / filterN);
-            
-            // figure the direction of this sample relative to the average,
-            // and shift it in to our bit mask of recent direction data
-            if (z != lastAvg)
-            {
-                filterDir <<= 1;
-                if (z > lastAvg) filterDir |= 1;
-            }
-            filterDir &= 0xff;              // limit to 8 samples
-            
-            // if we've been moving consistently in one direction (all 1's
-            // or all 0's in the direction history vector), reset the average
-            if (filterDir == 0x00 || filterDir == 0xff) 
-            {
-                // motion away from the average - reset the average
-                filterDir = 0x5555;
-                filterN = 1;
-                filterSum = (lastAvg + z)/2;
-                return int16_t(filterSum);
-            }
-            else
-            {
-                // we're diretionless - return the new average, with the 
-                // new sample included
-                filterSum += z;
-                ++filterN;
-                return int16_t(filterSum / filterN);
-            }
-        }
-        else
-        {
-            // firing mode - skip the filter
-            filterN = 1;
-            filterSum = z;
-            filterDir = 0x5555;
-            return z;
-        }
-    }
-    
-    void initFilter()
+    int16_t getPosition()
     {
-        filterSum = 0;
-        filterN = 1;
-        filterDir = 0x5555;
+        // return the last filtered reading
+        return zf;
     }
-    int64_t filterSum;
-    int64_t filterN;
-    uint16_t filterDir;
-    
-    
+        
     // Get the current velocity (joystick distance units per microsecond)
     float getVelocity() const { return vz; }
     
@@ -3233,6 +3186,72 @@ public:
 
 private:
 
+    // Figure the next filtered value.  This applies the hysteresis
+    // filter to the last raw z value and returns the filtered result.
+    int applyFilter()
+    { 
+        if (firing <= 1)
+        {
+            // Filter limit - 5 samples.  Once we've been moving
+            // in the same direction for this many samples, we'll
+            // clear the history and start over.
+            const int filterMask = 0x1f;
+            
+            // figure the last average
+            int lastAvg = int(filterSum / filterN);
+            
+            // figure the direction of this sample relative to the average,
+            // and shift it in to our bit mask of recent direction data
+            if (z != lastAvg)
+            {
+                // shift the new direction bit into the vector
+                filterDir <<= 1;
+                if (z > lastAvg) filterDir |= 1;
+            }
+            
+            // keep only the last N readings, up to the filter limit
+            filterDir &= filterMask;
+            
+            // if we've been moving consistently in one direction (all 1's
+            // or all 0's in the direction history vector), reset the average
+            if (filterDir == 0x00 || filterDir == filterMask) 
+            {
+                // motion away from the average - reset the average
+                filterDir = 0x5555;
+                filterN = 1;
+                filterSum = (lastAvg + z)/2;
+                return int16_t(filterSum);
+            }
+            else
+            {
+                // we're diretionless - return the new average, with the 
+                // new sample included
+                filterSum += z;
+                ++filterN;
+                return int16_t(filterSum / filterN);
+            }
+        }
+        else
+        {
+            // firing mode - skip the filter
+            filterN = 1;
+            filterSum = z;
+            filterDir = 0x5555;
+            return z;
+        }
+    }
+    
+    void initFilter()
+    {
+        filterSum = 0;
+        filterN = 1;
+        filterDir = 0x5555;
+    }
+    int64_t filterSum;
+    int64_t filterN;
+    uint16_t filterDir;
+    
+    
     // Calibration state.  During calibration mode, we watch for release
     // events, to measure the time it takes to complete the release
     // motion; and we watch for the plunger to come to reset after a
@@ -3362,12 +3381,15 @@ private:
     // freely.
     PlungerReading f3r;
     
-    // next Z value to report to the joystick interface (in joystick 
-    // distance units)
+    // next raw (unfiltered) Z value to report to the joystick interface 
+    // (in joystick distance units)
     int z;
     
     // velocity of this reading (joystick distance units per microsecond)
     float vz;
+
+    // next filtered Z value to report to the joystick interface
+    int zf;    
 };
 
 // plunger reader singleton
