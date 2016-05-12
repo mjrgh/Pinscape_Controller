@@ -248,8 +248,12 @@ struct Config
         tlc5940.sin = PINNAME_TO_WIRE(PTC6);
         tlc5940.sclk = PINNAME_TO_WIRE(PTC5);
         tlc5940.xlat = PINNAME_TO_WIRE(PTC10);
-        tlc5940.blank = PINNAME_TO_WIRE(PTC7);
+        tlc5940.blank = PINNAME_TO_WIRE(PTC7);        
+#if TEST_KEEP_PRINTF
+        tlc5940.gsclk = PINNAME_TO_WIRE(PTA13);     // PTA1 is reserved for SDA printf()
+#else
         tlc5940.gsclk = PINNAME_TO_WIRE(PTA1);
+#endif
         
         // assume no 74HC595 chips
         hc595.nchips = 0;
@@ -380,11 +384,11 @@ struct Config
             // 50-65 = flipper RGB (TLC ports 16-31)
             for (int i = 0 ; i < 16 ; ++i)
                 outPort[n++].set(PortTypeTLC5940, i+16, PortFlagGamma);
-            
+                
             // 66-73 = chime board ports 1-8 (74HC595 ports 0-7)
             for (int i = 0 ; i < 8 ; ++i)
                 outPort[n++].set(PortType74HC595, i);
-            
+                
             // set Disabled to signify end of configured outputs
             outPort[n].typ = PortTypeDisabled;
         }

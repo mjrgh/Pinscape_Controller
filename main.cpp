@@ -276,30 +276,124 @@ const char *getBuildID()
 
 // --------------------------------------------------------------------------
 //
-// Custom memory allocator.  We use our own version of malloc() to provide
-// diagnostics if we run out of heap.
+// Custom memory allocator.  We use our own version of malloc() for more
+// efficient memory usage, and to provide diagnostics if we run out of heap.
 //
+// We can implement a more efficient malloc than the library can because we
+// can make an assumption that the library can't: allocations are permanent.
+// The normal malloc has to assume that allocations can be freed, so it has
+// to track blocks individually.  For the purposes of this program, though,
+// we don't have to do this because virtually all of our allocations are 
+// de facto permanent.  We only allocate dyanmic memory during setup, and 
+// once we set things up, we never delete anything.  This means that we can 
+// allocate memory in bare blocks without any bookkeeping overhead.
+//
+// In addition, we can make a much larger overall pool of memory available
+// in a custom allocator.  The mbed library malloc() seems to have a pool
+// of about 3K to work with, even though there's really about 9K of RAM
+// left over after counting the static writable data and reserving space
+// for a reasonable stack.  I haven't looked at the mbed malloc to see why 
+// they're so stingy, but it appears from empirical testing that we can 
+// create a static array up to about 9K before things get crashy.
+
 void *xmalloc(size_t siz)
 {
-    // allocate through the normal library malloc; if that succeeds,
-    // simply return the pointer we got from malloc
-    void *ptr = malloc(siz);
-    if (ptr != 0)
-        return ptr;
-
-    // failed - display diagnostics
-    for (;;)
+    // Dynamic memory pool.  We'll reserve space for all dynamic 
+    // allocations by creating a simple C array of bytes.  The size
+    // of this array is the maximum number of bytes we can allocate
+    // with malloc or operator 'new'.
+    //
+    // The maximum safe size for this array is, in essence, the
+    // amount of physical KL25Z RAM left over after accounting for
+    // static data throughout the rest of the program, the run-time
+    // stack, and any other space reserved for compiler or MCU
+    // overhead.  Unfortunately, it's not straightforward to
+    // determine this analytically.  The big complication is that
+    // the minimum stack size isn't easily predictable, as the stack
+    // grows according to what the program does.  In addition, the
+    // mbed platform tools don't give us detailed data on the
+    // compiler/linker memory map.  All we get is a generic total
+    // RAM requirement, which doesn't necessarily account for all
+    // overhead (e.g., gaps inserted to get proper alignment for
+    // particular memory blocks).  
+    //
+    // A very rough estimate: the total RAM size reported by the 
+    // linker is about 3.5K (currently - that can obviously change 
+    // as the project evolves) out of 16K total.  Assuming about a 
+    // 3K stack, that leaves in the ballpark of 10K.  Empirically,
+    // that seems pretty close.  In testing, we start to see some
+    // instability at 10K, while 9K seems safe.  To be conservative,
+    // we'll reduce this to 8K.
+    //
+    // Our measured total usage in the base configuration (22 GPIO
+    // output ports, TSL1410R plunger sensor) is about 4000 bytes.
+    // A pretty fully decked-out configuration (121 output ports,
+    // with 8 TLC5940 chips and 3 74HC595 chips, plus the TSL1412R
+    // sensor with the higher pixel count, and all expansion board
+    // features enabled) comes to about 6700 bytes.  That leaves
+    // us with about 1.5K free out of our 8K, so we still have a 
+    // little more headroom for future expansion.
+    //
+    // For comparison, the standard mbed malloc() runs out of
+    // memory at about 6K.  That's what led to this custom malloc:
+    // we can just fit the base configuration into that 4K, but
+    // it's not enough space for more complex setups.  There's
+    // still a little room for squeezing out unnecessary space
+    // from the mbed library code, but at this point I'd prefer
+    // to treat that as a last resort, since it would mean having
+    // to fork private copies of the libraries.
+    static char pool[8*1024];
+    static char *nxt = pool;
+    static size_t rem = sizeof(pool);
+    
+    // align to a 4-byte increment
+    siz = (siz + 3) & ~3;
+    
+    // If insufficient memory is available, halt and show a fast red/purple 
+    // diagnostic flash.  We don't want to return, since we assume throughout
+    // the program that all memory allocations must succeed.  Note that this
+    // is generally considered bad programming practice in applications on
+    // "real" computers, but for the purposes of this microcontroller app,
+    // there's no point in checking for failed allocations individually
+    // because there's no way to recover from them.  It's better in this 
+    // context to handle failed allocations as fatal errors centrally.  We
+    // can't recover from these automatically, so we have to resort to user
+    // intervention, which we signal with the diagnostic LED flashes.
+    if (siz > rem)
     {
-        diagLED(1, 0, 0);
-        wait_us(200000);
-        diagLED(1, 0, 1);
-        wait_us(200000);
+        // halt with the diagnostic display (by looping forever)
+        for (;;)
+        {
+            diagLED(1, 0, 0);
+            wait_us(200000);
+            diagLED(1, 0, 1);
+            wait_us(200000);
+        }
     }
+
+    // get the next free location from the pool to return   
+    char *ret = nxt;
+    
+    // advance the pool pointer and decrement the remaining size counter
+    nxt += siz;
+    rem -= siz;
+    
+    // return the allocated block
+    return ret;
 }
 
-// overload operator new to call our custom malloc
+// Overload operator new to call our custom malloc.  This ensures that
+// all 'new' allocations throughout the program (including library code)
+// go through our private allocator.
 void *operator new(size_t siz) { return xmalloc(siz); }
 void *operator new[](size_t siz) { return xmalloc(siz); }
+
+// Since we don't do bookkeeping to track released memory, 'delete' does
+// nothing.  In actual testing, this routine appears to never be called.
+// If it *is* ever called, it will simply leave the block in place, which
+// will make it unavailable for re-use but will otherwise be harmless.
+void operator delete(void *ptr) { }
+
 
 // ---------------------------------------------------------------------------
 //
@@ -3959,7 +4053,8 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
 int main(void)
 {
     printf("\r\nPinscape Controller starting\r\n");
-    // memory config debugging: {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);}
+    // {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);} // memory config info
+    //    -> no longer very useful, since we use our own custom malloc/new allocator (see xmalloc() above)
     
     // clear the I2C bus (for the accelerometer)
     clear_i2c();

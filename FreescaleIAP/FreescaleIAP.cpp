@@ -28,18 +28,54 @@ FreescaleIAP::~FreescaleIAP()
 {
 } 
 
+// We use an assembly language implementation of the EXEC function in
+// order to satisfy the requirement (mentioned in the hardware reference)
+// that code that writes to Flash must reside in RAM.  There's a potential
+// for a deadlock if the code that triggers a Flash write operation is 
+// itself stored in Flash, as an instruction fetch to Flash can deadlock 
+// against the erase/write.  In practice this seems to be rare, but I
+// seem to be able to trigger it once in a while.  (Which is to say that
+// I can trigger occasional lock-ups during writes.  It's not clear that
+// the Flash bus deadlock is the actual cause, but the timing strongly
+// suggests this.)
+// 
+// The mbed tools don't have a way to put a C function in RAM.  The mbed
+// assembler can, though.  So to get our invoking code into RAM, we have
+// to write it in assembly.  Fortunately, the code involved is very simple:
+// just a couple of writes to the memory-mapped Flash controller register,
+// and a looped read and bit test from the same location to wait until the
+// operation finishes.
+//
+#define USE_ASM_EXEC 1
+#if USE_ASM_EXEC
+extern "C" void iapExecAsm(volatile uint8_t *);
+#endif
+
 // execute an FTFA command
 static inline void run_command(FTFA_Type *ftfa) 
 {    
-    // disable interupts
+    // Disable interupts.  It's critical that we don't service any
+    // interrupts while a Flash operation is taking place because 
+    // an ISR would normally be a C routine located in Flash, so 
+    // fetching its instructions could deadlock against the write
+    // or erase operation we're performing.
     __disable_irq();
-    
+
+#if USE_ASM_EXEC
+    // Call our RAM-based assembly routine to do this work.  The
+    // assembler routine implements the same ftfa->FSTAT register
+    // operations in the C alternative code below.
+    iapExecAsm(&ftfa->FSTAT);
+
+#else // USE_ASM_EXEC
     // Clear possible old errors, start command, wait until done
     ftfa->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
     ftfa->FSTAT = FTFA_FSTAT_CCIF_MASK;
     while (!(ftfa->FSTAT & FTFA_FSTAT_CCIF_MASK));
+
+#endif // USE_ASM_EXEC
     
-    // re-enable interrupts
+    // done with the Flash access - re-enable interrupts
     __enable_irq();
 }    
 

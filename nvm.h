@@ -23,17 +23,17 @@
 // by the mbed platform.  mbed doesn't impose a file system (or any
 // other kind of formal structure) on the KL25Z flash; it simply 
 // treats the flash as a raw storage space for linker output and 
-// assumes that the linker is the only thing using it.  So ito use 
-// the flash, we basically have to do it on the sly, by using space 
-// that the linker happens to leave unused.
+// assumes that the linker is the only thing using it.  So in order
+// to use the flash, we basically have to do it on the sly, by 
+// using space that the linker happens to leave unused.
 // 
 // Fortunately, it's fairly easy to do this, because the flash is
 // mapped in the obvious way, as a single contiguous block in the
-// CPU memory space, and because the linker does the obvious thing, 
-// storing its entire output in a single contiguous block starting
-// at the lowest flash address.  This means that all flash memory
-// from (lowest flash address + length of linker output) to
-// (highest flash address) is unused and available for our sneaky
+// CPU memory space, and because the mbed linker seems to do the 
+// obvious thing, storing its entire output in a single contiguous 
+// block starting at the lowest flash address.  This means that all 
+// flash memory from (lowest flash address + length of linker output)
+// to (highest flash address) is unused and available for our sneaky
 // system.  Unfortunately, there's no reliable way for the program
 // to determine the length of the linker output, so we can't know 
 // where our available region starts.  But we do know how much flash 
