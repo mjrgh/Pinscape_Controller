@@ -833,13 +833,13 @@ static const uint16_t dof_to_gamma_tlc[] = {
 class Lw5940Out: public LwOut
 {
 public:
-    Lw5940Out(int idx) : idx(idx) { prv = 0; }
+    Lw5940Out(uint8_t idx) : idx(idx) { prv = 0; }
     virtual void set(uint8_t val)
     {
         if (val != prv)
            tlc5940->set(idx, dof_to_tlc[prv = val]);
     }
-    int idx;
+    uint8_t idx;
     uint8_t prv;
 };
 
@@ -847,13 +847,13 @@ public:
 class Lw5940GammaOut: public LwOut
 {
 public:
-    Lw5940GammaOut(int idx) : idx(idx) { prv = 0; }
+    Lw5940GammaOut(uint8_t idx) : idx(idx) { prv = 0; }
     virtual void set(uint8_t val)
     {
         if (val != prv)
            tlc5940->set(idx, dof_to_gamma_tlc[prv = val]);
     }
-    int idx;
+    uint8_t idx;
     uint8_t prv;
 };
 
@@ -887,13 +887,13 @@ void init_hc595(Config &cfg)
 class Lw595Out: public LwOut
 {
 public:
-    Lw595Out(int idx) : idx(idx) { prv = 0; }
+    Lw595Out(uint8_t idx) : idx(idx) { prv = 0; }
     virtual void set(uint8_t val)
     {
         if (val != prv)
            hc595->set(idx, (prv = val) == 0 ? 0 : 1);
     }
-    int idx;
+    uint8_t idx;
     uint8_t prv;
 };
 
@@ -4052,9 +4052,12 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
 //
 int main(void)
 {
+    // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
-    // {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);} // memory config info
+
+    // debugging: print memory config info
     //    -> no longer very useful, since we use our own custom malloc/new allocator (see xmalloc() above)
+    // {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);} 
     
     // clear the I2C bus (for the accelerometer)
     clear_i2c();
@@ -4073,10 +4076,10 @@ int main(void)
     // create the plunger sensor interface
     createPlunger();
 
-    // set up the TLC5940 interface and start the TLC5940 clock, if applicable
+    // set up the TLC5940 interface, if these chips are present
     init_tlc5940(cfg);
 
-    // enable the 74HC595 chips, if present
+    // set up 74HC595 interface, if these chips are present
     init_hc595(cfg);
     
     // Initialize the LedWiz ports.  Note that the ordering here is important:
@@ -4085,7 +4088,7 @@ int main(void)
     // up ports assigned to the respective chips.
     initLwOut(cfg);
 
-    // start the TLC5940 clock
+    // start the TLC5940 refresh cycle clock
     if (tlc5940 != 0)
         tlc5940->start();
         
@@ -4096,12 +4099,17 @@ int main(void)
     bool kbKeys = false;
     initButtons(cfg, kbKeys);
     
-    // Create the joystick USB client.  Note that we use the LedWiz unit
-    // number from the saved configuration.
+    // Create the joystick USB client.  Note that the USB vendor/product ID
+    // information comes from the saved configuration.  Also note that we have
+    // to wait until after initializing the input buttons (which we just did
+    // above) to set up the interface, since the button setup will determine
+    // whether or not we need to present a USB keyboard interface in addition
+    // to the joystick interface.
     MyUSBJoystick js(cfg.usbVendorID, cfg.usbProductID, USB_VERSION_NO, false, 
         cfg.joystickEnabled, kbKeys);
         
-    // Wait for the connection
+    // Wait for the USB connection to start up.  Show a distinctive diagnostic
+    // flash pattern while waiting.
     Timer connectTimer;
     connectTimer.start();
     while (!js.configured())
@@ -4118,18 +4126,39 @@ int main(void)
             connectTimer.reset();
         }
     }
+    
+    // we're now connected to the host
     connected = true;
     
-    // Last report timer for the joytick interface.  We use the joystick timer 
-    // to throttle the report rate, because VP doesn't benefit from reports any 
-    // faster than about every 10ms.
+    // Last report timer for the joytick interface.  We use this timer to
+    // throttle the report rate to a pace that's suitable for VP.  Without
+    // any artificial delays, we could generate data to send on the joystick
+    // interface on every loop iteration.  The loop iteration time depends
+    // on which devices are attached, since most of the work in our main 
+    // loop is simply polling our devices.  For typical setups, the loop
+    // time ranges from about 0.25ms to 2.5ms; the biggest factor is the
+    // plunger sensor.  But VP polls for input about every 10ms, so there's 
+    // no benefit in sending data faster than that, and there's some harm,
+    // in that it creates USB overhead (both on the wire and on the host 
+    // CPU).  We therefore use this timer to pace our reports to roughly
+    // the VP input polling rate.  Note that there's no way to actually
+    // synchronize with VP's polling, but there's also no need to, as the
+    // input model is designed to reflect the overall current state at any
+    // given time rather than events or deltas.  If VP polls twice between
+    // two updates, it simply sees no state change; if we send two updates
+    // between VP polls, VP simply sees the latest state when it does get
+    // around to polling.
     Timer jsReportTimer;
     jsReportTimer.start();
     
-    // Time since we successfully sent a USB report.  This is a hacky workaround
-    // for sporadic problems in the USB stack that I haven't been able to figure
-    // out.  If we go too long without successfully sending a USB report, we'll
-    // try resetting the connection.
+    // Time since we successfully sent a USB report.  This is a hacky 
+    // workaround to deal with any remaining sporadic problems in the USB 
+    // stack.  I've been trying to bulletproof the USB code over time to 
+    // remove all such problems at their source, but it seems unlikely that
+    // we'll ever get them all.  Thus this hack.  The idea here is that if
+    // we go too long without successfully sending a USB report, we'll
+    // assume that the connection is broken (and the KL25Z USB hardware
+    // hasn't noticed this), and we'll try taking measures to recover.
     Timer jsOKTimer;
     jsOKTimer.start();
     

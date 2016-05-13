@@ -54,13 +54,6 @@ extern "C" void iapExecAsm(volatile uint8_t *);
 // execute an FTFA command
 static inline void run_command(FTFA_Type *ftfa) 
 {    
-    // Disable interupts.  It's critical that we don't service any
-    // interrupts while a Flash operation is taking place because 
-    // an ISR would normally be a C routine located in Flash, so 
-    // fetching its instructions could deadlock against the write
-    // or erase operation we're performing.
-    __disable_irq();
-
 #if USE_ASM_EXEC
     // Call our RAM-based assembly routine to do this work.  The
     // assembler routine implements the same ftfa->FSTAT register
@@ -71,12 +64,9 @@ static inline void run_command(FTFA_Type *ftfa)
     // Clear possible old errors, start command, wait until done
     ftfa->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
     ftfa->FSTAT = FTFA_FSTAT_CCIF_MASK;
-    while (!(ftfa->FSTAT & FTFA_FSTAT_CCIF_MASK));
+    while (!(ftfa->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
 
 #endif // USE_ASM_EXEC
-    
-    // done with the Flash access - re-enable interrupts
-    __enable_irq();
 }    
 
  
@@ -86,14 +76,34 @@ IAPCode FreescaleIAP::erase_sector(int address) {
     #endif
     if (check_align(address))
         return AlignError;
+        
+    // divide the sector address into the three bytes for the three
+    // registers first, to reduce the risk of the operation being
+    // corrupted
+    uint8_t temp1 = (address >> 16) & 0xFF;
+    uint8_t temp2 = (address >> 8) & 0xFF;
+    uint8_t temp3 = address & 0xFF;
     
-    //Setup command
+    // clear interrupts while working
+    __disable_irq();
+    
+    // wait for any previous commands to clear
+    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
+    
+    // clear previous errors
+    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
+    
+    // set up the command
     FTFA->FCCOB0 = EraseSector;
-    FTFA->FCCOB1 = (address >> 16) & 0xFF;
-    FTFA->FCCOB2 = (address >> 8) & 0xFF;
-    FTFA->FCCOB3 = address & 0xFF;
-    
+    FTFA->FCCOB1 = temp1;
+    FTFA->FCCOB2 = temp2;
+    FTFA->FCCOB3 = temp3;
+
+    // execute it    
     run_command(FTFA);
+    
+    // re-enable interrupts
+    __enable_irq();
     
     return check_error();
 }
@@ -135,19 +145,45 @@ IAPCode FreescaleIAP::program_word(int address, const char *data) {
     #endif
     if (check_align(address))
         return AlignError;
+        
+        
+    // figure the three bytes of the address first
+    uint8_t temp1 = (address >> 16) & 0xFF;
+    uint8_t temp2 = (address >> 8) & 0xFF;
+    uint8_t temp3 = address & 0xFF;
     
-    //Setup command
+    // get the data bytes into temps as well
+    uint8_t temp4 = data[3];
+    uint8_t temp5 = data[2];
+    uint8_t temp6 = data[1];
+    uint8_t temp7 = data[0];
+    
+    // interrupts off while working
+    __disable_irq();
+    
+    // wait for any previous commands to clear
+    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
+    
+    // clear previous errors
+    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
+        
+    // Set up the command
     FTFA->FCCOB0 = ProgramLongword;
-    FTFA->FCCOB1 = (address >> 16) & 0xFF;
-    FTFA->FCCOB2 = (address >> 8) & 0xFF;
-    FTFA->FCCOB3 = address & 0xFF;
-    FTFA->FCCOB4 = data[3];
-    FTFA->FCCOB5 = data[2];
-    FTFA->FCCOB6 = data[1];
-    FTFA->FCCOB7 = data[0];
-    
+    FTFA->FCCOB1 = temp1;
+    FTFA->FCCOB2 = temp2;
+    FTFA->FCCOB3 = temp3;
+    FTFA->FCCOB4 = temp4;
+    FTFA->FCCOB5 = temp5;
+    FTFA->FCCOB6 = temp6;
+    FTFA->FCCOB7 = temp7;
+
+    // execute the command    
     run_command(FTFA);
     
+    // interrupts on
+    __enable_irq();
+    
+    // return error indication
     return check_error();
 }
  
@@ -185,16 +221,38 @@ IAPCode FreescaleIAP::verify_erased(int address, unsigned int length) {
     if (check_align(address))
         return AlignError;
     
-    //Setup command
+    // get the address into temps
+    uint8_t temp1 = (address >> 16) & 0xFF;
+    uint8_t temp2 = (address >> 8) & 0xFF;
+    uint8_t temp3 = address & 0xFF;
+    
+    // get the length into temps as well
+    uint8_t temp4 = (length >> 10) & 0xFF;
+    uint8_t temp5 = (length >> 2) & 0xFF;
+    
+    // interrupts off while working
+    __disable_irq();
+    
+    // wait for any previous commands to clear
+    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
+    
+    // clear previous errors
+    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
+        
+    // Set up the command
     FTFA->FCCOB0 = Read1s;
-    FTFA->FCCOB1 = (address >> 16) & 0xFF;
-    FTFA->FCCOB2 = (address >> 8) & 0xFF;
-    FTFA->FCCOB3 = address & 0xFF;
-    FTFA->FCCOB4 = (length >> 10) & 0xFF;
-    FTFA->FCCOB5 = (length >> 2) & 0xFF;
+    FTFA->FCCOB1 = temp1;
+    FTFA->FCCOB2 = temp2;
+    FTFA->FCCOB3 = temp3;
+    FTFA->FCCOB4 = temp4;
+    FTFA->FCCOB5 = temp5;
     FTFA->FCCOB6 = 0;
     
+    // execute
     run_command(FTFA);
+    
+    // interrupts on
+    __enable_irq();
     
     IAPCode retval = check_error();
     if (retval == RuntimeError) {
