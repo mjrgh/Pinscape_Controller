@@ -28,6 +28,24 @@ void v_func(uint8_t *data)
 {
     switch (data[1])
     {
+        // ********** UNRECOGNIZED VARIABLE IDs **********
+        // For any variable ID we don't recognize, we'll ignore SET
+        // requests and return all zeroes on QUERY requests.  This
+        // provides sensible default behavior if a newer version of 
+        // the config tool is used with an older version of the 
+        // firwmare.  Because of the default all-zero query response,
+        // new variable added over time should use zero values as
+        // the standard defaults whenever possible.  Note that the
+        // config tool can also use QUERY VARIABLE 0 to determine
+        // the number of variables supported by the firmware it's
+        // talking to, if it needs to know whether or not a 
+        // particular variable exists (a variable exists if its ID
+        // is within the range returned by the QUERY 0 call).
+        // 
+    default:
+        break;
+        
+        
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
         v_byte_ro(15, 2);       // number of SCALAR variables

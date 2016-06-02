@@ -501,9 +501,8 @@ const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len)
     switch (idx)
     {
     case 0:
-        // Interface 0 is either the joystick interface or the plain
-        // LedWiz emulator interface, depending on whether the joystick
-        // feature is enabled.
+        // If the joystick is enabled, this is the joystick.
+        // Otherwise, it's the plain LedWiz control interface.
         if (enableJoystick)
         {
             len = sizeof(reportDescriptorJS);
@@ -516,7 +515,7 @@ const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len)
         }
         
     case 1:
-        // Interface 1 is the keyboard, only if it's enabled
+        // This is the keyboard, if enabled.
         if (useKB)
         {
             len = sizeof(reportDescriptorKB);
@@ -537,9 +536,9 @@ const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len)
  
  const uint8_t *USBJoystick::stringImanufacturerDesc() {
     static const uint8_t stringImanufacturerDescriptor[] = {
-        0x10,                                            /*bLength*/
-        STRING_DESCRIPTOR,                               /*bDescriptorType 0x03*/
-        'm',0,'j',0,'r',0,'c',0,'o',0,'r',0,'p',0        /*bString iManufacturer - mjrcorp*/
+        0x0E,                                            /* bLength */
+        STRING_DESCRIPTOR,                               /* bDescriptorType 0x03 (String Descriptor) */
+        'm',0,'j',0,'r',0,'n',0,'e',0,'t',0              /* bString iManufacturer - mjrnet */
     };
     return stringImanufacturerDescriptor;
 }
@@ -547,14 +546,15 @@ const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len)
 const uint8_t *USBJoystick::stringIserialDesc() 
 {
     // set up a buffer with the length prefix and descriptor type
-    static uint8_t buf[2 + (3+16+1)*2];
+    const int numChars = 3 + 16 + 1 + 3;
+    static uint8_t buf[2 + numChars*2];
     uint8_t *dst = buf;
     *dst++ = sizeof(buf);
     *dst++ = STRING_DESCRIPTOR;
 
     // Create an ASCII version of our unique serial number string:
     //
-    //   PSCxxxxxxxxxxxxxxxxi
+    //   PSCxxxxxxxxxxxxxxxxivvv
     //
     // where:
     //   
@@ -564,6 +564,7 @@ const uint8_t *USBJoystick::stringIserialDesc()
     //             J = Joystick + LedWiz
     //             K = Keyboard + LedWiz
     //             C = Joystick + Keyboard + LedWiz ("C" for combo)
+    //   vvv    = version suffix
     //
     // The suffix for the interface type resolves a problem on some Windows systems
     // when switching between interface types.  Windows can cache device information
@@ -571,10 +572,10 @@ const uint8_t *USBJoystick::stringIserialDesc()
     // the interfaces once the information is cached, causing connection failures.
     // The cache key includes the device serial number, though, so this can be 
     // resolved by changing the serial number when the interface setup changes.
-    char xbuf[3+16+1+1];
+    char xbuf[numChars + 1];
     uint32_t x = SIM->UIDML;
     static char ifcCode[] = "LJKC";
-    sprintf(xbuf, "PSC%08lX%08lX%c", 
+    sprintf(xbuf, "PSC%08lX%08lX%c008",
         SIM->UIDML, 
         SIM->UIDL, 
         ifcCode[(enableJoystick ? 0x01 : 0x00) | (useKB ? 0x02 : 0x00)]);
@@ -615,7 +616,7 @@ const uint8_t *USBJoystick::configurationDesc()
              + (2 * INTERFACE_DESCRIPTOR_LENGTH)
              + (2 * HID_DESCRIPTOR_LENGTH)
              + (4 * ENDPOINT_DESCRIPTOR_LENGTH));
-        static const uint8_t configurationDescriptorWithKB[] = 
+        static uint8_t configurationDescriptorWithKB[] = 
         {
             CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
             CONFIGURATION_DESCRIPTOR,       // bDescriptorType
@@ -630,7 +631,7 @@ const uint8_t *USBJoystick::configurationDesc()
             // ***** INTERFACE 0 - JOYSTICK/LEDWIZ ******
             INTERFACE_DESCRIPTOR_LENGTH,    // bLength
             INTERFACE_DESCRIPTOR,           // bDescriptorType
-            0x00,                           // bInterfaceNumber - first interface = 0
+            0x00,                           // bInterfaceNumber
             0x00,                           // bAlternateSetting
             0x02,                           // bNumEndpoints
             HID_CLASS,                      // bInterfaceClass
@@ -667,12 +668,12 @@ const uint8_t *USBJoystick::configurationDesc()
             // ****** INTERFACE 1 - KEYBOARD ******
             INTERFACE_DESCRIPTOR_LENGTH,    // bLength
             INTERFACE_DESCRIPTOR,           // bDescriptorType
-            0x01,                           // bInterfaceNumber - second interface = 1
+            0x01,                           // bInterfaceNumber
             0x00,                           // bAlternateSetting
             0x02,                           // bNumEndpoints
             HID_CLASS,                      // bInterfaceClass
-            1,                              // bInterfaceSubClass - KEYBOARD
-            1,                              // bInterfaceProtocol - KEYBOARD
+            HID_SUBCLASS_BOOT,              // bInterfaceSubClass
+            HID_PROTOCOL_KB,                // bInterfaceProtocol
             0x00,                           // iInterface
         
             HID_DESCRIPTOR_LENGTH,          // bLength
@@ -699,7 +700,8 @@ const uint8_t *USBJoystick::configurationDesc()
             E_INTERRUPT,                    // bmAttributes
             LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
             MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
-            1                               // bInterval (milliseconds)
+            1,                              // bInterval (milliseconds)
+
         };
 
         // Keyboard + joystick interfaces
@@ -713,7 +715,7 @@ const uint8_t *USBJoystick::configurationDesc()
               + (1 * INTERFACE_DESCRIPTOR_LENGTH)
               + (1 * HID_DESCRIPTOR_LENGTH)
               + (2 * ENDPOINT_DESCRIPTOR_LENGTH));
-        static const uint8_t configurationDescriptorNoKB[] = 
+        static uint8_t configurationDescriptorNoKB[] = 
         {
             CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
             CONFIGURATION_DESCRIPTOR,       // bDescriptorType
@@ -731,8 +733,8 @@ const uint8_t *USBJoystick::configurationDesc()
             0x00,                           // bAlternateSetting
             0x02,                           // bNumEndpoints
             HID_CLASS,                      // bInterfaceClass
-            1,                              // bInterfaceSubClass
-            1,                              // bInterfaceProtocol (keyboard)
+            HID_SUBCLASS_NONE,              // bInterfaceSubClass
+            HID_PROTOCOL_NONE,              // bInterfaceProtocol (keyboard)
             0x00,                           // iInterface
         
             HID_DESCRIPTOR_LENGTH,          // bLength

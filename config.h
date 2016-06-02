@@ -161,7 +161,7 @@ struct Config
         // default that most people won't have to change.
         usbVendorID = 0xFAFA;      // LedWiz vendor code 
         usbProductID = 0x00F7;     // LedWiz product code for unit #8
-        
+                
         // Set the default Pinscape unit number to #1.  This is a separate identifier
         // from the LedWiz ID, so you don't have to worry about making this different
         // from your LedWiz units.  Each Pinscape unit should have a unique value for
@@ -208,9 +208,9 @@ struct Config
         
         // disable the ZB Launch Ball by default
         plunger.zbLaunchBall.port = 0;                  // 0 = disabled
-        plunger.zbLaunchBall.keytype = 2;               // keyboard key
-        plunger.zbLaunchBall.keycode = 0x28;            // Enter key (USB scan code)
-        plunger.zbLaunchBall.pushDistance = 63;         // about 1/16"
+        plunger.zbLaunchBall.keytype = 2;               // 2 = keyboard key
+        plunger.zbLaunchBall.keycode = 0x28;            // USB keyboard scan code for Enter key
+        plunger.zbLaunchBall.pushDistance = 63;         // 63/1000 in == .063" == about 1/16"
         
         // assume no TV ON switch
         TVON.statusPin = PINNAME_TO_WIRE(NC);
