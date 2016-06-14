@@ -60,8 +60,6 @@ public:
         else
             return false;
     }
-    
-    bool write(const T *item) { return write(*item); }
 
 private:
     int advance(int i)
@@ -80,10 +78,8 @@ const uint8_t IFC_ID_JS = 0;        // joystick + LedWiz interface
 const uint8_t IFC_ID_KB = 1;        // keyboard interface
 
 // keyboard interface report IDs 
-const uint8_t REPORT_ID_JS = 1;     // joystick report
-const uint8_t REPORT_ID_STAT = 2;   // private status/query report
-const uint8_t REPORT_ID_KB = 3;     // keyboard report
-const uint8_t REPORT_ID_MEDIA = 4;  // media key report
+const uint8_t REPORT_ID_KB = 1;
+const uint8_t REPORT_ID_MEDIA = 2;
 
 /* Common usage */
 enum JOY_BUTTON {
@@ -347,6 +343,7 @@ class USBJoystick: public USBHID {
             { return interface == 0 || interface == 1; }
             
          virtual bool EP1_OUT_callback();
+         virtual bool EP4_OUT_callback();
          
      private:
 

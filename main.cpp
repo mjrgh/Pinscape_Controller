@@ -988,10 +988,11 @@ static LwOut **lwPin;
 // lower of 32 or the actual number of outputs.
 static int numLwOutputs;
 
-// Current absolute brightness level for an output.  This is a DOF
-// brightness level value, from 0 for fully off to 255 for fully on.  
-// This is used for all extended ports (33 and above), and for any 
-// LedWiz port with wizVal == 255.
+// Current absolute brightness levels for all outputs.  These are
+// DOF brightness level value, from 0 for fully off to 255 for fully
+// on.  These are always used for extended ports (33 and above), and
+// are used for LedWiz ports (1-32) when we're in extended protocol
+// mode (i.e., ledWizMode == false).
 static uint8_t *outLevel;
 
 // create a single output pin
@@ -1146,6 +1147,42 @@ void initLwOut(Config &cfg)
         lwPin[i] = createLwPin(i, cfg.outPort[i], cfg);
 }
 
+// LedWiz/Extended protocol mode.
+//
+// We implement output port control using both the legacy LedWiz
+// protocol and a private extended protocol (which is 100% backwards
+// compatible with the LedWiz protocol: we recognize all valid legacy
+// protocol commands and handle them the same way a real LedWiz does).
+// The legacy protocol can access the first 32 ports; the extended
+// protocol can access all ports, including the first 32 as well as
+// the higher numbered ports.  This means that the first 32 ports
+// can be addressed with either protocol, which muddies the waters
+// a bit because of the different approaches the two protocols take.
+// The legacy protocol separates the brightness/flash state of an
+// output (which it calls the "profile" state) from the on/off state.
+// The extended protocol doesn't; "off" is simply represented as
+// brightness 0.  
+//
+// To deal with the different approaches, we use this flag to keep
+// track of the global protocol state.  Each time we get an output
+// port command, we switch the protocol state to the protocol that
+// was used in the command.  On a legacy SBA or PBA, we switch to
+// LedWiz mode; on an extended output set message, we switch to
+// extended mode.  We remember the LedWiz and extended output state
+// for each LW ports (1-32) separately.  Any time the mode changes, 
+// we set ports 1-32 back to the state for the new mode.
+//
+// The reasoning here is that any given client (on the PC) will use
+// one mode or the other, and won't mix the two.  An older program
+// that only knows about the LedWiz protocol will use the legacy
+// protocol only, and never send us an extended command.  A DOF-based
+// program might use one or the other, according to how the user has
+// configured DOF.  We have to be able to switch seamlessly between
+// the protocols to accommodate switching from one type of program
+// on the PC to the other, but we shouldn't have to worry about one
+// program switching back and forth.
+static uint8_t ledWizMode = true;
+
 // LedWiz output states.
 //
 // The LedWiz protocol has two separate control axes for each output.
@@ -1170,10 +1207,6 @@ static uint8_t wizOn[32];
 //   130 = flash on / off
 //   131 = on / ramp down
 //   132 = ramp up / on
-//
-// If the output was last updated through an extended protocol message,
-// it will have the special value 255.  This means that we use the
-// outLevel[] value for the port instead of an LedWiz setting.
 //
 // (Note that value 49 isn't documented in the LedWiz spec, but real
 // LedWiz units treat it as equivalent to 48, and some PC software uses
@@ -1208,9 +1241,9 @@ static const uint8_t lw_to_dof[] = {
 // Translate an LedWiz output (ports 1-32) to a DOF brightness level.
 static uint8_t wizState(int idx)
 {
-    // if the output was last set with an extended protocol message,
-    // use the value set there, ignoring the output's LedWiz state
-    if (wizVal[idx] == 255)
+    // If we're in extended protocol mode, ignore the LedWiz setting
+    // for the port and use the new protocol setting instead.
+    if (!ledWizMode)
         return outLevel[idx];
     
     // if it's off, show at zero intensity
@@ -1354,7 +1387,7 @@ static void updateAllOuts()
         lwPin[i]->set(wizState(i));
         
     // update each extended output
-    for (int i = 33 ; i < numOutputs ; ++i)
+    for (int i = numLwOutputs ; i < numOutputs ; ++i)
         lwPin[i]->set(outLevel[i]);
         
     // flush 74HC595 changes, if necessary
@@ -3782,6 +3815,9 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
         //       data[1], data[2], data[3], data[4], data[5]);
 
+        // switch to LedWiz protocol mode
+        ledWizMode = true;
+
         // update all on/off states
         for (int i = 0, bit = 1, ri = 1 ; i < numLwOutputs ; ++i, bit <<= 1)
         {
@@ -3793,19 +3829,6 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             
             // set the on/off state
             wizOn[i] = ((data[ri] & bit) != 0);
-            
-            // If the wizVal setting is 255, it means that this
-            // output was last set to a brightness value with the
-            // extended protocol.  Return it to LedWiz control by
-            // rescaling the brightness setting to the LedWiz range
-            // and updating wizVal with the result.  If it's any
-            // other value, it was previously set by a PBA message,
-            // so simply retain the last setting - in the normal
-            // LedWiz protocol, the "profile" (brightness) and on/off
-            // states are independent, so an SBA just turns an output
-            // on or off but retains its last brightness level.
-            if (wizVal[i] == 255)
-                wizVal[i] = (uint8_t)round(outLevel[i]/255.0 * 48.0);
         }
         
         // set the flash speed - enforce the value range 1-7
@@ -3977,19 +4000,21 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         // most recent message of either type takes precedence.  For
         // outputs above the LedWiz range, PBA/SBA messages can't
         // address those ports anyway.
+        
+        // flag that we're in extended protocol mode
+        ledWizMode = false;
+        
+        // figure the block of 7 ports covered in the message
         int i0 = (data[0] - 200)*7;
         int i1 = i0 + 7 < numOutputs ? i0 + 7 : numOutputs; 
+        
+        // update each port
         for (int i = i0 ; i < i1 ; ++i)
         {
             // set the brightness level for the output
             uint8_t b = data[i-i0+1];
             outLevel[i] = b;
             
-            // if it's in the basic LedWiz output set, set the LedWiz
-            // profile value to 255, which means "use outLevel"
-            if (i < 32) 
-                wizVal[i] = 255;
-                
             // set the output
             lwPin[i]->set(b);
         }
@@ -4015,10 +4040,14 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         // Note that a PBA implicitly overrides our extended profile
         // messages (message prefix 200-219), because this sets the
         // wizVal[] entry for each output, and that takes precedence
-        // over the extended protocol settings.
+        // over the extended protocol settings when we're in LedWiz
+        // protocol mode.
         //
         //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
         //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
+
+        // flag that we received an LedWiz message
+        ledWizMode = true;
 
         // Update all output profile settings
         for (int i = 0 ; i < 8 ; ++i)

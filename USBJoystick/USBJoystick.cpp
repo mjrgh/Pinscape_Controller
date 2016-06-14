@@ -31,6 +31,8 @@ const int reportLen = 14;
 // Maximum report sizes
 const int MAX_REPORT_JS_TX = reportLen;
 const int MAX_REPORT_JS_RX = 8;
+const int MAX_REPORT_KB_TX = 8;
+const int MAX_REPORT_KB_RX = 4;
 
 bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status) 
 {
@@ -47,26 +49,24 @@ bool USBJoystick::update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint
 
 bool USBJoystick::update() 
 {
-   // start the report with the report ID
    HID_REPORT report;
-   report.data[0] = REPORT_ID_JS;
-   
+
    // Fill the report according to the Joystick Descriptor
 #define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
 #define putbe(idx, val) (report.data[(idx)+1] = (val) & 0xff, report.data[idx] = ((val) >> 8) & 0xff)
 #define putl(idx, val) (put(idx, val), put((idx)+2, (val) >> 16))
 #define putlbe(idx, val) (putbe((idx)+2, val), putbe(idx, (val) >> 16))
-   put(1, _status);
-   put(3, 0);  // second word of status - zero in high bit identifies as normal joystick report
-   put(5, _buttonsLo);
-   put(7, _buttonsHi);
-   put(9, _x);
-   put(11, _y);
-   put(13, _z);
+   put(0, _status);
+   put(2, 0);  // second word of status - zero in high bit identifies as normal joystick report
+   put(4, _buttonsLo);
+   put(6, _buttonsHi);
+   put(8, _x);
+   put(10, _y);
+   put(12, _z);
    
    // important: keep reportLen in sync with the actual byte length of
    // the reports we build here
-   report.length = reportLen + 1;
+   report.length = reportLen;
  
    // send the report
    return sendTO(&report, 100);
@@ -99,16 +99,14 @@ bool USBJoystick::mediaUpdate(uint8_t data)
 bool USBJoystick::sendPlungerStatus(
     int npix, int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime)
 {
-    // set up the report ID
     HID_REPORT report;
-    report.data[0] = REPORT_ID_STAT;
     
     // Set the special status bits to indicate it's an extended
     // exposure report.
-    put(1, 0x87FF);
+    put(0, 0x87FF);
     
     // start at the second byte
-    int ofs = 3;
+    int ofs = 2;
     
     // write the report subtype (0) to byte 2
     report.data[ofs++] = 0;
@@ -145,26 +143,25 @@ bool USBJoystick::sendPlungerStatus(
     report.data[ofs++] = (t >> 16) & 0xff;
     
     // send the report
-    report.length = reportLen + 1;
+    report.length = reportLen;
     return sendTO(&report, 100);
 }
 
 bool USBJoystick::sendPlungerPix(int &idx, int npix, const uint8_t *pix)
 {
     HID_REPORT report;
-    report.data[0] = REPORT_ID_STAT;
     
     // Set the special status bits to indicate it's an exposure report.
     // The high 5 bits of the status word are set to 10000, and the
     // low 11 bits are the current pixel index.
     uint16_t s = idx | 0x8000;
-    put(1, s);
+    put(0, s);
     
     // start at the second byte
-    int ofs = 3;
+    int ofs = 2;
     
     // now fill out the remaining bytes with exposure values
-    report.length = reportLen + 1;
+    report.length = reportLen;
     for ( ; ofs < report.length ; ++ofs)
         report.data[ofs] = (idx < npix ? pix[idx++] : 0);
     
@@ -179,24 +176,21 @@ bool USBJoystick::reportID(int index)
     // initially fill the report with zeros
     memset(report.data, 0, sizeof(report.data));
     
-    // set the report ID
-    report.data[0] = REPORT_ID_STAT;
-    
     // Set the special status bits to indicate that it's an ID report
     uint16_t s = 0x9000;
-    put(1, s);
+    put(0, s);
     
     // add the requested ID index
-    report.data[3] = (uint8_t)index;
+    report.data[2] = (uint8_t)index;
     
     // figure out which ID we're reporting
     switch (index)
     {
     case 1:
         // KL25Z CPU ID
-        putbe(4, SIM->UIDMH);
-        putlbe(6, SIM->UIDML);
-        putlbe(10, SIM->UIDL);
+        putbe(3, SIM->UIDMH);
+        putlbe(5, SIM->UIDML);
+        putlbe(9, SIM->UIDL);
         break;
         
     case 2:
@@ -205,12 +199,12 @@ bool USBJoystick::reportID(int index)
         // 80 bits = 10 bytes.  So skip ahead 16 and back up 10 to get
         // the starting point.)
         extern const char *getOpenSDAID();
-        memcpy(&report.data[4], getOpenSDAID() + 16 - 10, 10);
+        memcpy(&report.data[3], getOpenSDAID() + 16 - 10, 10);
         break;
     }
     
     // send the report
-    report.length = reportLen + 1;
+    report.length = reportLen;
     return sendTO(&report, 100);
 }
 
@@ -221,13 +215,10 @@ bool USBJoystick::reportBuildInfo(const char *date)
     // initially fill the report with zeros
     memset(report.data, 0, sizeof(report.data));
     
-    // set the report ID
-    report.data[0] = REPORT_ID_STAT;
-    
     // Set the special status bits to indicate that it's a build
     // info report
     uint16_t s = 0xA000;
-    put(1, s);
+    put(0, s);
     
     // Parse the date.  This is given in the standard __DATE__ " " __TIME
     // macro format, "Mon dd yyyy hh:mm:ss" (e.g., "Feb 16 2016 12:15:06").
@@ -253,11 +244,11 @@ bool USBJoystick::reportBuildInfo(const char *date)
         + (atol(date+18));
     
     // store the build date and time
-    putl(3, dd);
-    putl(7, tt);
+    putl(2, dd);
+    putl(6, tt);
     
     // send the report
-    report.length = reportLen + 1;
+    report.length = reportLen;
     return sendTO(&report, 100);
 }
 
@@ -268,19 +259,16 @@ bool USBJoystick::reportConfigVar(const uint8_t *data)
     // initially fill the report with zeros
     memset(report.data, 0, sizeof(report.data));
     
-    // set the report ID
-    report.data[0] = REPORT_ID_STAT;
-    
     // Set the special status bits to indicate that it's a config 
     // variable report
     uint16_t s = 0x9800;
-    put(1, s);
+    put(0, s);
     
     // Copy the variable data (7 bytes, starting with the variable ID)
-    memcpy(report.data + 3, data, 7);
+    memcpy(report.data + 2, data, 7);
     
     // send the report
-    report.length = reportLen + 1;
+    report.length = reportLen;
     return sendTO(&report, 100);
 }
 
@@ -294,30 +282,27 @@ bool USBJoystick::reportConfig(
     // initially fill the report with zeros
     memset(report.data, 0, sizeof(report.data));
     
-    // set the report ID
-    report.data[0] = REPORT_ID_STAT;
-    
     // Set the special status bits to indicate that it's a config report.
     uint16_t s = 0x8800;
-    put(1, s);
+    put(0, s);
     
     // write the number of configured outputs
-    put(3, numOutputs);
+    put(2, numOutputs);
     
     // write the unit number
-    put(5, unitNo);
+    put(4, unitNo);
     
     // write the plunger zero and max values
-    put(7, plungerZero);
-    put(9, plungerMax);
-    report.data[11] = uint8_t(plungerRlsTime);
+    put(6, plungerZero);
+    put(8, plungerMax);
+    report.data[10] = uint8_t(plungerRlsTime);
     
     // write the status bits: 
     //  0x01  -> configuration loaded
-    report.data[12] = (configured ? 0x01 : 0x00);
+    report.data[11] = (configured ? 0x01 : 0x00);
     
     // send the report
-    report.length = reportLen + 1;
+    report.length = reportLen;
     return sendTO(&report, 100);
 }
 
@@ -345,15 +330,11 @@ bool USBJoystick::updateStatus(uint32_t status)
 {
    HID_REPORT report;
 
-   // clear the report
-   memset(report.data, 0,  sizeof(report.data));
-   
-   // set the report ID
-   report.data[0] = REPORT_ID_STAT;
-   
-   // Indicate that it's a status report
-   put(1, status);
-   report.length = reportLen + 1;
+   // Fill the report according to the Joystick Descriptor
+#define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
+   memset(report.data, 0, reportLen);
+   put(0, status);
+   report.length = reportLen;
  
    // send the report
    return sendTO(&report, 100);
@@ -372,204 +353,183 @@ void USBJoystick::_init() {
  
 // --------------------------------------------------------------------------
 //
-// USB HID Report Descriptors
+// USB HID Report Descriptor - Joystick
 //
-
-#define HID_REPORT_JS \
-    USAGE_PAGE(1), 0x01,            /* Generic desktop */ \
-    USAGE(1), 0x04,                 /* Joystick */ \
-    COLLECTION(1), 0x01,            /* Application */ \
-        /* input report (device to host) */ \
-        REPORT_ID(1), REPORT_ID_JS, \
-        USAGE_PAGE(1), 0x06,        /* generic device controls - for config status */ \
-        USAGE(1), 0x00,             /* undefined device control */ \
-        LOGICAL_MINIMUM(1), 0x00,   /* 8-bit values */ \
-        LOGICAL_MAXIMUM(1), 0xFF, \
-        REPORT_SIZE(1), 0x08,       /* 8 bits per report */ \
-        REPORT_COUNT(1), 0x04,      /* 4 reports (4 bytes) */ \
-        INPUT(1), 0x02,             /* Data, Variable, Absolute */ \
-        \
-        USAGE_PAGE(1), 0x09,        /* Buttons */ \
-        USAGE_MINIMUM(1), 0x01,     /* { buttons } */ \
-        USAGE_MAXIMUM(1), 0x20,     /* {  1-32   } */ \
-        LOGICAL_MINIMUM(1), 0x00,   /* 1-bit buttons - 0... */ \
-        LOGICAL_MAXIMUM(1), 0x01,   /* ...to 1 */ \
-        REPORT_SIZE(1), 0x01,       /* 1 bit per report */ \
-        REPORT_COUNT(1), 0x20,      /* 32 reports */ \
-        UNIT_EXPONENT(1), 0x00,     /* Unit_Exponent (0) */ \
-        UNIT(1), 0x00,              /* Unit (None) */ \
-        INPUT(1), 0x02,             /* Data, Variable, Absolute */ \
-         \
-        USAGE_PAGE(1), 0x01,        /* Generic desktop */ \
-        USAGE(1), 0x30,             /* X axis */ \
-        USAGE(1), 0x31,             /* Y axis */ \
-        USAGE(1), 0x32,             /* Z axis */ \
-        LOGICAL_MINIMUM(2), 0x00,0xF0,   /* each value ranges -4096 */ \
-        LOGICAL_MAXIMUM(2), 0x00,0x10,   /* ...to +4096 */ \
-        REPORT_SIZE(1), 0x10,       /* 16 bits per report */ \
-        REPORT_COUNT(1), 0x03,      /* 3 reports (X, Y, Z) */ \
-        INPUT(1), 0x02,             /* Data, Variable, Absolute */ \
-        \
-        /* output report (host to device) */ \
-        REPORT_ID(1), REPORT_ID_JS, \
-        REPORT_SIZE(1), 0x08,       /* 8 bits per report */ \
-        REPORT_COUNT(1), 0x08,      /* output report count - 8-byte LedWiz format */ \
-        0x09, 0x01,                 /* usage */ \
-        0x91, 0x01,                 /* Output (array) */ \
-        \
-    END_COLLECTION(0)
-
-
-#define HID_REPORT_STAT \
-    USAGE_PAGE(1), 0x01,            /* Generic desktop */ \
-    USAGE(1), 0x00,                 /* Undefined */ \
-    COLLECTION(1), 0x01,            /* Application */ \
-        REPORT_ID(1), REPORT_ID_STAT, \
-        USAGE_PAGE(1), 0x06,        /* generic device controls */ \
-        USAGE(1), 0x00,             /* undefined device control */ \
-        LOGICAL_MINIMUM(1), 0x00,   /* 8-bit value range */ \
-        LOGICAL_MAXIMUM(1), 0xFF, \
-        REPORT_SIZE(1), 0x08,       /* 8 bits per report */ \
-        REPORT_COUNT(1), reportLen, /* 'reportLen' reports==bytes */ \
-        INPUT(1), 0x02,             /* Data, Variable, Absolute */ \
-    END_COLLECTION(0)
-
-#define HID_REPORT_KB \
-    USAGE_PAGE(1), 0x01,            /* Generic Desktop */ \
-    USAGE(1), 0x06,                 /* Keyboard */ \
-    \
-    /* Keyboard keys */ \
-    COLLECTION(1), 0x01,            /* Application */ \
-        REPORT_ID(1), REPORT_ID_KB, \
-        \
-        /* input report (device to host) - regular keys */ \
-        REPORT_COUNT(1), 0x06, \
-        REPORT_SIZE(1), 0x08, \
-        LOGICAL_MINIMUM(1), 0x00, \
-        LOGICAL_MAXIMUM(1), 0x65, \
-        USAGE_PAGE(1), 0x07,        /* Key Codes */ \
-        USAGE_MINIMUM(1), 0x00, \
-        USAGE_MAXIMUM(1), 0x65, \
-        INPUT(1), 0x00,             /* Data, Array */ \
-        \
-        /* input report (device to host) - modifier keys */ \
-        USAGE_PAGE(1), 0x07,        /* Key Codes */ \
-        USAGE_MINIMUM(1), 0xE0, \
-        USAGE_MAXIMUM(1), 0xE7, \
-        LOGICAL_MINIMUM(1), 0x00, \
-        LOGICAL_MAXIMUM(1), 0x01, \
-        REPORT_SIZE(1), 0x01, \
-        REPORT_COUNT(1), 0x08, \
-        INPUT(1), 0x02,             /* Data, Variable, Absolute */ \
-        REPORT_COUNT(1), 0x01, \
-        REPORT_SIZE(1), 0x08, \
-        INPUT(1), 0x01,             /* Constant */ \
-        \
-        /* output report (host to device) - LED status */ \
-        REPORT_COUNT(1), 0x05, \
-        REPORT_SIZE(1), 0x01, \
-        USAGE_PAGE(1), 0x08,        /* LEDs */ \
-        USAGE_MINIMUM(1), 0x01, \
-        USAGE_MAXIMUM(1), 0x05, \
-        OUTPUT(1), 0x02,            /* Data, Variable, Absolute */ \
-        REPORT_COUNT(1), 0x01, \
-        REPORT_SIZE(1), 0x03, \
-        OUTPUT(1), 0x01,            /* Constant */ \
-    END_COLLECTION(0), \
-    \
-    /* Media Control Keys */ \
-    USAGE_PAGE(1), 0x0C, \
-    USAGE(1), 0x01, \
-    COLLECTION(1), 0x01, \
-        /* input report (device to host) */ \
-        REPORT_ID(1), REPORT_ID_MEDIA, \
-        USAGE_PAGE(1), 0x0C, \
-        LOGICAL_MINIMUM(1), 0x00, \
-        LOGICAL_MAXIMUM(1), 0x01, \
-        REPORT_SIZE(1), 0x01, \
-        REPORT_COUNT(1), 0x07, \
-        USAGE(1), 0xE2,             /* Mute -> 0x01 */ \
-        USAGE(1), 0xE9,             /* Volume Up -> 0x02 */ \
-        USAGE(1), 0xEA,             /* Volume Down -> 0x04 */ \
-        USAGE(1), 0xB5,             /* Next Track -> 0x08 */ \
-        USAGE(1), 0xB6,             /* Previous Track -> 0x10 */ \
-        USAGE(1), 0xB7,             /* Stop -> 0x20 */ \
-        USAGE(1), 0xCD,             /* Play / Pause -> 0x40 */ \
-        INPUT(1), 0x02,             /* Input (Data, Variable, Absolute) -> 0x80 */ \
-        REPORT_COUNT(1), 0x01, \
-        INPUT(1), 0x01, \
-    END_COLLECTION(0)
-
-#define HID_REPORT_LW \
-    USAGE_PAGE(1), 0x01,            /* Generic desktop */ \
-    USAGE(1), 0x00,                 /* Undefined */ \
-    COLLECTION(1), 0x01,            /* Application */ \
-        /* output report (host to device) */ \
-        REPORT_ID(1), REPORT_ID_JS, \
-        REPORT_SIZE(1), 0x08,       /* 8 bits per report */ \
-        REPORT_COUNT(1), 0x08,      /* output report count (LEDWiz messages) */ \
-        0x09, 0x01,                 /* usage */ \
-        0x91, 0x01,                 /* Output (array) */ \
-    END_COLLECTION(0)
-
-
-// Joystick + Keyboard + LedWiz
 static const uint8_t reportDescriptorJS[] = 
-{
-    USAGE_PAGE(1), 0x01,            /* Generic desktop */ \
-    USAGE(1), 0x04,                 /* Joystick */ \
-    COLLECTION(1), 0x01,            /* Application */ \
+{         
+    USAGE_PAGE(1), 0x01,            // Generic desktop
+    USAGE(1), 0x04,                 // Joystick
+    COLLECTION(1), 0x01,            // Application
+        // input report (device to host)
 
-    HID_REPORT_JS,
-    HID_REPORT_STAT,
-    HID_REPORT_KB,
-    
+        USAGE_PAGE(1), 0x06,        // generic device controls - for config status
+        USAGE(1), 0x00,             // undefined device control
+        LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
+        LOGICAL_MAXIMUM(1), 0xFF,
+        REPORT_SIZE(1), 0x08,       // 8 bits per report
+        REPORT_COUNT(1), 0x04,      // 4 reports (4 bytes)
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+
+        USAGE_PAGE(1), 0x09,        // Buttons
+        USAGE_MINIMUM(1), 0x01,     // { buttons }
+        USAGE_MAXIMUM(1), 0x20,     // {  1-32   }
+        LOGICAL_MINIMUM(1), 0x00,   // 1-bit buttons - 0...
+        LOGICAL_MAXIMUM(1), 0x01,   // ...to 1
+        REPORT_SIZE(1), 0x01,       // 1 bit per report
+        REPORT_COUNT(1), 0x20,      // 32 reports
+        UNIT_EXPONENT(1), 0x00,     // Unit_Exponent (0)
+        UNIT(1), 0x00,              // Unit (None)                                           
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+       
+        USAGE_PAGE(1), 0x01,        // Generic desktop
+        USAGE(1), 0x30,             // X axis
+        USAGE(1), 0x31,             // Y axis
+        USAGE(1), 0x32,             // Z axis
+        LOGICAL_MINIMUM(2), 0x00,0xF0,   // each value ranges -4096
+        LOGICAL_MAXIMUM(2), 0x00,0x10,   // ...to +4096
+        REPORT_SIZE(1), 0x10,       // 16 bits per report
+        REPORT_COUNT(1), 0x03,      // 3 reports (X, Y, Z)
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+         
+        // output report (host to device)
+        REPORT_SIZE(1), 0x08,       // 8 bits per report
+        REPORT_COUNT(1), 0x08,      // output report count - 8-byte LedWiz format
+        0x09, 0x01,                 // usage
+        0x91, 0x01,                 // Output (array)
+
     END_COLLECTION(0)
 };
 
-// Keyboard + LedWiz
+// 
+// USB HID Report Descriptor - Keyboard/Media Control
+//
 static const uint8_t reportDescriptorKB[] = 
 {
-    HID_REPORT_LW,
-    HID_REPORT_STAT,
-    HID_REPORT_KB
+    USAGE_PAGE(1), 0x01,                    // Generic Desktop
+    USAGE(1), 0x06,                         // Keyboard
+    COLLECTION(1), 0x01,                    // Application
+        REPORT_ID(1), REPORT_ID_KB,
+
+        USAGE_PAGE(1), 0x07,                    // Key Codes
+        USAGE_MINIMUM(1), 0xE0,
+        USAGE_MAXIMUM(1), 0xE7,
+        LOGICAL_MINIMUM(1), 0x00,
+        LOGICAL_MAXIMUM(1), 0x01,
+        REPORT_SIZE(1), 0x01,
+        REPORT_COUNT(1), 0x08,
+        INPUT(1), 0x02,                         // Data, Variable, Absolute
+        REPORT_COUNT(1), 0x01,
+        REPORT_SIZE(1), 0x08,
+        INPUT(1), 0x01,                         // Constant
+
+        REPORT_COUNT(1), 0x05,
+        REPORT_SIZE(1), 0x01,
+        USAGE_PAGE(1), 0x08,                    // LEDs
+        USAGE_MINIMUM(1), 0x01,
+        USAGE_MAXIMUM(1), 0x05,
+        OUTPUT(1), 0x02,                        // Data, Variable, Absolute
+        REPORT_COUNT(1), 0x01,
+        REPORT_SIZE(1), 0x03,
+        OUTPUT(1), 0x01,                        // Constant
+
+        REPORT_COUNT(1), 0x06,
+        REPORT_SIZE(1), 0x08,
+        LOGICAL_MINIMUM(1), 0x00,
+        LOGICAL_MAXIMUM(1), 0x65,
+        USAGE_PAGE(1), 0x07,                    // Key Codes
+        USAGE_MINIMUM(1), 0x00,
+        USAGE_MAXIMUM(1), 0x65,
+        INPUT(1), 0x00,                         // Data, Array
+    END_COLLECTION(0),
+
+    // Media Control
+    USAGE_PAGE(1), 0x0C,
+    USAGE(1), 0x01,
+    COLLECTION(1), 0x01,
+        REPORT_ID(1), REPORT_ID_MEDIA,
+        USAGE_PAGE(1), 0x0C,
+        LOGICAL_MINIMUM(1), 0x00,
+        LOGICAL_MAXIMUM(1), 0x01,
+        REPORT_SIZE(1), 0x01,
+        REPORT_COUNT(1), 0x07,
+        USAGE(1), 0xE2,             // Mute -> 0x01
+        USAGE(1), 0xE9,             // Volume Up -> 0x02
+        USAGE(1), 0xEA,             // Volume Down -> 0x04
+        USAGE(1), 0xB5,             // Next Track -> 0x08
+        USAGE(1), 0xB6,             // Previous Track -> 0x10
+        USAGE(1), 0xB7,             // Stop -> 0x20
+        USAGE(1), 0xCD,             // Play / Pause -> 0x40
+        INPUT(1), 0x02,             // Input (Data, Variable, Absolute) -> 0x80
+        REPORT_COUNT(1), 0x01,
+        INPUT(1), 0x01,
+    END_COLLECTION(0),
 };
 
-// LedWiz only
-static const uint8_t reportDescriptorLW[] =
-{
-    HID_REPORT_LW,
-    HID_REPORT_STAT
+// 
+// USB HID Report Descriptor - LedWiz only, with no joystick or keyboard
+// input reporting
+//
+static const uint8_t reportDescriptorLW[] = 
+{         
+    USAGE_PAGE(1), 0x01,            // Generic desktop
+    USAGE(1), 0x00,                 // Undefined
+
+    COLLECTION(1), 0x01,            // Application
+     
+        // input report (device to host)
+        USAGE_PAGE(1), 0x06,        // generic device controls - for config status
+        USAGE(1), 0x00,             // undefined device control
+        LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
+        LOGICAL_MAXIMUM(1), 0xFF,
+        REPORT_SIZE(1), 0x08,       // 8 bits per report
+        REPORT_COUNT(1), reportLen, // standard report length (same as if we were in joystick mode)
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+
+        // output report (host to device)
+        REPORT_SIZE(1), 0x08,       // 8 bits per report
+        REPORT_COUNT(1), 0x08,      // output report count (LEDWiz messages)
+        0x09, 0x01,                 // usage
+        0x91, 0x01,                 // Output (array)
+
+    END_COLLECTION(0)
 };
+
 
 const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len) 
 {    
-    // we only have one interface (#0)
-    if (idx != 0)
+    switch (idx)
     {
+    case 0:
+        // If the joystick is enabled, this is the joystick.
+        // Otherwise, it's the plain LedWiz control interface.
+        if (enableJoystick)
+        {
+            len = sizeof(reportDescriptorJS);
+            return reportDescriptorJS;
+        }
+        else
+        {
+            len = sizeof(reportDescriptorLW);
+            return reportDescriptorLW;
+        }
+        
+    case 1:
+        // This is the keyboard, if enabled.
+        if (useKB)
+        {
+            len = sizeof(reportDescriptorKB);
+            return reportDescriptorKB;
+        }
+        else
+        {
+            len = 0;
+            return 0;
+        }
+        
+    default:
+        // Unknown interface ID
         len = 0;
         return 0;
-    }
-    
-    // figure which type of reports we generate according to which
-    // features are enabled
-    if (enableJoystick)
-    {
-        // joystick enabled - use the JS + KB + LW descriptor
-        len = sizeof(reportDescriptorJS);
-        return reportDescriptorJS;
-    }
-    else if (useKB)
-    {
-        // joystick disabled, keyboard enabled - use KB + LW
-        len = sizeof(reportDescriptorKB);
-        return reportDescriptorKB;
-    }
-    else
-    {
-        // joystick and keyboard disabled - LW only
-        len = sizeof(reportDescriptorLW);
-        return reportDescriptorLW;
     }
 } 
  
@@ -611,18 +571,10 @@ const uint8_t *USBJoystick::stringIserialDesc()
     // the interfaces once the information is cached, causing connection failures.
     // The cache key includes the device serial number, though, so this can be 
     // resolved by changing the serial number when the interface setup changes.
-    //
-    // The version suffix serves a similar purpose, to force a new Windows cache
-    // key whenever we make changes in the USB descriptors that require a refresh
-    // on the Windows side.  The version here is completely unrelated to any other
-    // version numbers throughout the system; it's purely internal to this class
-    // and doesn't have to be synced to anything else.  There aren't any particular 
-    // rules about when it needs to be changed; we'll change it as needed when we
-    // observe the need for it due to caching problems on Windows.
     char xbuf[numChars + 1];
     uint32_t x = SIM->UIDML;
     static char ifcCode[] = "LJKC";
-    sprintf(xbuf, "PSC%08lX%08lX%c009",
+    sprintf(xbuf, "PSC%08lX%08lX%c008",
         SIM->UIDML, 
         SIM->UIDL, 
         ifcCode[(enableJoystick ? 0x01 : 0x00) | (useKB ? 0x02 : 0x00)]);
@@ -654,67 +606,165 @@ const uint8_t *USBJoystick::stringIproductDesc() {
 
 const uint8_t *USBJoystick::configurationDesc() 
 {
-    int rptlen = reportDescLength(0);
-    const int cfglen = 
-        ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
-         + (1 * INTERFACE_DESCRIPTOR_LENGTH)
-         + (1 * HID_DESCRIPTOR_LENGTH)
-         + (2 * ENDPOINT_DESCRIPTOR_LENGTH));
-    static uint8_t configurationDescriptor[] = 
+    int rptlen0 = reportDescLength(0);
+    int rptlen1 = reportDescLength(1);
+    if (useKB)
     {
-        // Configuration descriptor
-        CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
-        CONFIGURATION_DESCRIPTOR,       // bDescriptorType
-        LSB(cfglen),                    // wTotalLength (LSB)
-        MSB(cfglen),                    // wTotalLength (MSB)
-        0x01,                           // bNumInterfaces
-        DEFAULT_CONFIGURATION,          // bConfigurationValue
-        0x00,                           // iConfiguration
-        C_RESERVED | C_SELF_POWERED,    // bmAttributes
-        C_POWER(0),                     // bMaxPower
-    
-        // Interface descriptor
-        INTERFACE_DESCRIPTOR_LENGTH,    // bLength
-        INTERFACE_DESCRIPTOR,           // bDescriptorType
-        0x00,                           // bInterfaceNumber
-        0x00,                           // bAlternateSetting
-        0x02,                           // bNumEndpoints
-        HID_CLASS,                      // bInterfaceClass
-        HID_SUBCLASS_NONE,              // bInterfaceSubClass
-        HID_PROTOCOL_NONE,              // bInterfaceProtocol
-        0x00,                           // iInterface
-    
-        // HID descriptor, with link to report descriptor
-        HID_DESCRIPTOR_LENGTH,          // bLength
-        HID_DESCRIPTOR,                 // bDescriptorType
-        LSB(HID_VERSION_1_11),          // bcdHID (LSB)
-        MSB(HID_VERSION_1_11),          // bcdHID (MSB)
-        0x00,                           // bCountryCode
-        0x01,                           // bNumDescriptors
-        REPORT_DESCRIPTOR,              // bDescriptorType
-        LSB(rptlen),                    // wDescriptorLength (LSB)
-        MSB(rptlen),                    // wDescriptorLength (MSB)
-    
-        // IN endpoint descriptor
-        ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
-        ENDPOINT_DESCRIPTOR,            // bDescriptorType
-        PHY_TO_DESC(EPINT_IN),          // bEndpointAddress - EPINT == EP1
-        E_INTERRUPT,                    // bmAttributes
-        LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
-        MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
-        1,                              // bInterval (milliseconds)
-    
-        // OUT endpoint descriptor
-        ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
-        ENDPOINT_DESCRIPTOR,            // bDescriptorType
-        PHY_TO_DESC(EPINT_OUT),         // bEndpointAddress - EPINT == EP1
-        E_INTERRUPT,                    // bmAttributes
-        LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
-        MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
-        1                               // bInterval (milliseconds)
-    };
+        const int cfglenKB = 
+            ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
+             + (2 * INTERFACE_DESCRIPTOR_LENGTH)
+             + (2 * HID_DESCRIPTOR_LENGTH)
+             + (4 * ENDPOINT_DESCRIPTOR_LENGTH));
+        static uint8_t configurationDescriptorWithKB[] = 
+        {
+            CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
+            CONFIGURATION_DESCRIPTOR,       // bDescriptorType
+            LSB(cfglenKB),                  // wTotalLength (LSB)
+            MSB(cfglenKB),                  // wTotalLength (MSB)
+            0x02,                           // bNumInterfaces - TWO INTERFACES (JOYSTICK + KEYBOARD)
+            DEFAULT_CONFIGURATION,          // bConfigurationValue
+            0x00,                           // iConfiguration
+            C_RESERVED | C_SELF_POWERED,    // bmAttributes
+            C_POWER(0),                     // bMaxPower
+        
+            // ***** INTERFACE 0 - JOYSTICK/LEDWIZ ******
+            INTERFACE_DESCRIPTOR_LENGTH,    // bLength
+            INTERFACE_DESCRIPTOR,           // bDescriptorType
+            0x00,                           // bInterfaceNumber
+            0x00,                           // bAlternateSetting
+            0x02,                           // bNumEndpoints
+            HID_CLASS,                      // bInterfaceClass
+            HID_SUBCLASS_NONE,              // bInterfaceSubClass
+            HID_PROTOCOL_NONE,              // bInterfaceProtocol
+            0x00,                           // iInterface
+        
+            HID_DESCRIPTOR_LENGTH,          // bLength
+            HID_DESCRIPTOR,                 // bDescriptorType
+            LSB(HID_VERSION_1_11),          // bcdHID (LSB)
+            MSB(HID_VERSION_1_11),          // bcdHID (MSB)
+            0x00,                           // bCountryCode
+            0x01,                           // bNumDescriptors
+            REPORT_DESCRIPTOR,              // bDescriptorType
+            LSB(rptlen0),                   // wDescriptorLength (LSB)
+            MSB(rptlen0),                   // wDescriptorLength (MSB)
+        
+            ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
+            ENDPOINT_DESCRIPTOR,            // bDescriptorType
+            PHY_TO_DESC(EPINT_IN),          // bEndpointAddress - EPINT == EP1
+            E_INTERRUPT,                    // bmAttributes
+            LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
+            MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
+            1,                              // bInterval (milliseconds)
+        
+            ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
+            ENDPOINT_DESCRIPTOR,            // bDescriptorType
+            PHY_TO_DESC(EPINT_OUT),         // bEndpointAddress - EPINT == EP1
+            E_INTERRUPT,                    // bmAttributes
+            LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
+            MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
+            1,                              // bInterval (milliseconds)
+            
+            // ****** INTERFACE 1 - KEYBOARD ******
+            INTERFACE_DESCRIPTOR_LENGTH,    // bLength
+            INTERFACE_DESCRIPTOR,           // bDescriptorType
+            0x01,                           // bInterfaceNumber
+            0x00,                           // bAlternateSetting
+            0x02,                           // bNumEndpoints
+            HID_CLASS,                      // bInterfaceClass
+            HID_SUBCLASS_BOOT,              // bInterfaceSubClass
+            HID_PROTOCOL_KB,                // bInterfaceProtocol
+            0x00,                           // iInterface
+        
+            HID_DESCRIPTOR_LENGTH,          // bLength
+            HID_DESCRIPTOR,                 // bDescriptorType
+            LSB(HID_VERSION_1_11),          // bcdHID (LSB)
+            MSB(HID_VERSION_1_11),          // bcdHID (MSB)
+            0x00,                           // bCountryCode
+            0x01,                           // bNumDescriptors
+            REPORT_DESCRIPTOR,              // bDescriptorType
+            LSB(rptlen1),                   // wDescriptorLength (LSB)
+            MSB(rptlen1),                   // wDescriptorLength (MSB)
+        
+            ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
+            ENDPOINT_DESCRIPTOR,            // bDescriptorType
+            PHY_TO_DESC(EP4IN),             // bEndpointAddress
+            E_INTERRUPT,                    // bmAttributes
+            LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
+            MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
+            1,                              // bInterval (milliseconds)
+        
+            ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
+            ENDPOINT_DESCRIPTOR,            // bDescriptorType
+            PHY_TO_DESC(EP4OUT),            // bEndpointAddress
+            E_INTERRUPT,                    // bmAttributes
+            LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
+            MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
+            1,                              // bInterval (milliseconds)
 
-    return configurationDescriptor;
+        };
+
+        // Keyboard + joystick interfaces
+        return configurationDescriptorWithKB;
+    }
+    else
+    {
+        // No keyboard - joystick interface only
+        const int cfglenNoKB = 
+            ((1 * CONFIGURATION_DESCRIPTOR_LENGTH)
+              + (1 * INTERFACE_DESCRIPTOR_LENGTH)
+              + (1 * HID_DESCRIPTOR_LENGTH)
+              + (2 * ENDPOINT_DESCRIPTOR_LENGTH));
+        static uint8_t configurationDescriptorNoKB[] = 
+        {
+            CONFIGURATION_DESCRIPTOR_LENGTH,// bLength
+            CONFIGURATION_DESCRIPTOR,       // bDescriptorType
+            LSB(cfglenNoKB),                // wTotalLength (LSB)
+            MSB(cfglenNoKB),                // wTotalLength (MSB)
+            0x01,                           // bNumInterfaces
+            DEFAULT_CONFIGURATION,          // bConfigurationValue
+            0x00,                           // iConfiguration
+            C_RESERVED | C_SELF_POWERED,    // bmAttributes
+            C_POWER(0),                     // bMaxPower
+        
+            INTERFACE_DESCRIPTOR_LENGTH,    // bLength
+            INTERFACE_DESCRIPTOR,           // bDescriptorType
+            0x00,                           // bInterfaceNumber
+            0x00,                           // bAlternateSetting
+            0x02,                           // bNumEndpoints
+            HID_CLASS,                      // bInterfaceClass
+            HID_SUBCLASS_NONE,              // bInterfaceSubClass
+            HID_PROTOCOL_NONE,              // bInterfaceProtocol (keyboard)
+            0x00,                           // iInterface
+        
+            HID_DESCRIPTOR_LENGTH,          // bLength
+            HID_DESCRIPTOR,                 // bDescriptorType
+            LSB(HID_VERSION_1_11),          // bcdHID (LSB)
+            MSB(HID_VERSION_1_11),          // bcdHID (MSB)
+            0x00,                           // bCountryCode
+            0x01,                           // bNumDescriptors
+            REPORT_DESCRIPTOR,              // bDescriptorType
+            (uint8_t)(LSB(rptlen0)),        // wDescriptorLength (LSB)
+            (uint8_t)(MSB(rptlen0)),        // wDescriptorLength (MSB)
+        
+            ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
+            ENDPOINT_DESCRIPTOR,            // bDescriptorType
+            PHY_TO_DESC(EPINT_IN),          // bEndpointAddress
+            E_INTERRUPT,                    // bmAttributes
+            LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
+            MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
+            1,                              // bInterval (milliseconds)
+        
+            ENDPOINT_DESCRIPTOR_LENGTH,     // bLength
+            ENDPOINT_DESCRIPTOR,            // bDescriptorType
+            PHY_TO_DESC(EPINT_OUT),         // bEndpointAddress
+            E_INTERRUPT,                    // bmAttributes
+            LSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (LSB)
+            MSB(MAX_PACKET_SIZE_EPINT),     // wMaxPacketSize (MSB)
+            1                               // bInterval (milliseconds)
+        };
+
+        return configurationDescriptorNoKB;
+    }
 }
 
 // Set the configuration.  We need to set up the endpoints for
@@ -725,10 +775,19 @@ bool USBJoystick::USBCallback_setConfiguration(uint8_t configuration)
     if (configuration != DEFAULT_CONFIGURATION)
         return false;
         
-    // Configure endpoint 1
+    // Configure endpoint 1 - we use this in all cases, for either
+    // the combined joystick/ledwiz interface or just the ledwiz interface
     addEndpoint(EPINT_IN, MAX_REPORT_JS_TX + 1);
     addEndpoint(EPINT_OUT, MAX_REPORT_JS_RX + 1);
     readStart(EPINT_OUT, MAX_REPORT_JS_TX + 1);
+    
+    // if the keyboard is enabled, configure endpoint 4 for the kb interface
+    if (useKB)
+    {
+        addEndpoint(EP4IN, MAX_REPORT_KB_TX + 1);
+        addEndpoint(EP4OUT, MAX_REPORT_KB_RX + 1);
+        readStart(EP4OUT, MAX_REPORT_KB_TX + 1);
+    }
 
     // success
     return true;
@@ -746,31 +805,33 @@ bool USBJoystick::USBCallback_setConfiguration(uint8_t configuration)
 bool USBJoystick::EP1_OUT_callback()
 {
     // Read this message
-    uint8_t buf[MAX_HID_REPORT_SIZE];
+    union {
+        LedWizMsg msg;
+        uint8_t buf[MAX_HID_REPORT_SIZE];
+    } buf;
     uint32_t bytesRead = 0;
-    USBDevice::readEP(EP1OUT, buf, &bytesRead, MAX_HID_REPORT_SIZE);
+    USBDevice::readEP(EP1OUT, buf.buf, &bytesRead, MAX_HID_REPORT_SIZE);
     
-    // check the report type
-    switch (buf[0])
-    {
-    case REPORT_ID_JS:
-        // Joystick/ledwiz.  These are LedWiz or private protocol command
-        // messages.  Queue to the incoming LW command list.
-        if (bytesRead == 9)
-            lwbuf.write((LedWizMsg *)&buf[1]);
-        break;
-        
-    case REPORT_ID_KB:
-        // Keyboard.  These are standard USB keyboard protocol messages,
-        // telling us the shift key LED status.  We don't do anything with
-        // these; just accept and ignore them.
-        break;
-        
-    default:
-        // Other report types are unexpected; just ignore them.
-        break;
-    }
+    // if it's the right length, queue it to our circular buffer
+    if (bytesRead == 8)
+        lwbuf.write(buf.msg);
 
     // start the next read
     return readStart(EP1OUT, MAX_HID_REPORT_SIZE);
 }
+
+// Handle incoming messages on the keyboard interface = endpoint 4.
+// The host uses this to send updates for the keyboard indicator LEDs
+// (caps lock, num lock, etc).  We don't do anything with these, but
+// we have to read them to keep the pipe open.
+bool USBJoystick::EP4_OUT_callback() 
+{
+    // read this message
+    uint32_t bytesRead = 0;
+    uint8_t led[MAX_HID_REPORT_SIZE];
+    USBDevice::readEP(EP4OUT, led, &bytesRead, MAX_HID_REPORT_SIZE);
+
+    // start the next read
+    return readStart(EP4OUT, MAX_HID_REPORT_SIZE);
+}
+
