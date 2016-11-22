@@ -210,7 +210,7 @@ public:
     TLC5940(PinName SCLK, PinName MOSI, PinName GSCLK, PinName BLANK, PinName XLAT, int nchips)
         : spi(MOSI, NC, SCLK),
           gsclk(GSCLK),
-          blank(BLANK),
+          blank(BLANK, 1),
           xlat(XLAT),
           nchips(nchips)
     {
@@ -227,8 +227,8 @@ public:
         // power-on, for example.)
         blank = 1;
         
-        // Configure SPI format and speed.  Note that KL25Z ONLY supports 8-bit
-        // mode.  The TLC5940 nominally requires 12-bit data blocks for the
+        // Configure SPI format and speed.  The KL25Z only supports 8-bit mode.
+        // We nominally need to write the data in 12-bit chunks for the TLC5940
         // grayscale levels, but SPI is ultimately just a bit-level serial format,
         // so we can reformat the 12-bit blocks into 8-bit bytes to fit the 
         // KL25Z's limits.  This should work equally well on other microcontrollers 
@@ -328,7 +328,10 @@ public:
     }
     
      /*
-      *  Set an output
+      *  Set an output.  'idx' is the output index: 0 is OUT0 on the first
+      *  chip, 1 is OUT1 on the first chip, 16 is OUT0 on the second chip
+      *  in the daisy chain, etc.  'data' is the brightness value for the
+      *  output, 0=off, 4095=full brightness.
       */
     void set(int idx, unsigned short data) 
     {

@@ -205,6 +205,7 @@
 #include "potSensor.h"
 #include "nullSensor.h"
 #include "TinyDigitalIn.h"
+#include "FastPWM.h"
 
 #define DECL_EXTERNS
 #include "config.h"
@@ -824,7 +825,6 @@ static const uint16_t dof_to_gamma_tlc[] = {
     3456, 3496, 3537, 3578, 3619, 3661, 3703, 3745, 3788, 3831, 3874, 3918, 3962, 4006, 4050, 4095
 };
 
-
 // LwOut class for TLC5940 outputs.  These are fully PWM capable.
 // The 'idx' value in the constructor is the output index in the
 // daisy-chained TLC5940 array.  0 is output #0 on the first chip,
@@ -899,44 +899,101 @@ public:
 
 
 
-// Conversion table - 8-bit DOF output level to PWM float level
-// (normalized to 0.0..1.0 scale)
+// Conversion table - 8-bit DOF output level to PWM duty cycle,
+// normalized to 0.0 to 1.0 scale.
 static const float pwm_level[] = {
-    0.000000, 0.003922, 0.007843, 0.011765, 0.015686, 0.019608, 0.023529, 0.027451, 
-    0.031373, 0.035294, 0.039216, 0.043137, 0.047059, 0.050980, 0.054902, 0.058824, 
-    0.062745, 0.066667, 0.070588, 0.074510, 0.078431, 0.082353, 0.086275, 0.090196, 
-    0.094118, 0.098039, 0.101961, 0.105882, 0.109804, 0.113725, 0.117647, 0.121569, 
-    0.125490, 0.129412, 0.133333, 0.137255, 0.141176, 0.145098, 0.149020, 0.152941, 
-    0.156863, 0.160784, 0.164706, 0.168627, 0.172549, 0.176471, 0.180392, 0.184314, 
-    0.188235, 0.192157, 0.196078, 0.200000, 0.203922, 0.207843, 0.211765, 0.215686, 
-    0.219608, 0.223529, 0.227451, 0.231373, 0.235294, 0.239216, 0.243137, 0.247059, 
-    0.250980, 0.254902, 0.258824, 0.262745, 0.266667, 0.270588, 0.274510, 0.278431, 
-    0.282353, 0.286275, 0.290196, 0.294118, 0.298039, 0.301961, 0.305882, 0.309804, 
-    0.313725, 0.317647, 0.321569, 0.325490, 0.329412, 0.333333, 0.337255, 0.341176, 
-    0.345098, 0.349020, 0.352941, 0.356863, 0.360784, 0.364706, 0.368627, 0.372549, 
-    0.376471, 0.380392, 0.384314, 0.388235, 0.392157, 0.396078, 0.400000, 0.403922, 
-    0.407843, 0.411765, 0.415686, 0.419608, 0.423529, 0.427451, 0.431373, 0.435294, 
-    0.439216, 0.443137, 0.447059, 0.450980, 0.454902, 0.458824, 0.462745, 0.466667, 
-    0.470588, 0.474510, 0.478431, 0.482353, 0.486275, 0.490196, 0.494118, 0.498039, 
-    0.501961, 0.505882, 0.509804, 0.513725, 0.517647, 0.521569, 0.525490, 0.529412, 
-    0.533333, 0.537255, 0.541176, 0.545098, 0.549020, 0.552941, 0.556863, 0.560784, 
-    0.564706, 0.568627, 0.572549, 0.576471, 0.580392, 0.584314, 0.588235, 0.592157, 
-    0.596078, 0.600000, 0.603922, 0.607843, 0.611765, 0.615686, 0.619608, 0.623529, 
-    0.627451, 0.631373, 0.635294, 0.639216, 0.643137, 0.647059, 0.650980, 0.654902, 
-    0.658824, 0.662745, 0.666667, 0.670588, 0.674510, 0.678431, 0.682353, 0.686275, 
-    0.690196, 0.694118, 0.698039, 0.701961, 0.705882, 0.709804, 0.713725, 0.717647, 
-    0.721569, 0.725490, 0.729412, 0.733333, 0.737255, 0.741176, 0.745098, 0.749020, 
-    0.752941, 0.756863, 0.760784, 0.764706, 0.768627, 0.772549, 0.776471, 0.780392, 
-    0.784314, 0.788235, 0.792157, 0.796078, 0.800000, 0.803922, 0.807843, 0.811765, 
-    0.815686, 0.819608, 0.823529, 0.827451, 0.831373, 0.835294, 0.839216, 0.843137, 
-    0.847059, 0.850980, 0.854902, 0.858824, 0.862745, 0.866667, 0.870588, 0.874510, 
-    0.878431, 0.882353, 0.886275, 0.890196, 0.894118, 0.898039, 0.901961, 0.905882, 
-    0.909804, 0.913725, 0.917647, 0.921569, 0.925490, 0.929412, 0.933333, 0.937255, 
-    0.941176, 0.945098, 0.949020, 0.952941, 0.956863, 0.960784, 0.964706, 0.968627, 
-    0.972549, 0.976471, 0.980392, 0.984314, 0.988235, 0.992157, 0.996078, 1.000000
+    0.000000f, 0.003922f, 0.007843f, 0.011765f, 0.015686f, 0.019608f, 0.023529f, 0.027451f, 
+    0.031373f, 0.035294f, 0.039216f, 0.043137f, 0.047059f, 0.050980f, 0.054902f, 0.058824f, 
+    0.062745f, 0.066667f, 0.070588f, 0.074510f, 0.078431f, 0.082353f, 0.086275f, 0.090196f, 
+    0.094118f, 0.098039f, 0.101961f, 0.105882f, 0.109804f, 0.113725f, 0.117647f, 0.121569f, 
+    0.125490f, 0.129412f, 0.133333f, 0.137255f, 0.141176f, 0.145098f, 0.149020f, 0.152941f, 
+    0.156863f, 0.160784f, 0.164706f, 0.168627f, 0.172549f, 0.176471f, 0.180392f, 0.184314f, 
+    0.188235f, 0.192157f, 0.196078f, 0.200000f, 0.203922f, 0.207843f, 0.211765f, 0.215686f, 
+    0.219608f, 0.223529f, 0.227451f, 0.231373f, 0.235294f, 0.239216f, 0.243137f, 0.247059f, 
+    0.250980f, 0.254902f, 0.258824f, 0.262745f, 0.266667f, 0.270588f, 0.274510f, 0.278431f, 
+    0.282353f, 0.286275f, 0.290196f, 0.294118f, 0.298039f, 0.301961f, 0.305882f, 0.309804f, 
+    0.313725f, 0.317647f, 0.321569f, 0.325490f, 0.329412f, 0.333333f, 0.337255f, 0.341176f, 
+    0.345098f, 0.349020f, 0.352941f, 0.356863f, 0.360784f, 0.364706f, 0.368627f, 0.372549f, 
+    0.376471f, 0.380392f, 0.384314f, 0.388235f, 0.392157f, 0.396078f, 0.400000f, 0.403922f, 
+    0.407843f, 0.411765f, 0.415686f, 0.419608f, 0.423529f, 0.427451f, 0.431373f, 0.435294f, 
+    0.439216f, 0.443137f, 0.447059f, 0.450980f, 0.454902f, 0.458824f, 0.462745f, 0.466667f, 
+    0.470588f, 0.474510f, 0.478431f, 0.482353f, 0.486275f, 0.490196f, 0.494118f, 0.498039f, 
+    0.501961f, 0.505882f, 0.509804f, 0.513725f, 0.517647f, 0.521569f, 0.525490f, 0.529412f, 
+    0.533333f, 0.537255f, 0.541176f, 0.545098f, 0.549020f, 0.552941f, 0.556863f, 0.560784f, 
+    0.564706f, 0.568627f, 0.572549f, 0.576471f, 0.580392f, 0.584314f, 0.588235f, 0.592157f, 
+    0.596078f, 0.600000f, 0.603922f, 0.607843f, 0.611765f, 0.615686f, 0.619608f, 0.623529f, 
+    0.627451f, 0.631373f, 0.635294f, 0.639216f, 0.643137f, 0.647059f, 0.650980f, 0.654902f, 
+    0.658824f, 0.662745f, 0.666667f, 0.670588f, 0.674510f, 0.678431f, 0.682353f, 0.686275f, 
+    0.690196f, 0.694118f, 0.698039f, 0.701961f, 0.705882f, 0.709804f, 0.713725f, 0.717647f, 
+    0.721569f, 0.725490f, 0.729412f, 0.733333f, 0.737255f, 0.741176f, 0.745098f, 0.749020f, 
+    0.752941f, 0.756863f, 0.760784f, 0.764706f, 0.768627f, 0.772549f, 0.776471f, 0.780392f, 
+    0.784314f, 0.788235f, 0.792157f, 0.796078f, 0.800000f, 0.803922f, 0.807843f, 0.811765f, 
+    0.815686f, 0.819608f, 0.823529f, 0.827451f, 0.831373f, 0.835294f, 0.839216f, 0.843137f, 
+    0.847059f, 0.850980f, 0.854902f, 0.858824f, 0.862745f, 0.866667f, 0.870588f, 0.874510f, 
+    0.878431f, 0.882353f, 0.886275f, 0.890196f, 0.894118f, 0.898039f, 0.901961f, 0.905882f, 
+    0.909804f, 0.913725f, 0.917647f, 0.921569f, 0.925490f, 0.929412f, 0.933333f, 0.937255f, 
+    0.941176f, 0.945098f, 0.949020f, 0.952941f, 0.956863f, 0.960784f, 0.964706f, 0.968627f, 
+    0.972549f, 0.976471f, 0.980392f, 0.984314f, 0.988235f, 0.992157f, 0.996078f, 1.000000f
 };
 
-// LwOut class for a PWM-capable GPIO port
+
+// Conversion table for 8-bit DOF level to pulse width in microseconds,
+// with gamma correction.  We could use the layered gamma output on top 
+// of the regular LwPwmOut class for this, but we get better precision
+// with a dedicated table, because we apply gamma correction to the
+// 32-bit microsecond values rather than the 8-bit DOF levels.
+static const float dof_to_gamma_pwm[] = {
+    0.000000f, 0.000000f, 0.000001f, 0.000004f, 0.000009f, 0.000017f, 0.000028f, 0.000042f,
+    0.000062f, 0.000086f, 0.000115f, 0.000151f, 0.000192f, 0.000240f, 0.000296f, 0.000359f,
+    0.000430f, 0.000509f, 0.000598f, 0.000695f, 0.000803f, 0.000920f, 0.001048f, 0.001187f,
+    0.001337f, 0.001499f, 0.001673f, 0.001860f, 0.002059f, 0.002272f, 0.002498f, 0.002738f,
+    0.002993f, 0.003262f, 0.003547f, 0.003847f, 0.004162f, 0.004494f, 0.004843f, 0.005208f,
+    0.005591f, 0.005991f, 0.006409f, 0.006845f, 0.007301f, 0.007775f, 0.008268f, 0.008781f,
+    0.009315f, 0.009868f, 0.010442f, 0.011038f, 0.011655f, 0.012293f, 0.012954f, 0.013637f,
+    0.014342f, 0.015071f, 0.015823f, 0.016599f, 0.017398f, 0.018223f, 0.019071f, 0.019945f,
+    0.020844f, 0.021769f, 0.022720f, 0.023697f, 0.024701f, 0.025731f, 0.026789f, 0.027875f,
+    0.028988f, 0.030129f, 0.031299f, 0.032498f, 0.033726f, 0.034983f, 0.036270f, 0.037587f,
+    0.038935f, 0.040313f, 0.041722f, 0.043162f, 0.044634f, 0.046138f, 0.047674f, 0.049243f,
+    0.050844f, 0.052478f, 0.054146f, 0.055847f, 0.057583f, 0.059353f, 0.061157f, 0.062996f,
+    0.064870f, 0.066780f, 0.068726f, 0.070708f, 0.072726f, 0.074780f, 0.076872f, 0.079001f,
+    0.081167f, 0.083371f, 0.085614f, 0.087895f, 0.090214f, 0.092572f, 0.094970f, 0.097407f,
+    0.099884f, 0.102402f, 0.104959f, 0.107558f, 0.110197f, 0.112878f, 0.115600f, 0.118364f,
+    0.121170f, 0.124019f, 0.126910f, 0.129844f, 0.132821f, 0.135842f, 0.138907f, 0.142016f,
+    0.145170f, 0.148367f, 0.151610f, 0.154898f, 0.158232f, 0.161611f, 0.165037f, 0.168509f,
+    0.172027f, 0.175592f, 0.179205f, 0.182864f, 0.186572f, 0.190327f, 0.194131f, 0.197983f,
+    0.201884f, 0.205834f, 0.209834f, 0.213883f, 0.217982f, 0.222131f, 0.226330f, 0.230581f,
+    0.234882f, 0.239234f, 0.243638f, 0.248094f, 0.252602f, 0.257162f, 0.261774f, 0.266440f,
+    0.271159f, 0.275931f, 0.280756f, 0.285636f, 0.290570f, 0.295558f, 0.300601f, 0.305699f,
+    0.310852f, 0.316061f, 0.321325f, 0.326645f, 0.332022f, 0.337456f, 0.342946f, 0.348493f,
+    0.354098f, 0.359760f, 0.365480f, 0.371258f, 0.377095f, 0.382990f, 0.388944f, 0.394958f,
+    0.401030f, 0.407163f, 0.413356f, 0.419608f, 0.425921f, 0.432295f, 0.438730f, 0.445226f,
+    0.451784f, 0.458404f, 0.465085f, 0.471829f, 0.478635f, 0.485504f, 0.492436f, 0.499432f,
+    0.506491f, 0.513614f, 0.520800f, 0.528052f, 0.535367f, 0.542748f, 0.550194f, 0.557705f,
+    0.565282f, 0.572924f, 0.580633f, 0.588408f, 0.596249f, 0.604158f, 0.612133f, 0.620176f,
+    0.628287f, 0.636465f, 0.644712f, 0.653027f, 0.661410f, 0.669863f, 0.678384f, 0.686975f,
+    0.695636f, 0.704366f, 0.713167f, 0.722038f, 0.730979f, 0.739992f, 0.749075f, 0.758230f,
+    0.767457f, 0.776755f, 0.786126f, 0.795568f, 0.805084f, 0.814672f, 0.824334f, 0.834068f,
+    0.843877f, 0.853759f, 0.863715f, 0.873746f, 0.883851f, 0.894031f, 0.904286f, 0.914616f,
+    0.925022f, 0.935504f, 0.946062f, 0.956696f, 0.967407f, 0.978194f, 0.989058f, 1.000000f
+};
+
+// LwOut class for a PWM-capable GPIO port.  Note that we use FastPWM for
+// the underlying port interface.  This isn't because we need the "fast"
+// part; it's because FastPWM fixes a bug in the base mbed PwmOut class
+// that makes it look ugly for fades.  The base PwmOut class resets
+// the cycle counter when changing the duty cycle, which makes the output
+// reset immediately on every change.  For an output connected to a lamp
+// or LED, this causes obvious flickering when performing a rapid series
+// of writes, such as during a fade.  The KL25Z TPM hardware is specifically
+// designed to make it easy for software to avoid this kind of flickering 
+// when used correctly: it has an internal staging register for the duty
+// cycle register that gets latched at the start of the next cycle, ensuring
+// that the duty cycle setting never changes mid-cycle.  The mbed PwmOut
+// defeats this by resetting the cycle counter on every write, which aborts 
+// the current cycle at the moment of the write, causing an effectively random 
+// drop in brightness on each write (by artificially shortening a cycle).
+// Fortunately, we can fix this by switching to the API-compatible FastPWM
+// class, which does the write right (heh).
 class LwPwmOut: public LwOut
 {
 public:
@@ -950,9 +1007,25 @@ public:
         if (val != prv)
             p.write(pwm_level[prv = val]); 
     }
-    PwmOut p;
+    FastPWM p;
     uint8_t prv;
 };
+
+// Gamma corrected PWM GPIO output
+class LwPwmGammaOut: public LwPwmOut
+{
+public:
+    LwPwmGammaOut(PinName pin, uint8_t initVal)
+        : LwPwmOut(pin, initVal)
+    {
+    }
+    virtual void set(uint8_t val)
+    {
+        if (val != prv)
+            p.write(dof_to_gamma_pwm[prv = val]);
+    }
+};
+
 
 // LwOut class for a Digital-Only (Non-PWM) GPIO port
 class LwDigOut: public LwOut
@@ -1013,7 +1086,25 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     case PortTypeGPIOPWM:
         // PWM GPIO port - assign if we have a valid pin
         if (pin != 0)
-            lwp = new LwPwmOut(wirePinName(pin), activeLow ? 255 : 0);
+        {
+            // If gamma correction is to be used, and we're not inverting the output,
+            // use the combined Pwmout + Gamma output class; otherwise use the plain
+            // PwmOut class.  We can't use the combined class for inverted outputs
+            // because we have to apply gamma correction before the inversion.
+            if (gamma && !activeLow)
+            {
+                // use the gamma-corrected PwmOut type
+                lwp = new LwPwmGammaOut(wirePinName(pin), 0);
+                
+                // don't apply further gamma correction to this output
+                gamma = false;
+            }
+            else
+            {
+                // no gamma correction - use the standard PwmOut class
+                lwp = new LwPwmOut(wirePinName(pin), activeLow ? 255 : 0);
+            }
+        }
         else
             lwp = new LwVirtualOut();
         break;
@@ -1096,7 +1187,7 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
         lwp = new LwGammaOut(lwp);
         
     // If this is the ZB Launch Ball port, layer a monitor object.  Note
-    // that the nominal port numbering in the cofnig starts at 1, but we're
+    // that the nominal port numbering in the config starts at 1, but we're
     // using an array index, so test against portno+1.
     if (portno + 1 == cfg.plunger.zbLaunchBall.port)
         lwp = new LwZbLaunchOut(lwp);

@@ -698,13 +698,14 @@
 // the maximum array index.
 //
 // 254 -> Input button setup.  This sets up one button; it can be repeated for each
-//        button to be configured.  There are 32 button slots, numbered 1-32.  Each
+//        button to be configured.  There are MAX_EXT_BUTTONS button slots (see
+//        config.h for the constant definition), numbered 1..MAX_EXT_BUTTONS.  Each
 //        slot can be configured as a joystick button, a regular keyboard key, or a
 //        media control key (mute, volume up, volume down).
 //
 //        The bytes of the message are:
-//          byte 3 = Button number (1-32)
-//          byte 4 = GPIO pin to read for button input
+//          byte 3 = Button number (1..MAX_EXT_BUTTONS)
+//          byte 4 = GPIO pin for the button input; mapped as a DigitalIn port
 //          byte 5 = key type reported to PC when button is pushed:
 //                    0 = none (no PC input reported when button pushed)
 //                    1 = joystick button -> byte 6 is the button number, 1-32
