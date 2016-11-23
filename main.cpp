@@ -1522,15 +1522,24 @@ struct ButtonState
     // DigitalIn for the button, if connected to a physical input
     TinyDigitalIn *di;
     
-    // current PHYSICAL on/off state, after debouncing
-    uint8_t physState : 1;
+    // Time of last pulse state transition.
+    //
+    // Each state change sticks for a minimum period; when the timer expires,
+    // if the underlying physical switch is in a different state, we switch
+    // to the next state and restart the timer.  pulseTime is the time remaining
+    // remaining before we can make another state transition, in microseconds.
+    // The state transitions require a complete cycle, 1 -> 2 -> 3 -> 4 -> 1...; 
+    // this guarantees that the parity of the pulse count always matches the 
+    // current physical switch state when the latter is stable, which makes
+    // it impossible to "trick" the host by rapidly toggling the switch state.
+    // (On my original Pinscape cabinet, I had a hardware pulse generator
+    // for coin door, and that *was* possible to trick by rapid toggling.
+    // This software system can't be fooled that way.)
+    uint32_t pulseTime;
     
-    // current LOGICAL on/off state as reported to the host.
-    uint8_t logState : 1;
-
-    // previous logical on/off state, when keys were last processed for USB 
-    // reports and local effects
-    uint8_t prevLogState : 1;
+    // Config key index.  This points to the ButtonCfg structure in the
+    // configuration that contains the PC key mapping for the button.
+    uint8_t cfgIndex;
     
     // Virtual press state.  This is used to simulate pressing the button via
     // software inputs rather than physical inputs.  To allow one button to be
@@ -1549,15 +1558,31 @@ struct ButtonState
     // a parameter that determines how long we wait for transients to settle).
     uint8_t dbState;
     
-    // Pulse mode: a button in pulse mode transmits a brief logical button press and
-    // release each time the attached physical switch changes state.  This is useful
-    // for cases where the host expects a key press for each change in the state of
-    // the physical switch.  The canonical example is the Coin Door switch in VPinMAME, 
-    // which requires pressing the END key to toggle the open/closed state.  This
-    // software design isn't easily implemented in a physical coin door, though -
-    // the easiest way to sense a physical coin door's state is with a simple on/off
-    // switch.  Pulse mode bridges that divide by converting a physical switch state
-    // to on/off toggle key reports to the host.
+    // current PHYSICAL on/off state, after debouncing
+    uint8_t physState : 1;
+    
+    // current LOGICAL on/off state as reported to the host.
+    uint8_t logState : 1;
+
+    // previous logical on/off state, when keys were last processed for USB 
+    // reports and local effects
+    uint8_t prevLogState : 1;
+    
+    // Pulse state
+    // 
+    // A button in pulse mode (selected via the config flags for the button) 
+    // transmits a brief logical button press and release each time the attached 
+    // physical switch changes state.  This is useful for cases where the host 
+    // expects a key press for each change in the state of the physical switch.  
+    // The canonical example is the Coin Door switch in VPinMAME, which requires 
+    // pressing the END key to toggle the open/closed state.  This software design 
+    // isn't easily implemented in a physical coin door, though; the simplest
+    // physical sensor for the coin door state is a switch that's on when the 
+    // door is open and off when the door is closed (or vice versa, but in either 
+    // case, the switch state corresponds to the current state of the door at any
+    // given time, rather than pulsing on state changes).  The "pulse mode"
+    // option brdiges this gap by generating a toggle key event each time
+    // there's a change to the physical switch's state.
     //
     // Pulse state:
     //   0 -> not a pulse switch - logical key state equals physical switch state
@@ -1565,22 +1590,13 @@ struct ButtonState
     //   2 -> transitioning off-on
     //   3 -> on
     //   4 -> transitioning on-off
-    //
-    // Each state change sticks for a minimum period; when the timer expires,
-    // if the underlying physical switch is in a different state, we switch
-    // to the next state and restart the timer.  pulseTime is the time remaining
-    // remaining before we can make another state transition, in microseconds.
-    // The state transitions require a complete cycle, 1 -> 2 -> 3 -> 4 -> 1...; 
-    // this guarantees that the parity of the pulse count always matches the 
-    // current physical switch state when the latter is stable, which makes
-    // it impossible to "trick" the host by rapidly toggling the switch state.
-    // (On my original Pinscape cabinet, I had a hardware pulse generator
-    // for coin door, and that *was* possible to trick by rapid toggling.
-    // This software system can't be fooled that way.)
-    uint8_t pulseState;
-    uint32_t pulseTime;
-    
-} __attribute__((packed)) buttonState[MAX_BUTTONS];
+    uint8_t pulseState : 3;         // 5 states -> we need 3 bits
+
+} __attribute__((packed));
+
+ButtonState *buttonState;       // live button slots, allocated on startup
+int8_t nButtons;                // number of live button slots allocated
+int8_t zblButtonIndex = -1;     // index of ZB Launch button slot; -1 if unused
 
 
 // Button data
@@ -1613,7 +1629,7 @@ void scanButtons()
 {
     // scan all button input pins
     ButtonState *bs = buttonState;
-    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
+    for (int i = 0 ; i < nButtons ; ++i, ++bs)
     {
         // if this logical button is connected to a physical input, check 
         // the GPIO pin state
@@ -1645,11 +1661,69 @@ void scanButtons()
 // in the physical button state.
 Timer buttonTimer;
 
+// Count a button during the initial setup scan
+void countButton(uint8_t typ, bool &kbKeys)
+{
+    // count it
+    ++nButtons;
+    
+    // if it's a keyboard key, note that we need a USB keyboard interface
+    if (typ == BtnTypeKey)
+        kbKeys = true;
+}
+
 // initialize the button inputs
 void initButtons(Config &cfg, bool &kbKeys)
 {
     // presume we'll find no keyboard keys
     kbKeys = false;
+    
+    // Count up how many button slots we'll need to allocate.  Start
+    // with assigned buttons from the configuration, noting that we
+    // only need to create slots for buttons that are actually wired.
+    nButtons = 0;
+    for (int i = 0 ; i < MAX_BUTTONS ; ++i)
+    {
+        // it's valid if it's wired to a real input pin
+        if (wirePinName(cfg.button[i].pin) != NC)
+            countButton(cfg.button[i].typ, kbKeys);
+    }
+    
+    // Count virtual buttons
+
+    // ZB Launch
+    if (cfg.plunger.zbLaunchBall.port != 0)
+    {
+        // valid - remember the live button index
+        zblButtonIndex = nButtons;
+        
+        // count it
+        countButton(cfg.plunger.zbLaunchBall.keytype, kbKeys);
+    }
+
+    // Allocate the live button slots
+    ButtonState *bs = buttonState = new ButtonState[nButtons];
+    
+    // Configure the physical inputs
+    for (int i = 0 ; i < MAX_BUTTONS ; ++i)
+    {
+        PinName pin = wirePinName(cfg.button[i].pin);
+        if (pin != NC)
+        {
+            // point back to the config slot for the keyboard data
+            bs->cfgIndex = i;
+
+            // set up the GPIO input pin for this button
+            bs->di = new TinyDigitalIn(pin);
+            
+            // if it's a pulse mode button, set the initial pulse state to Off
+            if (cfg.button[i].flags & BtnFlagPulse)
+                bs->pulseState = 1;
+                
+            // advance to the next button
+            ++bs;
+        }
+    }
     
     // Configure the virtual buttons.  These are buttons controlled via
     // software triggers rather than physical GPIO inputs.  The virtual
@@ -1657,47 +1731,19 @@ void initButtons(Config &cfg, bool &kbKeys)
     // they get their configuration data from other config variables.
     
     // ZB Launch Ball button
-    cfg.button[ZBL_BUTTON].set(
-        PINNAME_TO_WIRE(NC),
-        cfg.plunger.zbLaunchBall.keytype,
-        cfg.plunger.zbLaunchBall.keycode);
-    
-    // create the digital inputs
-    ButtonState *bs = buttonState;
-    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs)
+    if (cfg.plunger.zbLaunchBall.port != 0)
     {
-        PinName pin = wirePinName(cfg.button[i].pin);
-        if (pin != NC)
-        {
-            // set up the GPIO input pin for this button
-            bs->di = new TinyDigitalIn(pin);
-            
-            // if it's a pulse mode button, set the initial pulse state to Off
-            if (cfg.button[i].flags & BtnFlagPulse)
-                bs->pulseState = 1;
-            
-            // Note if it's a keyboard key of some kind.  If we find any keyboard
-            // mappings, we'll declare a keyboard interface when we send our HID 
-            // configuration to the host during USB connection setup.
-            switch (cfg.button[i].typ)
-            {
-            case BtnTypeKey:
-                // note that we have at least one keyboard key
-                kbKeys = true;
-                break;
-                
-            default:
-                // not a keyboard key
-                break;
-            }
-        }
+        // Point back to the config slot for the keyboard data.
+        // We use a special extra slot for virtual buttons, so
+        // we also need to set up the slot data.
+        bs->cfgIndex = ZBL_BUTTON_CFG;
+        cfg.button[ZBL_BUTTON_CFG].pin = PINNAME_TO_WIRE(NC);
+        cfg.button[ZBL_BUTTON_CFG].typ = cfg.plunger.zbLaunchBall.keytype;
+        cfg.button[ZBL_BUTTON_CFG].val = cfg.plunger.zbLaunchBall.keycode;
+        
+        // advnace to the next button
+        ++bs;
     }
-    
-    // If the ZB Launch Ball feature is enabled, and it uses a keyboard
-    // key, this requires setting up a USB keyboard interface.
-    if (cfg.plunger.zbLaunchBall.port != 0 
-        && cfg.plunger.zbLaunchBall.keytype == BtnTypeKey)
-        kbKeys = true;
     
     // start the button scan thread
     buttonTicker.attach_us(scanButtons, 1000);
@@ -1729,8 +1775,7 @@ void processButtons(Config &cfg)
 
     // scan the button list
     ButtonState *bs = buttonState;
-    ButtonCfg *bc = cfg.button;
-    for (int i = 0 ; i < MAX_BUTTONS ; ++i, ++bs, ++bc)
+    for (int i = 0 ; i < nButtons ; ++i, ++bs)
     {
         // if it's a pulse-mode switch, get the virtual pressed state
         if (bs->pulseState != 0)
@@ -1827,6 +1872,7 @@ void processButtons(Config &cfg)
         if (bs->logState || bs->virtState)
         {
             // OR in the joystick button bit, mod key bits, and media key bits
+            ButtonCfg *bc = &cfg.button[bs->cfgIndex];
             uint8_t val = bc->val;
             switch (bc->typ)
             {
@@ -3743,7 +3789,7 @@ public:
             btnState = on;
             
             // update the virtual button state
-            buttonState[ZBL_BUTTON].virtPress(on);
+            buttonState[zblButtonIndex].virtPress(on);
         }
     }
     

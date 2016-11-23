@@ -182,9 +182,9 @@ void v_func(uint8_t *data)
             if (idx == 0)
             {
                 // index 0 on query retrieves number of slots
-                v_byte_ro(MAX_EXT_BUTTONS, 3);
+                v_byte_ro(MAX_BUTTONS, 3);
             }
-            else if (idx > 0 && idx <= MAX_EXT_BUTTONS)
+            else if (idx > 0 && idx <= MAX_BUTTONS)
             {
                 // adjust to an array index
                 --idx;

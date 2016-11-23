@@ -96,11 +96,12 @@ struct ButtonCfg
 } __attribute__((packed));
     
 
-// maximum number of input button mappings
-const int MAX_EXT_BUTTONS = 32;             // buttons visible through USB interface
-const int VIRTUAL_BUTTONS = 1;              // number of internal virtual buttons
-const int ZBL_BUTTON = MAX_EXT_BUTTONS;     // index of virtual ZB Launch Ball button
-const int MAX_BUTTONS = MAX_EXT_BUTTONS + VIRTUAL_BUTTONS;  // total button slots
+// maximum number of input button mappings in configuration
+const int MAX_BUTTONS = 48;
+
+// extra slots for virtual buttons (ZB Launch Ball)
+const int VIRTUAL_BUTTONS = 1;              // total number of buttons
+const int ZBL_BUTTON_CFG = MAX_BUTTONS;     // index of ZB Launch Ball slot
 
 // LedWiz output port type codes
 // These values are part of the external USB interface
@@ -208,7 +209,7 @@ struct Config
         
         // disable the ZB Launch Ball by default
         plunger.zbLaunchBall.port = 0;                  // 0 = disabled
-        plunger.zbLaunchBall.keytype = 2;               // 2 = keyboard key
+        plunger.zbLaunchBall.keytype = BtnTypeKey;      // keyboard key
         plunger.zbLaunchBall.keycode = 0x28;            // USB keyboard scan code for Enter key
         plunger.zbLaunchBall.pushDistance = 63;         // 63/1000 in == .063" == about 1/16"
         
@@ -674,7 +675,7 @@ struct Config
 
 
     // --- Button Input Setup ---
-    ButtonCfg button[MAX_BUTTONS] __attribute__((packed));
+    ButtonCfg button[MAX_BUTTONS + VIRTUAL_BUTTONS] __attribute__((packed));
 
     // --- LedWiz Output Port Setup ---
     LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 
