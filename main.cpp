@@ -1679,8 +1679,9 @@ void countButton(uint8_t typ, bool &kbKeys)
     // count it
     ++nButtons;
     
-    // if it's a keyboard key, note that we need a USB keyboard interface
-    if (typ == BtnTypeKey)
+    // if it's a keyboard key or media key, note that we need a USB 
+    // keyboard interface
+    if (typ == BtnTypeKey || typ == BtnTypeMedia)
         kbKeys = true;
 }
 
@@ -1774,6 +1775,40 @@ void initButtons(Config &cfg, bool &kbKeys)
     // start the button state transition timer
     buttonTimer.start();
 }
+
+// Media key mapping.  This maps from an 8-bit USB media key
+// code to the corresponding bit in our USB report descriptor.
+// The USB key code is the index, and the value at the index
+// is the report descriptor bit.  See joystick.cpp for the
+// media descriptor details.  Our currently mapped keys are:
+//
+//    0xE2 -> Mute -> 0x01
+//    0xE9 -> Volume Up -> 0x02
+//    0xEA -> Volume Down -> 0x04
+//    0xB5 -> Next Track -> 0x08
+//    0xB6 -> Previous Track -> 0x10
+//    0xB7 -> Stop -> 0x20
+//    0xCD -> Play / Pause -> 0x40
+//
+static const uint8_t mediaKeyMap[] = {
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 00-0F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 10-1F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 20-2F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 30-3F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 40-4F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 50-5F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 60-6F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 70-7F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 80-8F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // 90-9F
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // A0-AF
+     0,  0,  0,  0,  0,  8, 16, 32,  0,  0,  0,  0,  0,  0,  0,  0, // B0-BF
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, 64,  0,  0, // C0-CF
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // D0-DF
+     0,  0,  1,  0,  0,  0,  0,  0,  0,  2,  4,  0,  0,  0,  0,  0, // E0-EF
+     0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0  // F0-FF
+ };
+
 
 // Process the button state.  This sets up the joystick, keyboard, and
 // media control descriptors with the current state of keys mapped to
@@ -2007,37 +2042,26 @@ void processButtons(Config &cfg)
                 break;
                 
             case BtnTypeKey:
-                // Keyboard key.  This could be a modifier key (shift, control,
-                // alt, GUI), a media key (mute, volume up, volume down), or a
-                // regular key.  Check which one.
-                if (val >= 0x7F && val <= 0x81)
+                // Keyboard key.  The USB keyboard report encodes regular
+                // keys and modifier keys separately, so we need to check
+                // which type we have.  Note that past versions mapped the 
+                // Keyboard Volume Up, Keyboard Volume Down, and Keyboard 
+                // Mute keys to the corresponding Media keys.  We no longer
+                // do this; instead, we have the separate BtnTypeMedia for
+                // explicitly using media keys if desired.
+                if (val >= 0xE0 && val <= 0xE7)
                 {
-                    // It's a media key.  OR the key into the media key mask.
-                    // The media mask bits are mapped in the HID report descriptor
-                    // in USBJoystick.cpp.  For simplicity, we arrange the mask so
-                    // that the ones with regular keyboard equivalents that we catch
-                    // here are in the same order as the key scan codes:
-                    //
-                    //   Mute     = scan 0x7F = mask bit 0x01
-                    //   Vol Up   = scan 0x80 = mask bit 0x02
-                    //   Vol Down = scan 0x81 = mask bit 0x04
-                    //
-                    // So we can translate from scan code to bit mask with some
-                    // simple bit shifting:
-                    mediakeys |= (1 << (val - 0x7f));
-                }
-                else if (val >= 0xE0 && val <= 0xE7)
-                {
-                    // It's a modifier key.  Like the media keys, these are represented
-                    // in the USB reports with a bit mask, and like the media keys, we
-                    // arrange the mask bits in the same order as the scan codes.  This
-                    // makes figuring the mask a simple bit shift:
+                    // It's a modifier key.  These are represented in the USB 
+                    // reports with a bit mask.  We arrange the mask bits in
+                    // the same order as the scan codes, so we can figure the
+                    // appropriate bit with a simple shift.
                     modkeys |= (1 << (val - 0xE0));
                 }
                 else
                 {
-                    // It's a regular key.  Make sure it's not already in the list, and
-                    // that the list isn't full.  If neither of these apply, add the key.
+                    // It's a regular key.  Make sure it's not already in the 
+                    // list, and that the list isn't full.  If neither of these 
+                    // apply, add the key to the key array.
                     if (nkeys < 7)
                     {
                         bool found = false;
@@ -2054,6 +2078,18 @@ void processButtons(Config &cfg)
                     }
                 }
                 break;
+
+            case BtnTypeMedia:
+                // Media control key.  The media keys are mapped in the USB
+                // report to bits, whereas the key codes are specified in the
+                // config with their USB usage numbers.  E.g., the config val
+                // for Media Next Track is 0xB5, but we encode this in the USB
+                // report as bit 0x08.  The mediaKeyMap[] table translates
+                // from the USB usage number to the mask bit.  If the key isn't
+                // among the subset we support, the mapped bit will be zero, so
+                // the "|=" will have no effect and the key will be ignored.
+                mediakeys |= mediaKeyMap[val];
+                break;                                
             }
         }
     }

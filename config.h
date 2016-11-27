@@ -69,6 +69,7 @@ const int OrientationRear      = 3;      // ports pointed toward back of cabinet
 const int BtnTypeNone          = 0;      // unused
 const int BtnTypeJoystick      = 1;      // joystick button
 const int BtnTypeKey           = 2;      // keyboard key
+const int BtnTypeMedia         = 3;      // media control key
 
 // input button flags
 const uint8_t BtnFlagPulse     = 0x01;   // pulse mode - reports each change in the physical switch state

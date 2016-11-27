@@ -756,6 +756,7 @@
 //                    0 = none (no PC input reported when button pushed)
 //                    1 = joystick button -> byte 6 is the button number, 1-32
 //                    2 = regular keyboard key -> byte 6 is the USB key code (see below)
+//                    3 = media key -> byte 6 is the USB media control code (see below)
 //          byte 6 = key code, which depends on the key type in byte 5
 //          byte 7 = flags - a combination of these bit values:
 //                    0x01 = pulse mode.  This reports a physical on/off switch's state
@@ -884,6 +885,18 @@
 // pressed at the same time.  The shift keys in the E0-E7 range don't
 // count against this limit, though, since they're encoded as modifier
 // keys; all of these can be pressed at the same time in addition to 6
-// regular keys.  In addition, the Mute, Volume Up, and Volume Down 
-// keys are also encoded separately, in this case as "media controls"
-// instead of regular keys.
+// regular keys.
+
+// --- USB MEDIA CONTROL SCAN CODES ---
+//
+// Buttons mapped to type 3 are Media Control buttons.  These select
+// a small set of common media control functions.  We recognize the
+// following type codes only:
+//
+//   Mute              -> E2
+//   Volume up         -> E9
+//   Volume Down       -> EA
+//   Next Track        -> B5
+//   Previous Track    -> B6
+//   Stop              -> B7
+//   Play/Pause        -> CD
