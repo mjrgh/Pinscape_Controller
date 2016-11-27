@@ -77,13 +77,26 @@ const uint8_t BtnFlagPulse     = 0x01;   // pulse mode - reports each change in 
 // button setup structure
 struct ButtonCfg
 {
-    uint8_t pin;        // physical input GPIO pin - a USB-to-PinName mapping index
+    // physical GPIO pin - a Wire-to-PinName mapping index
+    uint8_t pin;
+    
+    // Key type and value reported to the PC
     uint8_t typ;        // key type reported to PC - a BtnTypeXxx value
     uint8_t val;        // key value reported - meaning depends on 'typ' value:
                         //   none     -> no PC input reports (val is unused)
                         //   joystick -> val is joystick button number (1..32)
                         //   keyboard -> val is USB scan code
-    uint8_t flags;      // key flags - a bitwise combination of BtnFlagXxx values
+                        
+    // Shifted key type and value.  These used when the button is pressed 
+    // while the Local Shift Button is being held down.  We send the key
+    // code given here instead of the regular typ/val code in this case.
+    // If typ2 is BtnTypeNone, we use the regular typ/val code whether or
+    // not the shift button is being held.
+    uint8_t typ2;       // shifted key type
+    uint8_t val2;       // shifted key value
+    
+    // key flags - a bitwise combination of BtnFlagXxx values
+    uint8_t flags;
 
     void set(uint8_t pin, uint8_t typ, uint8_t val, uint8_t flags = 0)
     {
@@ -275,6 +288,9 @@ struct Config
         
         // initially configure with no LedWiz output ports
         outPort[0].typ = PortTypeDisabled;
+        
+        // initially configure with no shift key
+        shiftButton = 0;
             
         // initially configure with no input buttons
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
@@ -676,6 +692,35 @@ struct Config
 
     // --- Button Input Setup ---
     ButtonCfg button[MAX_BUTTONS + VIRTUAL_BUTTONS] __attribute__((packed));
+    
+    // Shift button index.  If this is zero, there's no shift button.  If this
+    // is nonzero, it's the 1-based index of the shift button in the button[]
+    // list.  
+    //
+    // The shift button can also be used as a regular input key.  If it is,
+    // we DON'T send the input key to the PC as usual when the button is 
+    // pressed.  Instead, we wait to see if the shift function is used:
+    //
+    // - If another button is pressed while the shift button is held down,
+    // and the other button is programmed with a valid key for the shifted/
+    // secondary meaning (i.e., typ2 is not BtnTypeNone), the shift function
+    // is considered to have been used.  We send the secondary meaning of
+    // the other button to the PC.  The shift key itself generates no PC
+    // input in this case, since it has now performed its shift function.
+    // Other shifted keys can also be pressed as long as the shift button 
+    // is held down, and they'll be sent to the PC with their shifted values
+    // as well.
+    //
+    // - If the shift button is released before any other button with a
+    // shifted key value is pressed, then the shift button press is taken to
+    // be an ordinary key press instead of the shift function.  In this case,
+    // we report the shift button's key code to the PC when the button is
+    // released.  We can't report the key code to the PC until then because
+    // we don't know until then that another key won't be pressed first.
+    // The key press on release is a single timed pulse that's long enough
+    // to register as a single key press on the PC, but not long enough to
+    // trigger auto-repeat on the PC.
+    uint8_t shiftButton;
 
     // --- LedWiz Output Port Setup ---
     LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 

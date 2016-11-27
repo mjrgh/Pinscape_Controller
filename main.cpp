@@ -1598,6 +1598,18 @@ ButtonState *buttonState;       // live button slots, allocated on startup
 int8_t nButtons;                // number of live button slots allocated
 int8_t zblButtonIndex = -1;     // index of ZB Launch button slot; -1 if unused
 
+// Shift button state
+struct
+{
+    int8_t index;               // buttonState[] index of shift button; -1 if none
+    uint8_t state : 2;          // current shift state:
+                                //   0 = not shifted
+                                //   1 = shift button down, no key pressed yet
+                                //   2 = shift button down, key pressed
+    uint8_t pulse : 1;          // sending pulsed keystroke on release
+    uint32_t pulseTime;         // time of start of pulsed keystroke
+}
+__attribute__((packed)) shiftButton;
 
 // Button data
 uint32_t jsButtons = 0;
@@ -1678,6 +1690,9 @@ void initButtons(Config &cfg, bool &kbKeys)
     // presume we'll find no keyboard keys
     kbKeys = false;
     
+    // presume no shift key
+    shiftButton.index = -1;
+    
     // Count up how many button slots we'll need to allocate.  Start
     // with assigned buttons from the configuration, noting that we
     // only need to create slots for buttons that are actually wired.
@@ -1720,6 +1735,13 @@ void initButtons(Config &cfg, bool &kbKeys)
             if (cfg.button[i].flags & BtnFlagPulse)
                 bs->pulseState = 1;
                 
+            // If this is the shift button, note its buttonState[] index.
+            // We have to figure the buttonState[] index separately from
+            // the config index, because the indices can differ if some
+            // config slots are left unused.
+            if (cfg.shiftButton == i+1)
+                shiftButton.index = bs - buttonState;
+                
             // advance to the next button
             ++bs;
         }
@@ -1734,14 +1756,15 @@ void initButtons(Config &cfg, bool &kbKeys)
     if (cfg.plunger.zbLaunchBall.port != 0)
     {
         // Point back to the config slot for the keyboard data.
-        // We use a special extra slot for virtual buttons, so
-        // we also need to set up the slot data.
+        // We use a special extra slot for virtual buttons, 
+        // so we also need to set up the slot data by copying
+        // the ZBL config data to our virtual button slot.
         bs->cfgIndex = ZBL_BUTTON_CFG;
         cfg.button[ZBL_BUTTON_CFG].pin = PINNAME_TO_WIRE(NC);
         cfg.button[ZBL_BUTTON_CFG].typ = cfg.plunger.zbLaunchBall.keytype;
         cfg.button[ZBL_BUTTON_CFG].val = cfg.plunger.zbLaunchBall.keycode;
         
-        // advnace to the next button
+        // advance to the next button
         ++bs;
     }
     
@@ -1772,13 +1795,74 @@ void processButtons(Config &cfg)
     // calculate the time since the last run
     uint32_t dt = buttonTimer.read_us();
     buttonTimer.reset();
+    
+    // check the shift button state
+    if (shiftButton.index != -1)
+    {
+        ButtonState *sbs = &buttonState[shiftButton.index];
+        switch (shiftButton.state)
+        {
+        case 0:
+            // Not shifted.  Check if the button is now down: if so,
+            // switch to state 1 (shift button down, no key pressed yet).
+            if (sbs->physState)
+                shiftButton.state = 1;
+            break;
+            
+        case 1:
+            // Shift button down, no key pressed yet.  If the button is
+            // now up, it counts as an ordinary button press instead of
+            // a shift button press, since the shift function was never
+            // used.  Return to unshifted state and start a timed key 
+            // pulse event.
+            if (!sbs->physState)
+            {
+                shiftButton.state = 0;
+                shiftButton.pulse = 1;
+                shiftButton.pulseTime = 50000+dt;  // 50 ms left on the key pulse
+            }
+            break;
+            
+        case 2:
+            // Shift button down, other key was pressed.  If the button is
+            // now up, simply clear the shift state without sending a key
+            // press for the shift button itself to the PC.  The shift
+            // function was used, so its ordinary key press function is
+            // suppressed.
+            if (!sbs->physState)
+                shiftButton.state = 0;
+            break;
+        }
+    }
 
     // scan the button list
     ButtonState *bs = buttonState;
     for (int i = 0 ; i < nButtons ; ++i, ++bs)
     {
-        // if it's a pulse-mode switch, get the virtual pressed state
-        if (bs->pulseState != 0)
+        // Check the button type:
+        //   - shift button
+        //   - pulsed button
+        //   - regular button
+        if (shiftButton.index == i)
+        {
+            // This is the shift button.  Its logical state for key
+            // reporting purposes is controlled by the shift buttton
+            // pulse timer.  If we're in a pulse, its logical state
+            // is pressed.
+            if (shiftButton.pulse)
+            {
+                // deduct the current interval from the pulse time, ending
+                // the pulse if the time has expired
+                if (shiftButton.pulseTime > dt)
+                    shiftButton.pulseTime -= dt;
+                else
+                    shiftButton.pulse = 0;
+            }
+            
+            // the button is logically pressed if we're in a pulse
+            bs->logState = shiftButton.pulse;
+        }        
+        else if (bs->pulseState != 0)
         {
             // if the timer has expired, check for state changes
             if (bs->pulseTime > dt)
@@ -1855,10 +1939,30 @@ void processButtons(Config &cfg)
                 }
                 else
                 {
-                    // momentary switch - toggle the night mode state when the
+                    // Momentary switch - toggle the night mode state when the
                     // physical button is pushed (i.e., when its logical state
-                    // transitions from OFF to ON)
-                    if (bs->logState)
+                    // transitions from OFF to ON).  
+                    //
+                    // In momentary mode, night mode flag 0x02 makes it the
+                    // shifted version of the button.  In this case, only
+                    // proceed if the shift button is pressed.
+                    bool pressed = bs->logState;
+                    if ((cfg.nightMode.flags & 0x02) != 0)
+                    {
+                        // if the shift button is pressed but hasn't been used
+                        // as a shift yet, mark it as used, so that it doesn't
+                        // also generate its own key code on release
+                        if (shiftButton.state == 1)
+                            shiftButton.state = 2;
+                            
+                        // if the shift button isn't even pressed
+                        if (shiftButton.state == 0)
+                            pressed = false;
+                    }
+                    
+                    // if it's pressed (even after considering the shift mode),
+                    // toggle night mode
+                    if (pressed)
                         toggleNightMode();
                 }
             }
@@ -1871,10 +1975,31 @@ void processButtons(Config &cfg)
         // key state list
         if (bs->logState || bs->virtState)
         {
-            // OR in the joystick button bit, mod key bits, and media key bits
+            // Get the key type and code.  If the shift button is down AND
+            // this button has a shifted key meaning, use the shifted key
+            // meaning.  Otherwise use the primary key meaning.
             ButtonCfg *bc = &cfg.button[bs->cfgIndex];
-            uint8_t val = bc->val;
-            switch (bc->typ)
+            uint8_t typ, val;
+            if (shiftButton.state && bc->typ2 != BtnTypeNone)
+            {
+                // shifted - use the secondary key code
+                typ = bc->typ2, val = bc->val2;
+                
+                // If the shift button hasn't been used a a shift yet
+                // (state 1), mark it as used (state 2).  This prevents
+                // it from generating its own keystroke when released,
+                // which it does if no other keys are pressed while it's
+                // being held.
+                if (shiftButton.state == 1)
+                    shiftButton.state = 2;
+            }
+            else
+            {
+                // not shifted - use the primary key code
+                typ = bc->typ, val = bc->val;
+            }
+            
+            switch (typ)
             {
             case BtnTypeJoystick:
                 // joystick button

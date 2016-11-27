@@ -48,7 +48,7 @@ void v_func(uint8_t *data)
         
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
-        v_byte_ro(15, 2);       // number of SCALAR variables
+        v_byte_ro(16, 2);       // number of SCALAR variables
         v_byte_ro(2, 3);        // number of ARRAY variables
         break;
         
@@ -159,18 +159,47 @@ void v_func(uint8_t *data)
         v_byte(nightMode.port, 4);
         break;
         
-       
+    case 16:
+        // shift button configuration
+        v_byte(shiftButton, 2);
+        break;
+        
     // case n: // new scalar variable
     //
     // ATTENTION!
     // UPDATE CASE 0 ABOVE WHEN ADDING A NEW VARIABLE!!!
+
+    
         
         // ********** ARRAY VARIABLES **********
+
 
     // case n: // new array variable
     //
     // ATTENTION!
     // UPDATE CASE 0 ABOVE WHEN ADDING A NEW ARRAY VARIABLE!!!
+    
+    case 253:
+        // extended button setup
+        {
+            // get the index and check if it's in range
+            int idx = data[2];
+            if (idx == 0)
+            {
+                // index 0 on query retrieves number of slots
+                v_byte_ro(MAX_BUTTONS, 3);
+            }
+            else if (idx > 0 && idx <= MAX_BUTTONS)
+            {
+                // adjust to an array index
+                --idx;
+                
+                // transfer the values
+                v_byte(button[idx].typ2, 3);
+                v_byte(button[idx].val2, 4);
+            }                
+        }
+        break;
         
     case 254:
         // button setup
@@ -189,7 +218,7 @@ void v_func(uint8_t *data)
                 // adjust to an array index
                 --idx;
                 
-                // set the values
+                // transfer the values
                 v_byte(button[idx].pin, 3);
                 v_byte(button[idx].typ, 4);
                 v_byte(button[idx].val, 5);

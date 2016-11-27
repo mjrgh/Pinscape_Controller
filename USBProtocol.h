@@ -679,15 +679,51 @@
 //                even if no button is assigned.
 //
 //       byte 4 = flags:
-//                0x01 -> the wired input is an on/off switch; night mode will be
+//
+//                0x01 -> The wired input is an on/off switch: night mode will be
 //                        active when the input is switched on.  If this bit isn't
-//                        set, the input is a momentary button; pushing the button
+//                        set, the input is a momentary button: pushing the button
 //                        toggles night mode.
+//
+//                0x02 -> Night Mode is assigned to the SHIFTED button (see Shift
+//                        Button setup at variable 16).  This can only be used
+//                        in momentary mode; it's ignored if flag bit 0x01 is set.
+//                        When the shift flag is set, the button only toggles
+//                        night mode when you press it while also holding down
+//                        the Shift button.                        
 //
 //       byte 5 = indicator output number - 1..MAX_OUT_PORTS, or 0 for none.  This
 //                selects an output port that will be turned on when night mode is
 //                activated.  Night mode activation overrides any setting made by
 //                the host.
+//
+// 16 -> Shift Button setup.  One button can be designated as a "Local Shift
+//       Button" that can be pressed to select a secondary meaning for other
+//       buttons.  This isn't to be confused with the PC Shift keys; those can
+//       be programmed using the USB key codes for Left Shift and Right Shift.
+//       Rather, this applies a LOCAL shift feature in the cabinet button that
+//       lets you select a secondary meaning.  For example, you could assign
+//       the Start button to the "1" key (VP "Start Game") normally, but have
+//       its meaning change to the "5" key ("Insert Coin") when the shift
+//       button is pressed.  This provides access to more control functions
+//       without adding more physical buttons.
+//
+//       The shift button itself can also have a regular key assignment.  If
+//       it does, the key is only sent to the PC when you RELEASE the shift 
+//       button, and then only if no other key with a shifted key code assigned
+//       was pressed while the shift button was being held down.  If another 
+//       key was pressed, and it has a shifted meaning assigned, we assume that
+//       the shift button was only pressed in the first place for its shifting
+//       function rather than for its normal keystroke.  This dual usage lets
+//       you make the shifting function even more unobtrusive by assigning it
+//       to an ordinary button that has its own purpose when not used as a
+//       shift button.  For example, you could assign the shift function to the
+//       rarely used Extra Ball button.  In those cases where you actually want 
+//       to use the Extra Ball feature, it's there, but you also get more
+//       mileage out of the button by using it to select secondary mappings for
+//       other buttons.
+//
+//       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none.
 //
 //
 // ARRAY VARIABLES:  Each variable below is an array.  For each get/set message,
@@ -697,6 +733,16 @@
 // variable with index 0, with the first (and only) byte after that indicating
 // the maximum array index.
 //
+// 253 -> Extended input button setup.  This adds on to the information set by 
+//        variable 254 below, accessing additional fields.  The "shifted" key
+//        type and code fields assign a secondary meaning to the button that's
+//        used when the local Shift button is being held down.  See variable 16 
+//        above for more details on the Shift button.
+//
+//          byte 3 = Button number 91..MAX_BUTTONS
+//          byte 4 = shifted key type (same codes as "key type" in var 254)
+//          byte 5 = shifted key code (same meaning as "key code" in var 254)
+//
 // 254 -> Input button setup.  This sets up one button; it can be repeated for each
 //        button to be configured.  There are MAX_EXT_BUTTONS button slots (see
 //        config.h for the constant definition), numbered 1..MAX_EXT_BUTTONS.  Each
@@ -704,7 +750,7 @@
 //        media control key (mute, volume up, volume down).
 //
 //        The bytes of the message are:
-//          byte 3 = Button number (1..MAX_EXT_BUTTONS)
+//          byte 3 = Button number (1..MAX_BUTTONS)
 //          byte 4 = GPIO pin for the button input; mapped as a DigitalIn port
 //          byte 5 = key type reported to PC when button is pushed:
 //                    0 = none (no PC input reported when button pushed)
@@ -834,6 +880,10 @@
 //    Right Alt        -> E6
 //    Right GUI        -> E7
 //
-// Note that the Mute and Volume Up & Down keys are sent to the host as
-// media control keys rather than regular keyboard keys.
-
+// Due to limitations in Windows, there's a limit of 6 regular keys
+// pressed at the same time.  The shift keys in the E0-E7 range don't
+// count against this limit, though, since they're encoded as modifier
+// keys; all of these can be pressed at the same time in addition to 6
+// regular keys.  In addition, the Mute, Volume Up, and Volume Down 
+// keys are also encoded separately, in this case as "media controls"
+// instead of regular keys.
