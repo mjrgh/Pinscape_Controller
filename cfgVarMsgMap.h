@@ -49,7 +49,7 @@ void v_func(uint8_t *data)
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
         v_byte_ro(16, 2);       // number of SCALAR variables
-        v_byte_ro(2, 3);        // number of ARRAY variables
+        v_byte_ro(3, 3);        // number of ARRAY variables
         break;
         
         // ********** SCALAR VARIABLES **********

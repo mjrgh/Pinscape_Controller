@@ -435,10 +435,10 @@ static const uint8_t reportDescriptorKB[] =
         REPORT_COUNT(1), 0x06,
         REPORT_SIZE(1), 0x08,
         LOGICAL_MINIMUM(1), 0x00,
-        LOGICAL_MAXIMUM(1), 0x65,
+        LOGICAL_MAXIMUM(1), 0xA4,
         USAGE_PAGE(1), 0x07,                    // Key Codes
         USAGE_MINIMUM(1), 0x00,
-        USAGE_MAXIMUM(1), 0x65,
+        USAGE_MAXIMUM(1), 0xA4,
         INPUT(1), 0x00,                         // Data, Array
     END_COLLECTION(0),
 
