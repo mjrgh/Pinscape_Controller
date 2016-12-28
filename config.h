@@ -52,8 +52,8 @@
 const int PlungerType_None      = 0;     // no plunger
 const int PlungerType_TSL1410RS = 1;     // TSL1410R linear image sensor (1280x1 pixels, 400dpi), serial mode
 const int PlungerType_TSL1410RP = 2;     // TSL1410R, parallel mode (reads the two sensor sections concurrently)
-const int PlungerType_TSL1412RS = 3;     // TSL1412R linear image sensor (1536x1 pixels, 400dpi), serial mode
-const int PlungerType_TSL1412RP = 4;     // TSL1412R, parallel mode
+const int PlungerType_TSL1412SS = 3;     // TSL1412S linear image sensor (1536x1 pixels, 400dpi), serial mode
+const int PlungerType_TSL1412SP = 4;     // TSL1412S, parallel mode
 const int PlungerType_Pot       = 5;     // potentionmeter
 const int PlungerType_OptQuad   = 6;     // AEDR8300 optical quadrature sensor
 const int PlungerType_MagQuad   = 7;     // AS5304 magnetic quadrature sensor

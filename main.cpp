@@ -1968,7 +1968,7 @@ void processButtons(Config &cfg)
                 // logical state OFF to ON) toggles the current night mode state.
                 if (cfg.nightMode.flags & 0x01)
                 {
-                    // toggle switch - when the button changes state, change
+                    // on/off switch - when the button changes state, change
                     // night mode to match the new state
                     setNightMode(bs->logState);
                 }
@@ -3102,6 +3102,7 @@ void createPlunger()
     switch (cfg.plunger.sensorType)
     {
     case PlungerType_TSL1410RS:
+        // TSL1410R, serial mode (all pixels read in one file)
         // pins are: SI, CLOCK, AO
         plungerSensor = new PlungerSensorTSL1410R(
             wirePinName(cfg.plunger.sensorPin[0]), 
@@ -3111,6 +3112,7 @@ void createPlunger()
         break;
         
     case PlungerType_TSL1410RP:
+        // TSL1410R, parallel mode (each half-sensor's pixels read separately)
         // pins are: SI, CLOCK, AO1, AO2
         plungerSensor = new PlungerSensorTSL1410R(
             wirePinName(cfg.plunger.sensorPin[0]), 
@@ -3119,7 +3121,8 @@ void createPlunger()
             wirePinName(cfg.plunger.sensorPin[3]));
         break;
         
-    case PlungerType_TSL1412RS:
+    case PlungerType_TSL1412SS:
+        // TSL1412S, serial mode
         // pins are: SI, CLOCK, AO1, AO2
         plungerSensor = new PlungerSensorTSL1412R(
             wirePinName(cfg.plunger.sensorPin[0]),
@@ -3128,7 +3131,8 @@ void createPlunger()
             NC);
         break;
     
-    case PlungerType_TSL1412RP:
+    case PlungerType_TSL1412SP:
+        // TSL1412S, parallel mode
         // pins are: SI, CLOCK, AO1, AO2
         plungerSensor = new PlungerSensorTSL1412R(
             wirePinName(cfg.plunger.sensorPin[0]), 
@@ -3228,18 +3232,26 @@ public:
         PlungerReading r;
         if (plungerSensor->read(r))
         {
+            // filter the raw sensor reading
+            applyPreFilter(r);
+            
             // Pull the previous reading from the history
             const PlungerReading &prv = nthHist(0);
             
-            // If the new reading is within 2ms of the previous reading,
+            // If the new reading is within 1ms of the previous reading,
             // ignore it.  We require a minimum time between samples to
             // ensure that we have a usable amount of precision in the
             // denominator (the time interval) for calculating the plunger
-            // velocity.  (The CCD sensor can't take readings faster than
-            // this anyway, but other sensor types, such as potentiometers,
-            // can, so we have to throttle the rate artifically in case
-            // we're using a fast sensor like that.)
-            if (uint32_t(r.t - prv.t) < 2000UL)
+            // velocity.  The CCD sensor hardware takes about 2.5ms to
+            // read, so it will never be affected by this, but other sensor
+            // types don't all have the same hardware cycle time, so we need
+            // to throttle them artificially.  E.g., the potentiometer only
+            // needs one ADC sample per reading, which only takes about 15us.
+            // We don't need to check which sensor type we have here; we
+            // just ignore readings until the minimum interval has passed,
+            // so if the sensor is already slower than this, we'll end up
+            // using all of its readings.
+            if (uint32_t(r.t - prv.t) < 1000UL)
                 return;
 
             // check for calibration mode
@@ -3534,8 +3546,8 @@ public:
             hist[histIdx++] = r;
             histIdx %= countof(hist);
             
-            // figure the filtered value
-            zf = applyFilter();
+            // apply the post-processing filter
+            zf = applyPostFilter();
         }
     }
     
@@ -3573,6 +3585,7 @@ public:
             if (plungerSensor->read(r))
             {
                 // got a reading - use it as the initial zero point
+                applyPreFilter(r);
                 cfg.plunger.cal.zero = r.pos;
                 
                 // use it as the starting point for the settling watch
@@ -3611,9 +3624,91 @@ public:
 
 private:
 
-    // Figure the next filtered value.  This applies the hysteresis
-    // filter to the last raw z value and returns the filtered result.
-    int applyFilter()
+#if 1
+    // Disable all filtering
+    void applyPreFilter(PlungerReading &r) { }
+    int applyPostFilter() { return z; }
+#elif 1
+    // Apply pre-processing filter.  This filter is applied to the raw
+    // value coming off the sensor, before calibration or fire-event
+    // processing.
+    void applyPreFilter(PlungerReading &r)
+    {
+        // get the previous raw reading
+        PlungerReading prv = pre.raw;
+        
+        // the new reading is the previous raw reading next time, no 
+        // matter how we end up filtering it
+        pre.raw = r;
+        
+        // If it's too big an excursion from the previous raw reading,
+        // ignore it and repeat the previous reported reading.  This
+        // filters out anomalous spikes where we suddenly jump to a
+        // level that's too far away to be possible.  Real plungers
+        // take about 60ms to travel the full distance when released,
+        // so assuming constant acceleration, the maximum realistic
+        // speed is about 2.200 distance units (on our 0..0xffff scale)
+        // per microsecond.
+        //
+        // On the other hand, if the new reading is too *close* to the
+        // previous reading, use the previous reported reading.  This
+        // filters out jitter around a stationary position.
+        const float maxDist = 2.184f*uint32_t(r.t - prv.t);
+        const int minDist = 256;
+        const int delta = abs(r.pos - prv.pos);
+        if (maxDist > minDist && delta > maxDist)
+        {
+            // too big an excursion - discard this reading by reporting
+            // the last reported reading instead
+            r.pos = pre.reported;
+        }
+        else if (delta < minDist)
+        {
+            // too close to the prior reading - apply hysteresis
+            r.pos = pre.reported;
+        }
+        else
+        {
+            // the reading is in range - keep it, and remember it as
+            // the last reported reading
+            pre.reported = r.pos;
+        }
+    }
+    
+    // pre-filter data
+    struct PreFilterData {
+        PreFilterData() 
+            : reported(0) 
+        {
+            raw.t = 0;
+            raw.pos = 0;
+        }
+        PlungerReading raw;         // previous raw sensor reading
+        int reported;               // previous reported reading
+    } pre;
+    
+    
+    // Apply the post-processing filter.  This filter is applied after
+    // the fire-event processing.  In the past, this used hysteresis to
+    // try to smooth out jittering readings for a stationary plunger.
+    // We've switched to a different approach that massages the readings
+    // coming off the sensor before 
+    int applyPostFilter()
+    {
+        return z;
+    }
+#else
+    // Apply pre-processing filter.  This filter is applied to the raw
+    // value coming off the sensor, before calibration or fire-event
+    // processing.
+    void applyPreFilter(PlungerReading &r)
+    {
+    }
+    
+    // Figure the next post-processing filtered value.  This applies a
+    // hysteresis filter to the last raw z value and returns the 
+    // filtered result.
+    int applyPostFilter()
     { 
         if (firing <= 1)
         {
@@ -3649,7 +3744,7 @@ private:
             }
             else
             {
-                // we're diretionless - return the new average, with the 
+                // we're directionless - return the new average, with the 
                 // new sample included
                 filterSum += z;
                 ++filterN;
@@ -3665,6 +3760,7 @@ private:
             return z;
         }
     }
+#endif
     
     void initFilter()
     {

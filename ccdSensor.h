@@ -10,7 +10,20 @@
 
 #include "plunger.h"
 
-// Scan method selection:
+// Scan method - select a method listed below.  Method 2 (find the point
+// with maximum brightness slop) seems to work the best so far.
+#define SCAN_METHOD 2
+//
+//
+//  0 = One-way scan.  This is the original algorithim from the v1 software, 
+//      with some slight improvements.  We start at the brighter end of the
+//      sensor and scan until we find a pixel darker than a threshold level 
+//      (halfway between the respective brightness levels at the bright and 
+//      dark ends of the sensor).  The original v1 algorithm simply stopped
+//      there.  This version is slightly improved: it scans for a few more 
+//      pixels to make sure that the majority of the adjacent pixels are 
+//      also in shadow, to help reject false edges from sensor noise or 
+//      optical shadows that make one pixel read darker than it should.
 //
 //  1 = Meet in the middle.  We start two scans concurrently, one from 
 //      the dark end of the sensor and one from the bright end.  For
@@ -29,17 +42,39 @@
 //      actually is.  The dynamic degree of tolerance is good because
 //      higher noise tolerance tends to result in reduced resolution.
 //
-//  0 = One-way scan.  We simply start at the brighter end and scan
-//      until we find a pixel darker than a threshold level (halfway
-//      between the respective brightness levels at the bright and 
-//      dark ends of the sensor).  The original algorithm simply
-//      stopped there.  This version is slightly improved: it scans
-//      for a few more pixels to make sure that the majority of the
-//      adjacent pixels are also in shadow, to help reject false
-//      edges from sensor noise or optical shadows that make one 
-//      pixel read darker than it should.
+//  2 = Maximum dL/ds (highest first derivative of luminance change per
+//      distance, or put another way, the steepest rate of change in
+//      brightness).  This scans the whole image and looks for the 
+//      position with the highest dL/ds value.  We average over a window
+//      of several pixels, to smooth out pixel noise; this should avoid
+//      treating a single spiky pixel as having a steep slope adjacent 
+//      to it.  The advantage I see in this approach is that it looks for
+//      the *strongest* edge, which should make it less likely to be fooled
+//      by noise that creates a false edge.  Algorithms 1 and 2 have
+//      basically fixed thresholds for what constitutes an edge, but this
+//      approach is more dynamic in that it evaluates each edge-like region
+//      and picks the one with the highest contrast.  The one fixed feature
+//      of this algorithm is the width of the edge, since that's limited
+//      by the pixel window; but we only deal with one type of image, so
+//      it should be possible to adjust the light source and sensor position
+//      to always yield an image with a narrow enough edge region.
 //
-#define SCAN_METHOD 1
+//  3 = Total bright pixel count.  This simply adds up the total number
+//      of pixels above a threshold brightness, without worrying about 
+//      whether they're contiguous with other pixels on the same side
+//      of the edge.  Since we know there's always exactly one edge,
+//      all of the dark pixels should in principle be on one side, and
+//      all of the light pixels should be on the other side.  There
+//      might be some noise that creates isolated pixels that don't
+//      match their neighbors, but these should average out.  The virtue
+//      of this approach (apart from its simplicity) is that it should
+//      be immune to false edges - local spikes due to noise - that
+//      might fool the algorithms that explicitly look for edges.  In
+//      practice, though, it seems to be even more sensitive to noise
+//      than the other algorithms, probably because it treats every pixel
+//      as independent and thus doesn't have any sort of inherent noise
+//      reduction from considering relationships among pixels.
+//
 
 // PlungerSensor interface implementation for the CCD
 class PlungerSensorCCD: public PlungerSensor
@@ -189,8 +224,70 @@ public:
         int delta6 = abs(a-b)/6;
         int crossoverHi = mid + delta6;
         int crossoverLo = mid - delta6;
-           
-#if SCAN_METHOD == 1
+
+#if SCAN_METHOD == 3
+        // Count pixels brighter than the brightness midpoint.  We assume
+        // that all of the bright pixels are contiguously within the bright
+        // region, so we simply have to count them up.  Even if we have a
+        // few noisy pixels in the dark region above the midpoint, these
+        // should on average be canceled out by anomalous dark pixels in
+        // the bright region.
+        int bcnt = 0;
+        for (int i = 0 ; i < n ; ++i)
+        {
+            if (pix[i] > mid)
+                ++bcnt;
+        }
+        
+        // The position is simply the size of the bright region
+        pos = bcnt;
+        return true;
+        
+#elif SCAN_METHOD == 2
+        // Scan for the steepest brightness slope, averaged over 10 pixels.
+        // Start with the first two 10-pixel windows.
+        int sum1 = int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4] 
+            + pix[5] + pix[6] + pix[7] + pix[8] + pix[9];
+        int sum2 = int(pix[10]) + pix[11] + pix[12] + pix[13] + pix[14]
+            + pix[15] + pix[16] + pix[17] + pix[18] + pix[19];
+            
+        // Now scan one pixel at a time
+        float dldsMax = 0, dldsMin = 0;
+        int sMax = -1, sMin = -1;
+        int nEnd = n-10;
+        for (int i = 10 ; i < nEnd ; ++i)
+        {
+            // figure the slope here; if it's the new min or max, remember it
+            int dlds = (sum2 - sum1);
+            if (dlds < dldsMin)
+                dldsMin = dlds, sMin = i;
+            if (dlds > dldsMax)
+                dldsMax = dlds, sMax = i;
+                
+            // update the window
+            sum1 -= pix[i-10];
+            sum1 += pix[i];
+            sum2 -= pix[i];
+            sum2 += pix[i+10];
+        }
+        
+        // If dir = 1, the bright end is the bottom, so we're looking for
+        // the steepest negative slope (brighter to darker).  Otherwise we 
+        // want the steepest positive slope (darker to brighter).
+        if (dir > 0 && sMin >= 0)
+        {
+            pos = sMin;
+            return true;
+        }            
+        else if (dir < 0 && sMax >= 0)
+        {
+            pos = sMax;
+            return true;
+        }
+        else
+            return false;
+        
+#elif SCAN_METHOD == 1
         // Scan inward from the each end, looking for edges.  Each time we
         // find an edge from one direction, we'll see if the scan from the
         // other direction agrees.  If it does, we have a winner.  If they
@@ -259,7 +356,7 @@ public:
             }
         }
         
-#else // SCAN_METHOD == 0
+#elif SCAN_METHOD == 0
 
         // Old method - single-sided scan with a little local noise suppression.
         // Scan from the bright side looking, for a pixel that drops below the
@@ -438,8 +535,8 @@ protected:
     // we successfully detect a shadow edge.  (It's circular, so we
     // effectively discard the oldest element whenever we write a new one.)
     //
-    // The history is useful in cases where we have too little contrast
-    // to detect an edge.  In these cases, we assume that the entire sensor
+    // We use the history in cases where we have too little contrast to
+    // detect an edge.  In these cases, we assume that the entire sensor
     // is either in shadow or light, which can happen if the plunger is at
     // one extreme or the other such that the edge of its shadow is out of 
     // the frame.  (Ideally, the sensor should be positioned so that the
@@ -448,9 +545,9 @@ protected:
     // history helps us decide which case we have - all shadow or all
     // light - by letting us compare our average pixel level in this
     // frame to the range in recent frames.  This assumes that the
-    // exposure varies minimally from frame to frame, which is usually
-    // true because the physical installation (the light source and 
-    // sensor positions) are usually static.
+    // exposure level is fairly consistent from frame to frame, which 
+    // is usually true because the sensor and light source are both
+    // fixed in place.
     // 
     // We always try first to infer the bright and dark levels from the 
     // image, since this lets us adapt automatically to different exposure 
