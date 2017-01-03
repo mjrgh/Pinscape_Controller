@@ -76,6 +76,11 @@
 //      reduction from considering relationships among pixels.
 //
 
+#if SCAN_METHOD == 2
+extern "C" int ccdScanMode2(
+    const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
+#endif
+
 // PlungerSensor interface implementation for the CCD
 class PlungerSensorCCD: public PlungerSensor
 {
@@ -143,7 +148,8 @@ public:
     // where 0 is always the fully forward position and 'n' is fully
     // retracted).
     bool process(uint8_t *pix, int n, int &pos)
-    {
+    {        
+#if SCAN_METHOD != 2
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
         int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
@@ -189,7 +195,7 @@ public:
             // figure the average of the recent midpoint brightnesses            
             int sum = 0;
             for (int i = 0 ; i < countof(midpt) ; sum += midpt[i++]) ;
-            sum /= 10;
+            sum /= countof(midpt);
             
             // Figure the average of our two ends.  We have very
             // little contrast overall, so we already know that the
@@ -224,6 +230,7 @@ public:
         int delta6 = abs(a-b)/6;
         int crossoverHi = mid + delta6;
         int crossoverLo = mid - delta6;
+#endif
 
 #if SCAN_METHOD == 3
         // Count pixels brighter than the brightness midpoint.  We assume
@@ -244,6 +251,50 @@ public:
         return true;
         
 #elif SCAN_METHOD == 2
+
+        // Get the levels at each end
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
+        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
+        
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        if (a > b+10)
+        {
+            // left end is brighter - standard orientation
+            dir = 1;
+        }
+        else if (b > a+10)
+        {
+            // right end is brighter - reverse orientation
+            dir = -1;
+        }
+
+#if 1
+        const uint8_t *edgep = 0;
+        if (ccdScanMode2(pix, n, &edgep, dir))
+        {
+            // edgep has the pixel array pointer; convert it to an offset
+            pos = edgep - pix;
+            
+            // if the sensor orientation is reversed, figure the index from
+            // the other end of the array
+            if (dir < 0)
+                pos = n - pos;
+                
+            // success
+            return true;
+        }
+        else
+        {
+            // no edge found
+            return false;
+        }
+
+#else
         // Scan for the steepest brightness slope, averaged over 10 pixels.
         // Start with the first two 10-pixel windows.
         int sum1 = int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4] 
@@ -254,38 +305,65 @@ public:
         // Now scan one pixel at a time
         float dldsMax = 0, dldsMin = 0;
         int sMax = -1, sMin = -1;
-        int nEnd = n-10;
-        for (int i = 10 ; i < nEnd ; ++i)
+        const int nEnd = n-10;
+        const uint8_t *pixp = pix + 10;
+        const uint8_t *const endp = pix + nEnd;
+        if (dir > 0)
         {
-            // figure the slope here; if it's the new min or max, remember it
-            int dlds = (sum2 - sum1);
-            if (dlds < dldsMin)
-                dldsMin = dlds, sMin = i;
-            if (dlds > dldsMax)
-                dldsMax = dlds, sMax = i;
-                
-            // update the window
-            sum1 -= pix[i-10];
-            sum1 += pix[i];
-            sum2 -= pix[i];
-            sum2 += pix[i+10];
+            // dir>0 -> bright end is at start of array -> look for
+            // most negative slope (bright to dark transition)
+            for ( ; pixp < endp ; ++pixp)
+            {
+                // figure the slope here; if it's the new min, note it
+                int dlds = (sum2 - sum1);
+                if (dlds < dldsMin)
+                    dldsMin = dlds, sMin = pixp - pix;
+                    
+                // update the window
+                sum1 -= *(pixp - 10);
+                uint8_t c = *pixp;
+                sum1 += c;
+                sum2 -= c;
+                sum2 += *(pixp + 10);
+            }
+            
+            // return the steepest negative slope, if we found one at all
+            if (sMin >= 0)
+            {
+                pos = sMin;
+                return true;
+            }
         }
-        
-        // If dir = 1, the bright end is the bottom, so we're looking for
-        // the steepest negative slope (brighter to darker).  Otherwise we 
-        // want the steepest positive slope (darker to brighter).
-        if (dir > 0 && sMin >= 0)
+        else if (dir < 0)
         {
-            pos = sMin;
-            return true;
-        }            
-        else if (dir < 0 && sMax >= 0)
-        {
-            pos = sMax;
-            return true;
+            // dir<0 -> dark end is at start of array -> look for most
+            // positive slope (dark to bright transition)
+            for ( ; pixp < endp ; ++pixp)
+            {
+                // figure the slope here; if it's the new max, remember it
+                int dlds = (sum2 - sum1);
+                if (dlds > dldsMax)
+                    dldsMax = dlds, sMax = pixp - pix;
+                    
+                // update the window
+                sum1 -= *(pixp - 10);
+                uint8_t c = *pixp;
+                sum1 += c;
+                sum2 -= c;
+                sum2 += *(pixp + 10);
+            }
+            
+            // return the steepest positive slope we found
+            if (sMax >= 0)
+            {
+                pos = sMax;
+                return true;
+            }
         }
-        else
-            return false;
+
+        // no edge found
+        return false;
+#endif
         
 #elif SCAN_METHOD == 1
         // Scan inward from the each end, looking for edges.  Each time we

@@ -2010,30 +2010,57 @@ void processButtons(Config &cfg)
         // key state list
         if (bs->logState || bs->virtState)
         {
-            // Get the key type and code.  If the shift button is down AND
-            // this button has a shifted key meaning, use the shifted key
-            // meaning.  Otherwise use the primary key meaning.
+            // Get the key type and code.  Start by assuming that we're
+            // going to use the normal unshifted meaning.
             ButtonCfg *bc = &cfg.button[bs->cfgIndex];
-            uint8_t typ, val;
-            if (shiftButton.state && bc->typ2 != BtnTypeNone)
+            uint8_t typ = bc->typ;
+            uint8_t val = bc->val;
+            
+            // If the shift button is down, check for a shifted meaning.
+            if (shiftButton.state)
             {
-                // shifted - use the secondary key code
-                typ = bc->typ2, val = bc->val2;
+                // assume there's no shifted meaning
+                bool useShift = false;
                 
-                // If the shift button hasn't been used a a shift yet
-                // (state 1), mark it as used (state 2).  This prevents
-                // it from generating its own keystroke when released,
-                // which it does if no other keys are pressed while it's
-                // being held.
-                if (shiftButton.state == 1)
+                // If the button has a shifted meaning, use that.  The
+                // meaning might be a keyboard key or joystick button,
+                // but it could also be as the Night Mode toggle.
+                //
+                // The condition to check if it's the Night Mode toggle
+                // is a little complicated.  First, the easy part: our
+                // button index has to match the Night Mode button index.
+                // Now the hard part: the Night Mode button flags have
+                // to be set to 0x01 OFF and 0x02 ON: toggle mode (not
+                // switch mode, 0x01), and shift mode, 0x02.  So AND the
+                // flags with 0x03 to get these two bits, and check that
+                // the result is 0x02, meaning that only shift mode is on.
+                if (bc->typ2 != BtnTypeNone)
+                {
+                    // there's a shifted key assignment - use it
+                    typ = bc->typ2;
+                    val = bc->val2;
+                    useShift = true;
+                }
+                else if (cfg.nightMode.btn == i+1 
+                         && (cfg.nightMode.flags & 0x03) == 0x02)
+                {
+                    // shift+button = night mode toggle
+                    typ = BtnTypeNone;
+                    val = 0;
+                    useShift = true;
+                }
+                
+                // If there's a shifted meaning, advance the shift
+                // button state from 1 to 2 if applicable.  This signals
+                // that we've "consumed" the shift button press as the
+                // shift button, so it shouldn't generate its own key
+                // code event when released.
+                if (useShift && shiftButton.state == 1)
                     shiftButton.state = 2;
             }
-            else
-            {
-                // not shifted - use the primary key code
-                typ = bc->typ, val = bc->val;
-            }
             
+            // We've decided on the meaning of the button, so process
+            // the keyboard or joystick event.
             switch (typ)
             {
             case BtnTypeJoystick:
@@ -4533,12 +4560,13 @@ int main(void)
         
     // Wait for the USB connection to start up.  Show a distinctive diagnostic
     // flash pattern while waiting.
-    Timer connectTimer;
-    connectTimer.start();
+    Timer connTimeoutTimer, connFlashTimer;
+    connTimeoutTimer.start();
+    connFlashTimer.start();
     while (!js.configured())
     {
         // show one short yellow flash at 2-second intervals
-        if (connectTimer.read_us() > 2000000)
+        if (connFlashTimer.read_us() > 2000000)
         {
             // short yellow flash
             diagLED(1, 1, 0);
@@ -4546,8 +4574,12 @@ int main(void)
             diagLED(0, 0, 0);
             
             // reset the flash timer
-            connectTimer.reset();
+            connFlashTimer.reset();
         }
+
+        if (cfg.disconnectRebootTimeout != 0 
+            && connTimeoutTimer.read() > cfg.disconnectRebootTimeout)
+            reboot(js, false, 0);
     }
     
     // we're now connected to the host
@@ -4918,8 +4950,8 @@ int main(void)
             diagLED(0, 0, 0);
             
             // set up a timer to monitor the reboot timeout
-            Timer rebootTimer;
-            rebootTimer.start();
+            Timer reconnTimeoutTimer;
+            reconnTimeoutTimer.start();
             
             // set up a timer for diagnostic displays
             Timer diagTimer;
@@ -4951,7 +4983,7 @@ int main(void)
                 
                 // if the disconnect reboot timeout has expired, reboot
                 if (cfg.disconnectRebootTimeout != 0 
-                    && rebootTimer.read() > cfg.disconnectRebootTimeout)
+                    && reconnTimeoutTimer.read() > cfg.disconnectRebootTimeout)
                     reboot(js, false, 0);
             }
             
