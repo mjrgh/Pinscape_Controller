@@ -59,6 +59,12 @@
 //      it should be possible to adjust the light source and sensor position
 //      to always yield an image with a narrow enough edge region.
 //
+//      The max dL/ds method is the most compute-intensive method, because
+//      of the pixel window averaging.  An assembly language implemementation
+//      seems to be needed to make it fast enough on the KL25Z.  This method
+//      has a fixed run time because it always does exactly one pass over
+//      the whole pixel array.
+//
 //  3 = Total bright pixel count.  This simply adds up the total number
 //      of pixels above a threshold brightness, without worrying about 
 //      whether they're contiguous with other pixels on the same side
@@ -76,10 +82,8 @@
 //      reduction from considering relationships among pixels.
 //
 
-#if SCAN_METHOD == 2
 extern "C" int ccdScanMode2(
     const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
-#endif
 
 // PlungerSensor interface implementation for the CCD
 class PlungerSensorCCD: public PlungerSensor
@@ -104,7 +108,7 @@ public:
         ccd.clear();
     }
     
-    // Read the plunger position
+    
     virtual bool read(PlungerReading &r)
     {
         // start reading the next pixel array - this also waits for any
@@ -147,9 +151,11 @@ public:
     // it reflects the logical plunger position (i.e., distance retracted,
     // where 0 is always the fully forward position and 'n' is fully
     // retracted).
+
+#if SCAN_METHOD == 0
+    // Scan method 0: one-way scan; original method used in v1 firmware.
     bool process(uint8_t *pix, int n, int &pos)
     {        
-#if SCAN_METHOD != 2
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
         int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
@@ -160,21 +166,18 @@ public:
         // scanning from the bright side, 'di' is the starting index on
         // the dark side.  'binc' and 'dinc' are the pixel increments
         // for the respective indices.
-        int bi, di;
-        int binc, dinc;
+        int bi;
         if (a > b+10)
         {
             // left end is brighter - standard orientation
             dir = 1;
-            bi = 4, di = n - 5;
-            binc = 1, dinc = -1;
+            bi = 4;
         }
         else if (b > a+10)
         {
            // right end is brighter - reverse orientation
             dir = -1;
-            bi = n - 5, di = 4;
-            binc = -1, dinc = 1;
+            bi = n - 5;
         }
         else if (dir != 0)
         {
@@ -227,31 +230,52 @@ public:
         // We'll define "close" as within 1/3 of the gap between the 
         // extremes.
         int mid = (a+b)/2;
-        int delta6 = abs(a-b)/6;
-        int crossoverHi = mid + delta6;
-        int crossoverLo = mid - delta6;
-#endif
 
-#if SCAN_METHOD == 3
-        // Count pixels brighter than the brightness midpoint.  We assume
-        // that all of the bright pixels are contiguously within the bright
-        // region, so we simply have to count them up.  Even if we have a
-        // few noisy pixels in the dark region above the midpoint, these
-        // should on average be canceled out by anomalous dark pixels in
-        // the bright region.
-        int bcnt = 0;
-        for (int i = 0 ; i < n ; ++i)
+        // Scan from the bright side looking, for a pixel that drops below the
+        // midpoint brightess.  To reduce false positives from noise, check to
+        // see if the majority of the next few pixels stay in shadow - if not,
+        // consider the dark pixel to be some kind of transient noise, and
+        // continue looking for a more solid edge.
+        for (int i = 5 ; i < n-5 ; ++i, bi += dir)
         {
-            if (pix[i] > mid)
-                ++bcnt;
+            // check to see if we found a dark pixel
+            if (pix[bi] < mid)
+            {
+                // make sure we have a sustained edge
+                int ok = 0;
+                int bi2 = bi + dir;
+                for (int j = 0 ; j < 5 ; ++j, bi2 += dir)
+                {
+                    // count this pixel if it's darker than the midpoint
+                    if (pix[bi2] < mid)
+                        ++ok;
+                }
+                
+                // if we're clearly in the dark section, we have our edge
+                if (ok > 3)
+                {
+                    // Success.  Since we found an edge in this scan, save the
+                    // midpoint brightness level in our history list, to help
+                    // with any future frames with insufficient contrast.
+                    midpt[midptIdx++] = mid;
+                    midptIdx %= countof(midpt);
+                    
+                    // return the detected position
+                    pos = i;
+                    return true;
+                }
+            }
         }
         
-        // The position is simply the size of the bright region
-        pos = bcnt;
-        return true;
-        
-#elif SCAN_METHOD == 2
-
+        // no edge found
+        return false;
+    }
+#endif // SCAN_METHOD 0
+    
+#if SCAN_METHOD == 1
+    // Scan method 1: meet in the middle.
+    bool process(uint8_t *pix, int n, int &pos)
+    {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
         int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
@@ -262,110 +286,42 @@ public:
         // scanning from the bright side, 'di' is the starting index on
         // the dark side.  'binc' and 'dinc' are the pixel increments
         // for the respective indices.
+        int bi, di;
+        int binc, dinc;
         if (a > b+10)
         {
             // left end is brighter - standard orientation
             dir = 1;
+            bi = 4, di = n - 5;
+            binc = 1, dinc = -1;
         }
         else if (b > a+10)
         {
             // right end is brighter - reverse orientation
             dir = -1;
-        }
-
-#if 1
-        const uint8_t *edgep = 0;
-        if (ccdScanMode2(pix, n, &edgep, dir))
-        {
-            // edgep has the pixel array pointer; convert it to an offset
-            pos = edgep - pix;
-            
-            // if the sensor orientation is reversed, figure the index from
-            // the other end of the array
-            if (dir < 0)
-                pos = n - pos;
-                
-            // success
-            return true;
+            bi = n - 5, di = 4;
+            binc = -1, dinc = 1;
         }
         else
         {
-            // no edge found
+            // can't detect direction
             return false;
         }
+            
+        // Figure the crossover brightness levels for detecting the edge.
+        // The midpoint is the brightness level halfway between the bright
+        // and dark regions we detected at the opposite ends of the sensor.
+        // To find the edge, we'll look for a brightness level slightly 
+        // *past* the midpoint, to help reject noise - the bright region
+        // pixels should all cluster close to the higher level, and the
+        // shadow region should all cluster close to the lower level.
+        // We'll define "close" as within 1/3 of the gap between the 
+        // extremes.
+        int mid = (a+b)/2;
+        int delta6 = abs(a-b)/6;
+        int crossoverHi = mid + delta6;
+        int crossoverLo = mid - delta6;
 
-#else
-        // Scan for the steepest brightness slope, averaged over 10 pixels.
-        // Start with the first two 10-pixel windows.
-        int sum1 = int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4] 
-            + pix[5] + pix[6] + pix[7] + pix[8] + pix[9];
-        int sum2 = int(pix[10]) + pix[11] + pix[12] + pix[13] + pix[14]
-            + pix[15] + pix[16] + pix[17] + pix[18] + pix[19];
-            
-        // Now scan one pixel at a time
-        float dldsMax = 0, dldsMin = 0;
-        int sMax = -1, sMin = -1;
-        const int nEnd = n-10;
-        const uint8_t *pixp = pix + 10;
-        const uint8_t *const endp = pix + nEnd;
-        if (dir > 0)
-        {
-            // dir>0 -> bright end is at start of array -> look for
-            // most negative slope (bright to dark transition)
-            for ( ; pixp < endp ; ++pixp)
-            {
-                // figure the slope here; if it's the new min, note it
-                int dlds = (sum2 - sum1);
-                if (dlds < dldsMin)
-                    dldsMin = dlds, sMin = pixp - pix;
-                    
-                // update the window
-                sum1 -= *(pixp - 10);
-                uint8_t c = *pixp;
-                sum1 += c;
-                sum2 -= c;
-                sum2 += *(pixp + 10);
-            }
-            
-            // return the steepest negative slope, if we found one at all
-            if (sMin >= 0)
-            {
-                pos = sMin;
-                return true;
-            }
-        }
-        else if (dir < 0)
-        {
-            // dir<0 -> dark end is at start of array -> look for most
-            // positive slope (dark to bright transition)
-            for ( ; pixp < endp ; ++pixp)
-            {
-                // figure the slope here; if it's the new max, remember it
-                int dlds = (sum2 - sum1);
-                if (dlds > dldsMax)
-                    dldsMax = dlds, sMax = pixp - pix;
-                    
-                // update the window
-                sum1 -= *(pixp - 10);
-                uint8_t c = *pixp;
-                sum1 += c;
-                sum2 -= c;
-                sum2 += *(pixp + 10);
-            }
-            
-            // return the steepest positive slope we found
-            if (sMax >= 0)
-            {
-                pos = sMax;
-                return true;
-            }
-        }
-
-        // no edge found
-        return false;
-#endif
-        
-#elif SCAN_METHOD == 1
         // Scan inward from the each end, looking for edges.  Each time we
         // find an edge from one direction, we'll see if the scan from the
         // other direction agrees.  If it does, we have a winner.  If they
@@ -433,51 +389,126 @@ public:
                 return true;
             }
         }
-        
-#elif SCAN_METHOD == 0
+    }
+#endif // SCAN METHOD 1
 
-        // Old method - single-sided scan with a little local noise suppression.
-        // Scan from the bright side looking, for a pixel that drops below the
-        // midpoint brightess.  To reduce false positives from noise, check to
-        // see if the majority of the next few pixels stay in shadow - if not,
-        // consider the dark pixel to be some kind of transient noise, and
-        // continue looking for a more solid edge.
-        for (int i = 5 ; i < n-5 ; ++i, bi += dir)
+#if SCAN_METHOD == 2
+    // Scan method 2: scan for steepest brightness slope.
+    bool process(uint8_t *pix, int n, int &pos)
+    {        
+        // Get the levels at each end
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
+        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
+        
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        if (a > b+10)
         {
-            // check to see if we found a dark pixel
-            if (pix[bi] < mid)
-            {
-                // make sure we have a sustained edge
-                int ok = 0;
-                int bi2 = bi + dir;
-                for (int j = 0 ; j < 5 ; ++j, bi2 += dir)
-                {
-                    // count this pixel if it's darker than the midpoint
-                    if (pix[bi2] < mid)
-                        ++ok;
-                }
+            // left end is brighter - standard orientation
+            dir = 1;
+        }
+        else if (b > a+10)
+        {
+            // right end is brighter - reverse orientation
+            dir = -1;
+        }
+        else
+        {
+            // can't determine direction
+            return false;
+        }
+
+        // scan for the steepest edge using the assembly language 
+        // implementation (since the C++ version is too slow)
+        const uint8_t *edgep = 0;
+        if (ccdScanMode2(pix, n, &edgep, dir))
+        {
+            // edgep has the pixel array pointer; convert it to an offset
+            pos = edgep - pix;
+            
+            // if the sensor orientation is reversed, figure the index from
+            // the other end of the array
+            if (dir < 0)
+                pos = n - pos;
                 
-                // if we're clearly in the dark section, we have our edge
-                if (ok > 3)
-                {
-                    // Success.  Since we found an edge in this scan, save the
-                    // midpoint brightness level in our history list, to help
-                    // with any future frames with insufficient contrast.
-                    midpt[midptIdx++] = mid;
-                    midptIdx %= countof(midpt);
-                    
-                    // return the detected position
-                    pos = i;
-                    return true;
-                }
-            }
+            // success
+            return true;
+        }
+        else
+        {
+            // no edge found
+            return false;
+        }
+
+    }
+#endif // SCAN_METHOD 2
+
+#if SCAN_METHOD == 3
+    // Scan method 0: one-way scan; original method used in v1 firmware.
+    bool process(uint8_t *pix, int n, int &pos)
+    {        
+        // Get the levels at each end
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
+        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
+        
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        if (a > b+10)
+        {
+            // left end is brighter - standard orientation
+            dir = 1;
+        }
+        else if (b > a+10)
+        {
+           // right end is brighter - reverse orientation
+            dir = -1;
+        }
+        else
+        {
+            // We can't detect the orientation from this image
+            return false;
+        }
+            
+        // Figure the crossover brightness levels for detecting the edge.
+        // The midpoint is the brightness level halfway between the bright
+        // and dark regions we detected at the opposite ends of the sensor.
+        // To find the edge, we'll look for a brightness level slightly 
+        // *past* the midpoint, to help reject noise - the bright region
+        // pixels should all cluster close to the higher level, and the
+        // shadow region should all cluster close to the lower level.
+        // We'll define "close" as within 1/3 of the gap between the 
+        // extremes.
+        int mid = (a+b)/2;
+
+        // Count pixels brighter than the brightness midpoint.  We assume
+        // that all of the bright pixels are contiguously within the bright
+        // region, so we simply have to count them up.  Even if we have a
+        // few noisy pixels in the dark region above the midpoint, these
+        // should on average be canceled out by anomalous dark pixels in
+        // the bright region.
+        int bcnt = 0;
+        for (int i = 0 ; i < n ; ++i)
+        {
+            if (pix[i] > mid)
+                ++bcnt;
         }
         
-        // no edge found
-        return false;
-
-#endif // SCAN_METHOD
+        // The position is simply the size of the bright region
+        pos = bcnt;
+        if (dir < 1)
+            pos = n - pos;
+        return true;
     }
+#endif // SCAN_METHOD 3
+    
     
     // Send a status report to the joystick interface.
     // See plunger.h for details on the arguments.
