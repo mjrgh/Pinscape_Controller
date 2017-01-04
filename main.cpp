@@ -1674,14 +1674,15 @@ void scanButtons()
 Timer buttonTimer;
 
 // Count a button during the initial setup scan
-void countButton(uint8_t typ, bool &kbKeys)
+void countButton(uint8_t typ, uint8_t shiftTyp, bool &kbKeys)
 {
     // count it
     ++nButtons;
     
     // if it's a keyboard key or media key, note that we need a USB 
     // keyboard interface
-    if (typ == BtnTypeKey || typ == BtnTypeMedia)
+    if (typ == BtnTypeKey || typ == BtnTypeMedia
+        || shiftTyp == BtnTypeKey || shiftTyp == BtnTypeMedia)
         kbKeys = true;
 }
 
@@ -1702,7 +1703,7 @@ void initButtons(Config &cfg, bool &kbKeys)
     {
         // it's valid if it's wired to a real input pin
         if (wirePinName(cfg.button[i].pin) != NC)
-            countButton(cfg.button[i].typ, kbKeys);
+            countButton(cfg.button[i].typ, cfg.button[i].typ2, kbKeys);
     }
     
     // Count virtual buttons
@@ -1714,7 +1715,7 @@ void initButtons(Config &cfg, bool &kbKeys)
         zblButtonIndex = nButtons;
         
         // count it
-        countButton(cfg.plunger.zbLaunchBall.keytype, kbKeys);
+        countButton(cfg.plunger.zbLaunchBall.keytype, BtnTypeNone, kbKeys);
     }
 
     // Allocate the live button slots
