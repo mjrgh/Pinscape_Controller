@@ -275,7 +275,8 @@ bool USBJoystick::reportConfigVar(const uint8_t *data)
 bool USBJoystick::reportConfig(
     int numOutputs, int unitNo, 
     int plungerZero, int plungerMax, int plungerRlsTime,
-    bool configured)
+    bool configured,
+    size_t freeHeapBytes)
 {
     HID_REPORT report;
 
@@ -301,10 +302,38 @@ bool USBJoystick::reportConfig(
     //  0x01  -> configuration loaded
     report.data[11] = (configured ? 0x01 : 0x00);
     
+    // write the free heap space
+    put(12, freeHeapBytes);
+    
     // send the report
     report.length = reportLen;
     return sendTO(&report, 100);
 }
+
+bool USBJoystick::reportButtonStatus(int numButtons, const uint8_t *state)
+{
+    HID_REPORT report;
+
+    // initially fill the report with zeros
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate that it's a config report.
+    uint16_t s = 0xA100;
+    put(0, s);
+    
+    // write the number of buttons
+    report.data[2] = (uint8_t)numButtons;
+    
+    // Write the buttons - these are packed into ceil(numButtons/8) bytes.
+    size_t btnBytes = (numButtons+7)/8;
+    if (btnBytes + 3 > reportLen) btnBytes = reportLen - 3;
+    memcpy(&report.data[3], state, btnBytes);
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
 
 bool USBJoystick::move(int16_t x, int16_t y) 
 {

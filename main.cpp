@@ -163,6 +163,12 @@
 //        connection to the host (or so it appears to the device), but data 
 //        transmissions are failing.
 //
+//    medium blue flash = TV ON delay timer running.  This means that the
+//        power to the secondary PSU has just been turned on, and the TV ON
+//        timer is waiting for the configured delay time before pulsing the
+//        TV power button relay.  This is only shown if the TV ON feature is
+//        enabled.
+//
 //    long yellow/green = everything's working, but the plunger hasn't
 //        been calibrated.  Follow the calibration procedure described in
 //        the project documentation.  This flash mode won't appear if there's
@@ -297,56 +303,57 @@ const char *getBuildID()
 // they're so stingy, but it appears from empirical testing that we can 
 // create a static array up to about 9K before things get crashy.
 
+// Dynamic memory pool.  We'll reserve space for all dynamic 
+// allocations by creating a simple C array of bytes.  The size
+// of this array is the maximum number of bytes we can allocate
+// with malloc or operator 'new'.
+//
+// The maximum safe size for this array is, in essence, the
+// amount of physical KL25Z RAM left over after accounting for
+// static data throughout the rest of the program, the run-time
+// stack, and any other space reserved for compiler or MCU
+// overhead.  Unfortunately, it's not straightforward to
+// determine this analytically.  The big complication is that
+// the minimum stack size isn't easily predictable, as the stack
+// grows according to what the program does.  In addition, the
+// mbed platform tools don't give us detailed data on the
+// compiler/linker memory map.  All we get is a generic total
+// RAM requirement, which doesn't necessarily account for all
+// overhead (e.g., gaps inserted to get proper alignment for
+// particular memory blocks).  
+//
+// A very rough estimate: the total RAM size reported by the 
+// linker is about 3.5K (currently - that can obviously change 
+// as the project evolves) out of 16K total.  Assuming about a 
+// 3K stack, that leaves in the ballpark of 10K.  Empirically,
+// that seems pretty close.  In testing, we start to see some
+// instability at 10K, while 9K seems safe.  To be conservative,
+// we'll reduce this to 8K.
+//
+// Our measured total usage in the base configuration (22 GPIO
+// output ports, TSL1410R plunger sensor) is about 4000 bytes.
+// A pretty fully decked-out configuration (121 output ports,
+// with 8 TLC5940 chips and 3 74HC595 chips, plus the TSL1412R
+// sensor with the higher pixel count, and all expansion board
+// features enabled) comes to about 6700 bytes.  That leaves
+// us with about 1.5K free out of our 8K, so we still have a 
+// little more headroom for future expansion.
+//
+// For comparison, the standard mbed malloc() runs out of
+// memory at about 6K.  That's what led to this custom malloc:
+// we can just fit the base configuration into that 4K, but
+// it's not enough space for more complex setups.  There's
+// still a little room for squeezing out unnecessary space
+// from the mbed library code, but at this point I'd prefer
+// to treat that as a last resort, since it would mean having
+// to fork private copies of the libraries.
+static const size_t XMALLOC_POOL_SIZE = 8*1024;
+static char xmalloc_pool[XMALLOC_POOL_SIZE];
+static char *xmalloc_nxt = xmalloc_pool;
+static size_t xmalloc_rem = XMALLOC_POOL_SIZE;
+    
 void *xmalloc(size_t siz)
 {
-    // Dynamic memory pool.  We'll reserve space for all dynamic 
-    // allocations by creating a simple C array of bytes.  The size
-    // of this array is the maximum number of bytes we can allocate
-    // with malloc or operator 'new'.
-    //
-    // The maximum safe size for this array is, in essence, the
-    // amount of physical KL25Z RAM left over after accounting for
-    // static data throughout the rest of the program, the run-time
-    // stack, and any other space reserved for compiler or MCU
-    // overhead.  Unfortunately, it's not straightforward to
-    // determine this analytically.  The big complication is that
-    // the minimum stack size isn't easily predictable, as the stack
-    // grows according to what the program does.  In addition, the
-    // mbed platform tools don't give us detailed data on the
-    // compiler/linker memory map.  All we get is a generic total
-    // RAM requirement, which doesn't necessarily account for all
-    // overhead (e.g., gaps inserted to get proper alignment for
-    // particular memory blocks).  
-    //
-    // A very rough estimate: the total RAM size reported by the 
-    // linker is about 3.5K (currently - that can obviously change 
-    // as the project evolves) out of 16K total.  Assuming about a 
-    // 3K stack, that leaves in the ballpark of 10K.  Empirically,
-    // that seems pretty close.  In testing, we start to see some
-    // instability at 10K, while 9K seems safe.  To be conservative,
-    // we'll reduce this to 8K.
-    //
-    // Our measured total usage in the base configuration (22 GPIO
-    // output ports, TSL1410R plunger sensor) is about 4000 bytes.
-    // A pretty fully decked-out configuration (121 output ports,
-    // with 8 TLC5940 chips and 3 74HC595 chips, plus the TSL1412R
-    // sensor with the higher pixel count, and all expansion board
-    // features enabled) comes to about 6700 bytes.  That leaves
-    // us with about 1.5K free out of our 8K, so we still have a 
-    // little more headroom for future expansion.
-    //
-    // For comparison, the standard mbed malloc() runs out of
-    // memory at about 6K.  That's what led to this custom malloc:
-    // we can just fit the base configuration into that 4K, but
-    // it's not enough space for more complex setups.  There's
-    // still a little room for squeezing out unnecessary space
-    // from the mbed library code, but at this point I'd prefer
-    // to treat that as a last resort, since it would mean having
-    // to fork private copies of the libraries.
-    static char pool[8*1024];
-    static char *nxt = pool;
-    static size_t rem = sizeof(pool);
-    
     // align to a 4-byte increment
     siz = (siz + 3) & ~3;
     
@@ -360,7 +367,7 @@ void *xmalloc(size_t siz)
     // context to handle failed allocations as fatal errors centrally.  We
     // can't recover from these automatically, so we have to resort to user
     // intervention, which we signal with the diagnostic LED flashes.
-    if (siz > rem)
+    if (siz > xmalloc_rem)
     {
         // halt with the diagnostic display (by looping forever)
         for (;;)
@@ -373,15 +380,17 @@ void *xmalloc(size_t siz)
     }
 
     // get the next free location from the pool to return   
-    char *ret = nxt;
+    char *ret = xmalloc_nxt;
     
     // advance the pool pointer and decrement the remaining size counter
-    nxt += siz;
-    rem -= siz;
+    xmalloc_nxt += siz;
+    xmalloc_rem -= siz;
     
     // return the allocated block
     return ret;
-}
+};
+
+// our malloc() replacement
 
 // Overload operator new to call our custom malloc.  This ensures that
 // all 'new' allocations throughout the program (including library code)
@@ -542,13 +551,36 @@ inline void pinNameWire(uint8_t *b, PinName n)
 //
 DigitalOut *ledR, *ledG, *ledB;
 
+// Power on timer state for diagnostics.  We flash the blue LED when
+// nothing else is going on.  State 0-1 = off, 2-3 = on
+uint8_t powerTimerDiagState = 0;
+
 // Show the indicated pattern on the diagnostic LEDs.  0 is off, 1 is
 // on, and -1 is no change (leaves the current setting intact).
+static uint8_t diagLEDState = 0;
 void diagLED(int r, int g, int b)
 {
+    // remember the new state
+    diagLEDState = r | (g << 1) | (b << 2);
+    
+    // if turning everything off, use the power timer state instead, 
+    // applying it to the blue LED
+    if (diagLEDState == 0)
+        b = (powerTimerDiagState >= 2);
+        
+    // set the new state
     if (ledR != 0 && r != -1) ledR->write(!r);
     if (ledG != 0 && g != -1) ledG->write(!g);
     if (ledB != 0 && b != -1) ledB->write(!b);
+}
+
+// update the LEDs with the current state
+void diagLED(void)
+{
+    diagLED(
+        diagLEDState & 0x01,
+        (diagLEDState >> 1) & 0x01,
+        (diagLEDState >> 1) & 0x02);
 }
 
 // check an output port assignment to see if it conflicts with
@@ -1053,13 +1085,56 @@ public:
 static int numOutputs;
 static LwOut **lwPin;
 
+// LedWiz output states.
+//
+// The LedWiz protocol has two separate control axes for each output.
+// One axis is its on/off state; the other is its "profile" state, which
+// is either a fixed brightness or a blinking pattern for the light.
+// The two axes are independent.
+//
+// Even though the original LedWiz protocol can only access 32 ports, we
+// maintain LedWiz state for every port, even if we have more than 32.  Our
+// extended protocol allows the client to select a bank of 32 outputs to
+// address via original protocol commands (SBA/PBA), which allows for one
+// Pinscape unit with more than 32 ports to be exposed on the client as
+// multiple virtual LedWiz units through a modified LEDWIZ.DLL interface
+// library.
 
-// Number of LedWiz emulation outputs.  This is the number of ports
-// accessible through the standard (non-extended) LedWiz protocol
-// messages.  The protocol has a fixed set of 32 outputs, but we
-// might have fewer actual outputs.  This is therefore set to the
-// lower of 32 or the actual number of outputs.
-static int numLwOutputs;
+// Current LedWiz virtual unit: 0 = ports 1-32, 1 = ports 33-64, etc.
+// SBA and PBA messages address the block of ports set by this unit.
+uint8_t ledWizBank = 0;
+
+// on/off state for each LedWiz output
+static uint8_t *wizOn;
+
+// LedWiz "Profile State" (the LedWiz brightness level or blink mode)
+// for each LedWiz output.  If the output was last updated through an 
+// LedWiz protocol message, it will have one of these values:
+//
+//   0-48 = fixed brightness 0% to 100%
+//   49  = fixed brightness 100% (equivalent to 48)
+//   129 = ramp up / ramp down
+//   130 = flash on / off
+//   131 = on / ramp down
+//   132 = ramp up / on
+//
+// (Note that value 49 isn't documented in the LedWiz spec, but real
+// LedWiz units treat it as equivalent to 48, and some PC software uses
+// it, so we need to accept it for compatibility.)
+static uint8_t *wizVal;
+
+// LedWiz flash speed.  This is a value from 1 to 7 giving the pulse
+// rate for lights in blinking states.  Each bank of 32 lights has its
+// own pulse rate, so we need ceiling(number_of_physical_outputs/32)
+// entries here.  Note that we could allocate this dynamically, but
+// the maximum size is so small that it's more efficient to preallocate
+// it at the maximum size.
+static const int MAX_LW_BANKS = (MAX_OUT_PORTS+31)/32;
+static uint8_t wizSpeed[MAX_LW_BANKS];
+
+// Current LedWiz flash cycle counter.  This runs from 0 to 255
+// during each cycle. 
+static uint8_t wizFlashCounter[MAX_LW_BANKS];
 
 // Current absolute brightness levels for all outputs.  These are
 // DOF brightness level value, from 0 for fully off to 255 for fully
@@ -1219,19 +1294,23 @@ void initLwOut(Config &cfg)
         }
     }
     
-    // the real LedWiz protocol can access at most 32 ports, or the
-    // actual number of outputs, whichever is lower
-    numLwOutputs = (numOutputs < 32 ? numOutputs : 32);
-    
     // allocate the pin array
-    lwPin = new LwOut*[numOutputs];    
+    lwPin = new LwOut*[numOutputs];
     
-    // Allocate the current brightness array.  For these, allocate at
-    // least 32, so that we have enough for all LedWiz messages, but
-    // allocate the full set of actual ports if we have more than the
-    // LedWiz complement.
-    int minOuts = numOutputs < 32 ? 32 : numOutputs;
-    outLevel = new uint8_t[minOuts];
+    // Allocate the current brightness array
+    outLevel = new uint8_t[numOutputs];
+    
+    // allocate the LedWiz output state arrays
+    wizOn = new uint8_t[numOutputs];
+    wizVal = new uint8_t[numOutputs];
+    
+    // initialize all LedWiz outputs to off and brightness 48
+    memset(wizOn, 0, numOutputs);
+    memset(wizVal, 48, numOutputs);
+    
+    // set all LedWiz virtual unit flash speeds to 2
+    for (i = 0 ; i < countof(wizSpeed) ; ++i)
+        wizSpeed[i] = 2;
     
     // create the pin interface object for each port
     for (i = 0 ; i < numOutputs ; ++i)
@@ -1260,7 +1339,7 @@ void initLwOut(Config &cfg)
 // was used in the command.  On a legacy SBA or PBA, we switch to
 // LedWiz mode; on an extended output set message, we switch to
 // extended mode.  We remember the LedWiz and extended output state
-// for each LW ports (1-32) separately.  Any time the mode changes, 
+// for each LW port (1-32) separately.  Any time the mode changes, 
 // we set ports 1-32 back to the state for the new mode.
 //
 // The reasoning here is that any given client (on the PC) will use
@@ -1273,49 +1352,6 @@ void initLwOut(Config &cfg)
 // on the PC to the other, but we shouldn't have to worry about one
 // program switching back and forth.
 static uint8_t ledWizMode = true;
-
-// LedWiz output states.
-//
-// The LedWiz protocol has two separate control axes for each output.
-// One axis is its on/off state; the other is its "profile" state, which
-// is either a fixed brightness or a blinking pattern for the light.
-// The two axes are independent.
-//
-// Note that the LedWiz protocol can only address 32 outputs, so the
-// wizOn and wizVal arrays have fixed sizes of 32 elements no matter
-// how many physical outputs we're using.
-
-// on/off state for each LedWiz output
-static uint8_t wizOn[32];
-
-// LedWiz "Profile State" (the LedWiz brightness level or blink mode)
-// for each LedWiz output.  If the output was last updated through an 
-// LedWiz protocol message, it will have one of these values:
-//
-//   0-48 = fixed brightness 0% to 100%
-//   49  = fixed brightness 100% (equivalent to 48)
-//   129 = ramp up / ramp down
-//   130 = flash on / off
-//   131 = on / ramp down
-//   132 = ramp up / on
-//
-// (Note that value 49 isn't documented in the LedWiz spec, but real
-// LedWiz units treat it as equivalent to 48, and some PC software uses
-// it, so we need to accept it for compatibility.)
-static uint8_t wizVal[32] = {
-    48, 48, 48, 48, 48, 48, 48, 48,
-    48, 48, 48, 48, 48, 48, 48, 48,
-    48, 48, 48, 48, 48, 48, 48, 48,
-    48, 48, 48, 48, 48, 48, 48, 48
-};
-
-// LedWiz flash speed.  This is a value from 1 to 7 giving the pulse
-// rate for lights in blinking states.
-static uint8_t wizSpeed = 2;
-
-// Current LedWiz flash cycle counter.  This runs from 0 to 255
-// during each cycle.
-static uint8_t wizFlashCounter = 0;
 
 // translate an LedWiz brightness level (0-49) to a DOF brightness
 // level (0-255)
@@ -1352,7 +1388,7 @@ static uint8_t wizState(int idx)
         // the true 100% level.  (In the documentation, level 49 is
         // simply not a valid setting.)  Even so, we treat level 48 as
         // 100% on to match the documentation.  This won't be perfectly
-        // ocmpatible with the actual LedWiz, but it makes for such a
+        // compatible with the actual LedWiz, but it makes for such a
         // small difference in brightness (if the output device is an
         // LED, say) that no one should notice.  It seems better to
         // err in this direction, because while the difference in
@@ -1375,24 +1411,26 @@ static uint8_t wizState(int idx)
     else if (val == 129)
     {
         // 129 = ramp up / ramp down
-        return wizFlashCounter < 128 
-            ? wizFlashCounter*2 + 1
-            : (255 - wizFlashCounter)*2;
+        const int c = wizFlashCounter[idx/32];
+        return c < 128 ? c*2 + 1 : (255 - c)*2;
     }
     else if (val == 130)
     {
         // 130 = flash on / off
-        return wizFlashCounter < 128 ? 255 : 0;
+        const int c = wizFlashCounter[idx/32];
+        return c < 128 ? 255 : 0;
     }
     else if (val == 131)
     {
         // 131 = on / ramp down
-        return wizFlashCounter < 128 ? 255 : (255 - wizFlashCounter)*2;
+        const int c = wizFlashCounter[idx/32];
+        return c < 128 ? 255 : (255 - c)*2;
     }
     else if (val == 132)
     {
         // 132 = ramp up / on
-        return wizFlashCounter < 128 ? wizFlashCounter*2 : 255;
+        const int c = wizFlashCounter[idx/32];
+        return c < 128 ? c*2 : 255;
     }
     else
     {
@@ -1418,13 +1456,16 @@ Timeout wizPulseTimer;
 #define WIZ_PULSE_TIME_BASE  (1.0f/127.0f)
 static void wizPulse()
 {
-    // increase the counter by the speed increment, and wrap at 256
-    wizFlashCounter += wizSpeed;
-    wizFlashCounter &= 0xff;
-    
-    // if we have any flashing lights, update them
-    int ena = false;
-    for (int i = 0 ; i < numLwOutputs ; ++i)
+    // update the flash counter in each bank
+    for (int bank = 0 ; bank < countof(wizFlashCounter) ; ++bank)
+    {
+        // increase the counter by the speed increment, and wrap at 256
+        wizFlashCounter[bank] = (wizFlashCounter[bank] + wizSpeed[bank]) & 0xff;
+    }
+
+    // look for outputs set to LedWiz flash modes 
+    int flashing = false;
+    for (int i = 0 ; i < numOutputs ; ++i)
     {
         if (wizOn[i])
         {
@@ -1432,7 +1473,7 @@ static void wizPulse()
             if (s >= 129 && s <= 132)
             {
                 lwPin[i]->set(wizState(i));
-                ena = true;
+                flashing = true;
             }
         }
     }    
@@ -1443,7 +1484,7 @@ static void wizPulse()
     // features when the host software doesn't care about the flashing 
     // modes.  For example, DOF never uses these modes, so there's no 
     // need for them when running Visual Pinball.
-    if (ena)
+    if (flashing)
         wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
 }
 
@@ -1453,7 +1494,7 @@ static void updateWizOuts()
 {
     // update each output
     int pulse = false;
-    for (int i = 0 ; i < numLwOutputs ; ++i)
+    for (int i = 0 ; i < numOutputs ; ++i)
     {
         pulse |= (wizVal[i] >= 129 && wizVal[i] <= 132);
         lwPin[i]->set(wizState(i));
@@ -1473,15 +1514,41 @@ static void updateWizOuts()
 // setting that affects all outputs, such as engaging or canceling Night Mode.
 static void updateAllOuts()
 {
-    // uddate each LedWiz output
-    for (int i = 0 ; i < numLwOutputs ; ++i)
+    // uddate each output
+    for (int i = 0 ; i < numOutputs ; ++i)
         lwPin[i]->set(wizState(i));
         
-    // update each extended output
-    for (int i = numLwOutputs ; i < numOutputs ; ++i)
-        lwPin[i]->set(outLevel[i]);
-        
     // flush 74HC595 changes, if necessary
+    if (hc595 != 0)
+        hc595->update();
+}
+
+//
+// Turn off all outputs and restore everything to the default LedWiz
+// state.  This sets outputs #1-32 to LedWiz profile value 48 (full
+// brightness) and switch state Off, sets all extended outputs (#33
+// and above) to zero brightness, and sets the LedWiz flash rate to 2.
+// This effectively restores the power-on conditions.
+//
+void allOutputsOff()
+{
+    // reset all LedWiz outputs to OFF/48
+    for (int i = 0 ; i < numOutputs ; ++i)
+    {
+        outLevel[i] = 0;
+        wizOn[i] = 0;
+        wizVal[i] = 48;
+        lwPin[i]->set(0);
+    }
+    
+    // restore default LedWiz flash rate
+    for (int i = 0 ; i < countof(wizSpeed) ; ++i)
+        wizSpeed[i] = 2;
+        
+    // set bank 0
+    ledWizBank = 0;
+    
+    // flush changes to hc595, if applicable
     if (hc595 != 0)
         hc595->update();
 }
@@ -1496,7 +1563,6 @@ struct ButtonState
 {
     ButtonState()
     {
-        di = NULL;
         physState = logState = prevLogState = 0;
         virtState = 0;
         dbState = 0;
@@ -1520,7 +1586,7 @@ struct ButtonState
     }
     
     // DigitalIn for the button, if connected to a physical input
-    TinyDigitalIn *di;
+    TinyDigitalIn di;
     
     // Time of last pulse state transition.
     //
@@ -1640,31 +1706,21 @@ Ticker buttonTicker;
 void scanButtons()
 {
     // scan all button input pins
-    ButtonState *bs = buttonState;
-    for (int i = 0 ; i < nButtons ; ++i, ++bs)
+    ButtonState *bs = buttonState, *last = bs + nButtons;
+    for ( ; bs < last ; ++bs)
     {
-        // if this logical button is connected to a physical input, check 
-        // the GPIO pin state
-        if (bs->di != NULL)
-        {
-            // Shift the new state into the debounce history.  Note that
-            // the physical pin inputs are active low (0V/GND = ON), so invert 
-            // the reading by XOR'ing the low bit with 1.  And of course we
-            // only want the low bit (since the history is effectively a bit
-            // vector), so mask the whole thing with 0x01 as well.
-            uint8_t db = bs->dbState;
-            db <<= 1;
-            db |= (bs->di->read() & 0x01) ^ 0x01;
-            bs->dbState = db;
-            
-            // if we have all 0's or 1's in the history for the required
-            // debounce period, the key state is stable - check for a change
-            // to the last stable state
-            const uint8_t stable = 0x1F;   // 00011111b -> 5 stable readings
-            db &= stable;
-            if (db == 0 || db == stable)
-                bs->physState = db & 1;
-        }
+        // Shift the new state into the debounce history
+        uint8_t db = (bs->dbState << 1) | bs->di.read();
+        bs->dbState = db;
+        
+        // If we have all 0's or 1's in the history for the required
+        // debounce period, the key state is stable, so apply the new
+        // physical state.  Note that the pins are active low, so the
+        // new button on/off state is the inverse of the GPIO state.
+        const uint8_t stable = 0x1F;   // 00011111b -> low 5 bits = last 5 readings
+        db &= stable;
+        if (db == 0 || db == stable)
+            bs->physState = !db;
     }
 }
 
@@ -1731,7 +1787,7 @@ void initButtons(Config &cfg, bool &kbKeys)
             bs->cfgIndex = i;
 
             // set up the GPIO input pin for this button
-            bs->di = new TinyDigitalIn(pin);
+            bs->di.assignPin(pin);
             
             // if it's a pulse mode button, set the initial pulse state to Off
             if (cfg.button[i].flags & BtnFlagPulse)
@@ -2154,6 +2210,31 @@ void processButtons(Config &cfg)
     }
 }
 
+// Send a button status report
+void reportButtonStatus(USBJoystick &js)
+{
+    // start with all buttons off
+    uint8_t state[(MAX_BUTTONS+7)/8];
+    memset(state, 0, sizeof(state));
+
+    // pack the button states into bytes, one bit per button
+    ButtonState *bs = buttonState;
+    for (int i = 0 ; i < nButtons ; ++i, ++bs)
+    {
+        // get the physical state
+        int b = bs->physState;
+        
+        // pack it into the appropriate bit
+        int idx = bs->cfgIndex;
+        int si = idx / 8;
+        int shift = idx & 0x07;
+        state[si] |= b << shift;
+    }
+    
+    // send the report
+    js.reportButtonStatus(MAX_BUTTONS, state);
+}
+
 // ---------------------------------------------------------------------------
 //
 // Customization joystick subbclass
@@ -2506,13 +2587,14 @@ public:
          vx_ = vy_ = 0;
 
          // get the time since the last get() sample
-         float dt = tGet_.read_us()/1.0e6f;
+         int dtus = tGet_.read_us();
          tGet_.reset();
          
          // done manipulating the shared data
          __enable_irq();
          
          // adjust the readings for the integration time
+         float dt = dtus/1000000.0f;
          vx /= dt;
          vy /= dt;
          
@@ -2773,40 +2855,6 @@ private:
 
 // ---------------------------------------------------------------------------
 //
-// Turn off all outputs and restore everything to the default LedWiz
-// state.  This sets outputs #1-32 to LedWiz profile value 48 (full
-// brightness) and switch state Off, sets all extended outputs (#33
-// and above) to zero brightness, and sets the LedWiz flash rate to 2.
-// This effectively restores the power-on conditions.
-//
-void allOutputsOff()
-{
-    // reset all LedWiz outputs to OFF/48
-    for (int i = 0 ; i < numLwOutputs ; ++i)
-    {
-        outLevel[i] = 0;
-        wizOn[i] = 0;
-        wizVal[i] = 48;
-        lwPin[i]->set(0);
-    }
-    
-    // reset all extended outputs (ports >32) to full off (brightness 0)
-    for (int i = numLwOutputs ; i < numOutputs ; ++i)
-    {
-        outLevel[i] = 0;
-        lwPin[i]->set(0);
-    }
-    
-    // restore default LedWiz flash rate
-    wizSpeed = 2;
-    
-    // flush changes to hc595, if applicable
-    if (hc595 != 0)
-        hc595->update();
-}
-
-// ---------------------------------------------------------------------------
-//
 // TV ON timer.  If this feature is enabled, we toggle a TV power switch
 // relay (connected to a GPIO pin) to turn on the cab's TV monitors shortly
 // after the system is powered.  This is useful for TVs that don't remember
@@ -2882,14 +2930,38 @@ void allOutputsOff()
 //   3 -> SET pulsed low, ready to check status
 //   4 -> TV timer countdown in progress
 //   5 -> TV relay on
-int psu2_state = 1;
+uint8_t psu2_state = 1;
+
+// TV relay state.  The TV relay can be controlled by the power-on
+// timer and directly from the PC (via USB commands), so keep a
+// separate state for each:
+//
+//   0x01 -> turned on by power-on timer
+//   0x02 -> turned on by USB command
+uint8_t tv_relay_state = 0x00;
+const uint8_t TV_RELAY_POWERON = 0x01;
+const uint8_t TV_RELAY_USB     = 0x02;
+
+// TV ON switch relay control
+DigitalOut *tv_relay;
 
 // PSU2 power sensing circuit connections
 DigitalIn *psu2_status_sense;
 DigitalOut *psu2_status_set;
 
-// TV ON switch relay control
-DigitalOut *tv_relay;
+// Apply the current TV relay state
+void tvRelayUpdate(uint8_t bit, bool state)
+{
+    // update the state
+    if (state)
+        tv_relay_state |= bit;
+    else
+        tv_relay_state &= ~bit;
+    
+    // set the relay GPIO to the new state
+    if (tv_relay != 0)
+        tv_relay->write(tv_relay_state != 0);
+}
 
 // Timer interrupt
 Ticker tv_ticker;
@@ -2937,6 +3009,10 @@ void TVTimerInt()
             tv_timer.reset();
             tv_timer.start();
             psu2_state = 4;
+            
+            // start the power timer diagnostic flashes
+            powerTimerDiagState = 2;
+            diagLED();
         }
         else
         {
@@ -2954,16 +3030,24 @@ void TVTimerInt()
         if (tv_timer.read() >= tv_delay_time)
         {
             // turn on the relay for one timer interval
-            tv_relay->write(1);
+            tvRelayUpdate(TV_RELAY_POWERON, true);
             psu2_state = 5;
         }
+        
+        // flash the power time diagnostic every two interrupts
+        powerTimerDiagState = (powerTimerDiagState + 1) & 0x03;
+        diagLED();
         break;
         
     case 5:
         // TV timer relay on.  We pulse this for one interval, so
         // it's now time to turn it off and return to the default state.
-        tv_relay->write(0);
+        tvRelayUpdate(TV_RELAY_POWERON, false);
         psu2_state = 1;
+        
+        // done with the diagnostic flashes
+        powerTimerDiagState = 0;
+        diagLED();
         break;
     }
 }
@@ -2984,12 +3068,55 @@ void startTVTimer(Config &cfg)
         psu2_status_sense = new DigitalIn(wirePinName(cfg.TVON.statusPin));
         psu2_status_set = new DigitalOut(wirePinName(cfg.TVON.latchPin));
         tv_relay = new DigitalOut(wirePinName(cfg.TVON.relayPin));
-        tv_delay_time = cfg.TVON.delayTime/100.0;
+        tv_delay_time = cfg.TVON.delayTime/100.0f;
     
         // Set up our time routine to run every 1/4 second.  
         tv_ticker.attach(&TVTimerInt, 0.25);
     }
 }
+
+// TV relay manual control timer.  This lets us pulse the TV relay
+// under manual control, separately from the TV ON timer.
+Ticker tv_manualTicker;
+void TVManualInt()
+{
+    tv_manualTicker.detach();
+    tvRelayUpdate(TV_RELAY_USB, false);
+}
+
+// Operate the TV ON relay.  This allows manual control of the relay
+// from the PC.  See protocol message 65 submessage 11.
+//
+// Mode:
+//    0 = turn relay off
+//    1 = turn relay on
+//    2 = pulse relay 
+void TVRelay(int mode)
+{
+    // if there's no TV relay control pin, ignore this
+    if (tv_relay == 0)
+        return;
+    
+    switch (mode)
+    {
+    case 0:
+        // relay off
+        tvRelayUpdate(TV_RELAY_USB, false);
+        break;
+        
+    case 1:
+        // relay on
+        tvRelayUpdate(TV_RELAY_USB, true);
+        break;
+        
+    case 2:
+        // Pulse the relay.  Turn it on, then set our timer for 250ms.
+        tvRelayUpdate(TV_RELAY_USB, true);
+        tv_manualTicker.attach(&TVManualInt, 0.25);
+        break;
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 //
@@ -3652,11 +3779,122 @@ public:
 
 private:
 
-#if 1
+// Plunger data filtering mode:  optionally apply filtering to the raw 
+// plunger sensor readings to try to reduce noise in the signal.  This
+// is designed for the TSL1410/12 optical sensors, where essentially all
+// of the noise in the signal comes from lack of sharpness in the shadow
+// edge.  When the shadow is blurry, the edge detector has to pick a pixel,
+// even though the edge is actually a gradient spanning several pixels.
+// The edge detection algorithm decides on the exact pixel, but whatever
+// the algorithm, the choice is going to be somewhat arbitrary given that
+// there's really no one pixel that's "the edge" when the edge actually
+// covers multiple pixels.  This can make the choice of pixel sensitive to
+// small changes in exposure and pixel respose from frame to frame, which
+// means that the reported edge position can move by a pixel or two from
+// one frame to the next even when the physical plunger is perfectly still.
+// That's the noise we're talking about.
+//
+// We previously applied a mild hysteresis filter to the signal to try to
+// eliminate this noise.  The filter tracked the average over the last
+// several samples, and rejected readings that wandered within a few
+// pixels of the average.  If a certain number of readings moved away from
+// the average in the same direction, even by small amounts, the filter
+// accepted the changes, on the assumption that they represented actual
+// slow movement of the plunger.  This filter was applied after the firing
+// detection.
+//
+// I also tried a simpler filter that rejected changes that were too fast
+// to be physically possible, as well as changes that were very close to
+// the last reported position (i.e., simple hysteresis).  The "too fast"
+// filter was there to reject spurious readings where the edge detector
+// mistook a bad pixel value as an edge.  
+//
+// The new "mode 2" edge detector (see ccdSensor.h) seems to do a better
+// job of rejecting pixel-level noise by itself than the older "mode 0"
+// algorithm did, so I removed the filtering entirely.  Any filtering has
+// some downsides, so it's better to reduce noise in the underlying signal
+// as much as possible first.  It seems possible to get a very stable signal
+// now with a combination of the mode 2 edge detector and optimizing the
+// physical sensor arrangement, especially optimizing the light source to
+// cast as sharp as shadow as possible and adjusting the brightness to
+// maximize bright/dark contrast in the image.
+//
+//   0 = No filtering (current default)
+//   1 = Filter the data after firing detection using moving average
+//       hysteresis filter (old version, used in most 2016 releases)
+//   2 = Filter the data before firing detection using simple hysteresis
+//       plus spurious "too fast" motion rejection
+//
+#define PLUNGER_FILTERING_MODE  0
+
+#if PLUNGER_FILTERING_MODE == 0
     // Disable all filtering
     void applyPreFilter(PlungerReading &r) { }
     int applyPostFilter() { return z; }
-#elif 1
+#elif PLUNGER_FILTERING_MODE == 1
+    // Apply pre-processing filter.  This filter is applied to the raw
+    // value coming off the sensor, before calibration or fire-event
+    // processing.
+    void applyPreFilter(PlungerReading &r)
+    {
+    }
+    
+    // Figure the next post-processing filtered value.  This applies a
+    // hysteresis filter to the last raw z value and returns the 
+    // filtered result.
+    int applyPostFilter()
+    { 
+        if (firing <= 1)
+        {
+            // Filter limit - 5 samples.  Once we've been moving
+            // in the same direction for this many samples, we'll
+            // clear the history and start over.
+            const int filterMask = 0x1f;
+            
+            // figure the last average
+            int lastAvg = int(filterSum / filterN);
+            
+            // figure the direction of this sample relative to the average,
+            // and shift it in to our bit mask of recent direction data
+            if (z != lastAvg)
+            {
+                // shift the new direction bit into the vector
+                filterDir <<= 1;
+                if (z > lastAvg) filterDir |= 1;
+            }
+            
+            // keep only the last N readings, up to the filter limit
+            filterDir &= filterMask;
+            
+            // if we've been moving consistently in one direction (all 1's
+            // or all 0's in the direction history vector), reset the average
+            if (filterDir == 0x00 || filterDir == filterMask) 
+            {
+                // motion away from the average - reset the average
+                filterDir = 0x5555;
+                filterN = 1;
+                filterSum = (lastAvg + z)/2;
+                return int16_t(filterSum);
+            }
+            else
+            {
+                // we're directionless - return the new average, with the 
+                // new sample included
+                filterSum += z;
+                ++filterN;
+                return int16_t(filterSum / filterN);
+            }
+        }
+        else
+        {
+            // firing mode - skip the filter
+            filterN = 1;
+            filterSum = z;
+            filterDir = 0x5555;
+            return z;
+        }
+    }
+#elif PLUNGER_FILTERING_MODE == 2
     // Apply pre-processing filter.  This filter is applied to the raw
     // value coming off the sensor, before calibration or fire-event
     // processing.
@@ -3724,69 +3962,6 @@ private:
     int applyPostFilter()
     {
         return z;
-    }
-#else
-    // Apply pre-processing filter.  This filter is applied to the raw
-    // value coming off the sensor, before calibration or fire-event
-    // processing.
-    void applyPreFilter(PlungerReading &r)
-    {
-    }
-    
-    // Figure the next post-processing filtered value.  This applies a
-    // hysteresis filter to the last raw z value and returns the 
-    // filtered result.
-    int applyPostFilter()
-    { 
-        if (firing <= 1)
-        {
-            // Filter limit - 5 samples.  Once we've been moving
-            // in the same direction for this many samples, we'll
-            // clear the history and start over.
-            const int filterMask = 0x1f;
-            
-            // figure the last average
-            int lastAvg = int(filterSum / filterN);
-            
-            // figure the direction of this sample relative to the average,
-            // and shift it in to our bit mask of recent direction data
-            if (z != lastAvg)
-            {
-                // shift the new direction bit into the vector
-                filterDir <<= 1;
-                if (z > lastAvg) filterDir |= 1;
-            }
-            
-            // keep only the last N readings, up to the filter limit
-            filterDir &= filterMask;
-            
-            // if we've been moving consistently in one direction (all 1's
-            // or all 0's in the direction history vector), reset the average
-            if (filterDir == 0x00 || filterDir == filterMask) 
-            {
-                // motion away from the average - reset the average
-                filterDir = 0x5555;
-                filterN = 1;
-                filterSum = (lastAvg + z)/2;
-                return int16_t(filterSum);
-            }
-            else
-            {
-                // we're directionless - return the new average, with the 
-                // new sample included
-                filterSum += z;
-                ++filterN;
-                return int16_t(filterSum / filterN);
-            }
-        }
-        else
-        {
-            // firing mode - skip the filter
-            filterN = 1;
-            filterSum = z;
-            filterDir = 0x5555;
-            return z;
-        }
     }
 #endif
     
@@ -4199,7 +4374,7 @@ int calBtnLit = false;
 #define v_byte(var, ofs)    data[ofs] = cfg.var
 #define v_ui16(var, ofs)    ui16Wire(data+(ofs), cfg.var)
 #define v_pin(var, ofs)     pinNameWire(data+(ofs), cfg.var)
-#define v_byte_ro(val, ofs) data[ofs] = val
+#define v_byte_ro(val, ofs) data[ofs] = (val)
 #define v_func  configVarGet
 #include "cfgVarMsgMap.h"
 
@@ -4241,24 +4416,23 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         ledWizMode = true;
 
         // update all on/off states
-        for (int i = 0, bit = 1, ri = 1 ; i < numLwOutputs ; ++i, bit <<= 1)
+        for (int i = 0, bit = 1, imsg = 1, iwiz = ledWizBank*32 ; 
+             i < 32 && iwiz < numOutputs ;
+             ++i, ++iwiz, bit <<= 1)
         {
             // figure the on/off state bit for this output
             if (bit == 0x100) {
                 bit = 1;
-                ++ri;
+                ++imsg;
             }
             
             // set the on/off state
-            wizOn[i] = ((data[ri] & bit) != 0);
+            wizOn[iwiz] = ((data[imsg] & bit) != 0);
         }
         
         // set the flash speed - enforce the value range 1-7
-        wizSpeed = data[5];
-        if (wizSpeed < 1)
-            wizSpeed = 1;
-        else if (wizSpeed > 7)
-            wizSpeed = 7;
+        if (ledWizBank < countof(wizSpeed))
+            wizSpeed[ledWizBank] = (data[5] < 1 ? 1 : data[5] > 7 ? 7 : data[5]);
 
         // update the physical outputs
         updateWizOuts();
@@ -4337,7 +4511,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
                 numOutputs, 
                 cfg.psUnitNo - 1,   // report 0-15 range for unit number (we store 1-16 internally)
                 cfg.plunger.cal.zero, cfg.plunger.cal.max, cfg.plunger.cal.tRelease,
-                nvm.valid());
+                nvm.valid(), xmalloc_rem);
             break;
             
         case 5:
@@ -4390,6 +4564,26 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         case 10:
             // 10 = Build ID query.
             js.reportBuildInfo(getBuildID());
+            break;
+            
+        case 11:
+            // 11 = TV ON relay control.
+            //      data[2] = operation:
+            //         0 = turn relay off
+            //         1 = turn relay on
+            //         2 = pulse relay (as though the power-on timer fired)
+            TVRelay(data[2]);
+            break;
+            
+        case 12:
+            // 12 = Select virtual LedWiz unit.  This selects a bank of 32
+            // outputs for subsequent SBA and PBA messages.
+            ledWizBank = data[2];
+            break;
+            
+        case 13:
+            // 13 = Send button status report
+            reportButtonStatus(js);
             break;
         }
     }
@@ -4471,15 +4665,17 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         // flag that we received an LedWiz message
         ledWizMode = true;
 
-        // Update all output profile settings
-        for (int i = 0 ; i < 8 ; ++i)
-            wizVal[pbaIdx + i] = data[i];
+        // Update all output profile settings for the current bank
+        for (int i = 0, iwiz = ledWizBank*32 + pbaIdx ; 
+             i < 8 && iwiz < numOutputs ; 
+             ++i, ++iwiz)
+            wizVal[iwiz] = data[i];
 
         // Update the physical LED state if this is the last bank.
         // Note that hosts always send a full set of four PBA
         // messages, so there's no need to do a physical update
         // until we've received the last bank's PBA message.
-        if (pbaIdx == 24)
+        if (pbaIdx >= 24)
         {
             updateWizOuts();
             if (hc595 != 0)
@@ -4817,7 +5013,8 @@ int main(void)
         // figure the current status flags for joystick reports
         uint16_t statusFlags =
             (cfg.plunger.enabled ? 0x01 : 0x00)
-            | (nightMode ? 0x02 : 0x00);
+            | (nightMode ? 0x02 : 0x00)
+            | ((psu2_state & 0x07) << 2);
 
         // If it's been long enough since our last USB status report, send
         // the new report.  VP only polls for input in 10ms intervals, so
@@ -5039,6 +5236,12 @@ int main(void)
                     // overflow if this condition persists for a long time.
                     jsOKTimer.stop();
                 }
+            }
+            else if (psu2_state >= 4)
+            {
+                // We're in the TV timer countdown.  Skip the normal heartbeat
+                // flashes and show the TV timer flashes instead.
+                diagLED(0, 0, 0);
             }
             else if (cfg.plunger.enabled && !cfg.plunger.cal.calibrated)
             {

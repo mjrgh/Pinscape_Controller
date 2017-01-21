@@ -98,22 +98,16 @@ ccdScanMode2
     ; steepest negative slope
 ForwardScan
     CMPS    R4, R5          ; if slope < minmax
-    BGE     L0
-    MOVS    R5, R4          ; ...then minmax = slope
-    MOVS    R3, R0          ; ...and minmaxIdx = curpix
-L0
-    ; update the window
-    LDRB    R6, [R0,#0]     ; tmp = curpix[0]
-    ADDS    R4, R4, R6      ; leftSum -= curpix[-10], but the running total is
+    BLT     L0              ; then update minmax to current pixel
+
+L0A ; update the window
+    LDRB    R6, [R0]        ; tmp = curpix[0]
+    ADD     R4, R4, R6      ; leftSum -= curpix[-10], but the running total is
                             ; rightSum - leftSum, so ADD this to the running total
 
-
     LDRB    R6, [R0,#10]    ; tmp = curpix[10]
-    MOVS    R6, R6, LSL #1  ; tmp *= 2: we're subtracting the pixel from rightSum
-                            ; and adding it to leftSum, but leftSum is negative in
-                            ; the running total, so it's like we're subtracting it
-                            ; twice, thus we double it
-    SUBS    R4, R4, R6      ; running total -= curpix[10]*2
+    SUBS    R4, R4, R6      ; total -= curpix[10] (subtract from right sum)
+    SUBS    R4, R4, R6      ; total -= curpix[10] (add to left sum -> subtract from total)
 
     LDRB    R6, [R0,#20]    ; tmp = curpix[20]
     ADDS    R4, R4, R6      ; rightSum += curPix[20]
@@ -121,31 +115,28 @@ L0
     ; increment the index and loop
     ADDS    R0, R0, #1      ; curPix++
     CMPS    R0, R1          ; if curPix <= endPix
-    BLS     ForwardScan     ; loop
+    BLS     ForwardScan     ; then loop
+    B       Done            ; else return
 
-    ; done
-    B       Done
+L0  ; update min/max to current pixel
+    MOVS    R5, R4          ; minmax = slope
+    MOVS    R3, R0          ; minmaxIdx = curpix
+    B       L0A             ; resume loop
 
     ; Reverse scan: scanning from dark end to bright end, so look for
     ; steepest positive slope
 ReverseScan
     CMPS    R4, R5          ; if slope > minmax
-    BLE     L1
-    MOVS    R5, R4          ; ...then minmax = slope
-    MOVS    R3, R0          ; ...and minmaxIdx = curpix
-L1
-    ; update the window
+    BGT     L1              ; then update minmax to current pixel
+
+L1A ; update the window
     LDRB    R6, [R0,#0]     ; tmp = curpix[0]
     ADDS    R4, R4, R6      ; leftSum -= curpix[-10], but the running total is
                             ; rightSum - leftSum, so ADD this to the running total
 
-
     LDRB    R6, [R0,#10]    ; tmp = curpix[10]
-    MOVS    R6, R6, LSL #1  ; tmp *= 2: we're subtracting the pixel from rightSum
-                            ; and adding it to leftSum, but leftSum is negative in
-                            ; the running total, so it's like we're subtracting it
-                            ; twice, thus we double it
-    SUBS    R4, R4, R6      ; running total -= curpix[10]*2
+    SUBS    R4, R4, R6      ; total -= curpix[10] (subtract from right sum)
+    SUBS    R4, R4, R6      ; total -= curpix[10] (add to left sum -> subtract from total)
 
     LDRB    R6, [R0,#20]    ; tmp = curpix[20]
     ADDS    R4, R4, R6      ; rightSum += curPix[20]
@@ -153,8 +144,14 @@ L1
     ; increment the index and loop
     ADDS    R0, R0, #1      ; curPix++
     CMPS    R0, R1          ; if curPix <= endPix
-    BLS     ReverseScan     ; loop
+    BLS     ReverseScan     ; then loop
+    B       Done            ; else return
     
+L1  ; update min/max with current pixel
+    MOVS    R5, R4          ; minmax = slope
+    MOVS    R3, R0          ; minmaxIdx = curpix
+    B       L1A             ; resume loop
+
 Done
     ; presume failure - return false
     MOVS    R0, #0

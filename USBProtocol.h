@@ -21,6 +21,14 @@
 //    ss     status bits:  
 //              0x01 -> plunger enabled
 //              0x02 -> night mode engaged
+//              0x04,0x08,0x10 -> power sense status: meaningful only when
+//                      the TV-on timer is used.  Figure (ss>>2) & 0x07 to
+//                      isolate the status bits.  The resulting value is:
+//                         1 -> latch was on at last check
+//                         2 -> latch was off at last check, SET pin high
+//                         3 -> latch off, SET pin low, ready to check status
+//                         4 -> TV timer countdown in progress
+//                         5 -> TV relay is on
 //    00     2nd byte of status (reserved)
 //    00     3rd byte of status (reserved)
 //    00     always zero for joystick reports
@@ -144,6 +152,7 @@
 //                5 bits, which distinguishes it from regular joystick
 //                reports and from other special report types.
 //    bytes 2:3 = total number of outputs, little endian
+//    bytes 4:5 = Pinscape unit number (0-15), little endian
 //    bytes 6:7 = plunger calibration zero point, little endian
 //    bytes 8:9 = plunger calibration maximum point, little endian
 //    byte  10  = plunger calibration release time, in milliseconds
@@ -151,7 +160,12 @@
 //                 0x01 -> configuration loaded; 0 in this bit means that
 //                         the firmware has been loaded but no configuration
 //                         has been sent from the host
-//    The remaining bytes are reserved for future use.
+//    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
+//                of unused heap (malloc'able) memory.  The firmware generally
+//                allocates all of the dynamic memory it needs during startup,
+//                so the free memory figure doesn't tend to fluctuate during 
+//                normal operation.  The dynamic memory used is a function of 
+//                the set of features enabled.
 //
 // 2C. Device ID report.
 // This is requested by sending custom protocol message 65 7 (see below).
@@ -191,7 +205,7 @@
 // This is requested by sending custom protocol message 65 10 (see below).
 // In response, the device sends one report using this format:
 //
-//   bytes 0:1 = 0xA0.  This has bit pattern 10100 in the high 5 bits
+//   bytes 0:1 = 0xA000.  This has bit pattern 10100 in the high 5 bits
 //               to distinguish it from other report types.
 //   bytes 2:5 = Build date.  This is returned as a 32-bit integer,
 //               little-endian as usual, encoding a decimal value
@@ -200,6 +214,26 @@
 //   bytes 6:9 = Build time.  This is a 32-bit integer, little-endian,
 //               encoding a decimal value in the format HHMMSS giving
 //               build time on a 24-hour clock.
+//
+// 2F. Button status report.
+// This is requested by sending custom protocol message 65 13 (see below).
+// In response, the device sends one report using this format:
+//
+//   bytes 0:1 = 0xA1.  This has bit pattern 10101 in the high 5 bits
+//               to distinguish it from other report types.
+//   byte 2    = number of button reports
+//   byte 3    = Physical status of buttons 1-8, 1 bit each.  The low-order
+//               bit (0x01) is button 1.  Each bit is 0 if the button is off,
+//               1 if on.  This reflects the physical status of the button
+//               input pins, after debouncing but before any logical state
+//               processing.  Pulse mode and shifting have no effect on the
+//               physical state; this simply indicates whether the button is
+//               electrically on (shorted to GND) or off (open circuit).
+//   byte 4    = buttons 9-16
+//   byte 5    = buttons 17-24
+//   byte 6    = buttons 25-32
+//   byte 7    = buttons 33-40
+//   byte 8    = buttons 41-48
 //
 //
 // WHY WE USE THIS HACKY APPROACH TO DIFFERENT REPORT TYPES
@@ -390,6 +424,38 @@
 //
 //       10 -> Query software build information.  No parameters.  This replies with
 //             the software build information report (see above).
+//
+//       11 -> TV ON relay manual control.  This allows testing and operating the
+//             relay from the PC.  This doesn't change the power-up configuration;
+//             it merely allows the relay to be controlled directly.
+//              
+//                 0 = turn relay off
+//                 1 = turn relay on
+//                 2 = pulse the relay as though the power-on delay timer fired
+//
+//       12 -> Select virtual LedWiz unit.  This selects a bank of 32 ports that
+//             will be addressed by subsequent SBA and PBA messages.  After this
+//             command is sent, all SBA and PBA messages will address the bank of
+//             ports selected by this command.  Send this command again with a new
+//             bank number to address other ports with SBA/PBA messages.
+//
+//             The rationale for this command is to allow legacy software that only
+//             uses the original LedWiz protocol to access more than 32 ports.  To
+//             do this, we must replace the LEDWIZ.DLL interface library on the PC
+//             with a new version that exposes each Pinscape unit as multiple virtual
+//             LedWiz devices.  The DLL creates a virtual LedWiz unit (each with its
+//             own unit number) for each bank of 32 ports on the Pincape unit.  When
+//             the DLL receives an SBA or PBA command addressed to one of the virtual
+//             LedWiz units, it first sends a "select virtual unit" command (i.e.,
+//             this message) to Pinscape, selecting the appropriate bank of 32 ports
+//             represented by the virtual unit being accessed by the client, then
+//             follows with the SBA/PBA command the client sent.
+//
+//             The third byte of the message is the bank number to select.  Bank 0
+//             is ports 1-32, bank 1 is ports 33-64, and so on.
+//
+//       13 -> Get button status report.  The device sends one button status report
+//             in response (see section "2F" above).
 //
 // 66  -> Set configuration variable.  The second byte of the message is the config
 //        variable number, and the remaining bytes give the new value for the variable.

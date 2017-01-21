@@ -141,6 +141,7 @@ void v_func(uint8_t *data)
         v_ui16(plunger.cal.zero, 2);
         v_ui16(plunger.cal.max, 4);
         v_byte(plunger.cal.tRelease, 6);
+        v_byte(plunger.cal.calibrated, 7);  // on SET, set 'calibrated' to true
         break;
         
     case 14:

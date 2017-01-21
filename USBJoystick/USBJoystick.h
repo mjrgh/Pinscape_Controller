@@ -244,10 +244,11 @@ class USBJoystick: public USBHID {
          * @param plungerMax plunger max calibration point
          * @param plungerRlsTime measured plunger release time, in milliseconds
          * @param configured true if a configuration has been saved to flash from the host
+         * @param freeHeapBytes number of free bytes in the malloc heap
          */
          bool reportConfig(int numOutputs, int unitNo, 
             int plungerZero, int plungerMax, int plunterRlsTime, 
-            bool configured);
+            bool configured, size_t freeHeapBytes);
             
          /**
          * Write a configuration variable query report.
@@ -267,6 +268,16 @@ class USBJoystick: public USBHID {
          * @param date build date plus time, in __DATE__ " " __TIME__ macro format ("Mon dd, yyyy hh:mm:ss")
          */
          bool reportBuildInfo(const char *date);
+         
+         /**
+          * Write a physical button status report.
+          *
+          * @param numButtons the number of buttons
+          * @param state the button states, 1 bit per button, 8 buttons per byte,
+          *        starting with button 0 in the low-order bit (0x01) of the 
+          *        first byte
+          */
+         bool reportButtonStatus(int numButtons, const uint8_t *state);
  
          /**
          * Send a joystick report to the host

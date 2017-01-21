@@ -406,12 +406,12 @@ public:
         // scanning from the bright side, 'di' is the starting index on
         // the dark side.  'binc' and 'dinc' are the pixel increments
         // for the respective indices.
-        if (a > b+10)
+        if (a > b + 10)
         {
             // left end is brighter - standard orientation
             dir = 1;
         }
-        else if (b > a+10)
+        else if (b > a + 10)
         {
             // right end is brighter - reverse orientation
             dir = -1;
