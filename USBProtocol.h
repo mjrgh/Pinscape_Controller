@@ -1,9 +1,39 @@
 // USB Message Protocol
 //
-// This file is purely for documentation, to describe our USB protocol.
-// We use the standard HID setup with one endpoint in each direction.
-// See USBJoystick.cpp/.h for our USB descriptor arrangement.
+// This file is purely for documentation, to describe our USB protocol
+// for incoming messages (host to device).  We use the standard HID setup 
+// with one endpoint in each direction.  See USBJoystick.cpp and .h for
+// the USB descriptors.
 //
+// Our incoming message protocol is an extended version of the protocol 
+// used by the LedWiz.  Our protocol is designed to be 100% backwards
+// compatible with clients using the original LedWiz wire protocol, as long 
+// as they only send well-formed messages in the original protocol.  The
+// "well-formed" part is an important condition, because our extensions to
+// the original protocol all consist of messages that aren't defined in the
+// original protocol and are meaningless to a real LedWiz.
+//
+// The protocol compatibility ensures that all original LedWiz clients can
+// also transparently access a Pinscape unit.  Clients will simply think the
+// Pinscape unit is an LedWiz, thus they'll be able to operate 32 of our
+// ports.  We designate the first 32 ports (ports 1-32) as the ones accessible
+// through the LedWiz protocol.
+//
+// In addition the wire-level protocol compatibility, we can provide legacy
+// LedWiz clients with access to more than 32 ports by emulating multiple
+// virtual LedWiz units.  We can't do this across the wire protocol, since
+// the KL25Z USB interface constrains us to a single VID/PID (which is how
+// LedWiz clients distinguish units).  However, virtuall all legacy LedWiz
+// clients access the device through a shared library, LEDWIZ.DLL, rather
+// than directly through USB.  LEDWIZ.DLL is distributed by the LedWiz's
+// manufacturer and has a published client interface.  We can thus provide
+// a replacement DLL that contains the logic needed to recognize a Pinscape
+// unit and represent it to clients as multiple LedWiz devices.  This allows
+// old clients to access our full complement of ports without any changes
+// to the clients.  We define some extended message types (SBX and PBX)
+// specifically to support this DLL feature.
+//
+
 
 // ------ OUTGOING MESSAGES (DEVICE TO HOST) ------
 //
@@ -151,7 +181,9 @@
 //    bytes 0:1 = 0x8800.  This has the bit pattern 10001 in the high
 //                5 bits, which distinguishes it from regular joystick
 //                reports and from other special report types.
-//    bytes 2:3 = total number of outputs, little endian
+//    bytes 2:3 = total number of configured outputs, little endian.  This
+//                is the number of outputs with assigned functions in the
+//                active configuration.
 //    bytes 4:5 = Pinscape unit number (0-15), little endian
 //    bytes 6:7 = plunger calibration zero point, little endian
 //    bytes 8:9 = plunger calibration maximum point, little endian
@@ -160,6 +192,8 @@
 //                 0x01 -> configuration loaded; 0 in this bit means that
 //                         the firmware has been loaded but no configuration
 //                         has been sent from the host
+//                 0x02 -> SBX/PBX extension features: 1 in this bit means
+//                         that these features are present in this version.
 //    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
 //                of unused heap (malloc'able) memory.  The firmware generally
 //                allocates all of the dynamic memory it needs during startup,
@@ -288,27 +322,42 @@
 
 // --- REAL LED WIZ MESSAGES ---
 //
-// The real LedWiz protocol has two message types, identified by the first
-// byte of the 8-byte USB packet:
+// The real LedWiz protocol has two message types, "SBA" and "PBA".  The
+// message type can be determined from the first byte of the 8-byte message
+// packet: if the first byte 64 (0x40), it's an SBA message.  If the first
+// byte is 0-49 or 129-132, it's a PBA message.  All other byte values are
+// invalid in the original protocol and have undefined behavior if sent to
+// a real LedWiz.  We take advantage of this to extend the protocol with
+// our new features by assigning new meanings to byte patterns that have no 
+// meaning in the original protocol.
 //
-// 64              -> SBA (64 xx xx xx xx ss uu uu)
-//                    xx = on/off bit mask for 8 outputs
-//                    ss = global flash speed setting (1-7)
-//                    uu = unused
+// "SBA" message:   64 xx xx xx xx ss 00 00
+//     xx = on/off bit mask for 8 outputs
+//     ss = global flash speed setting (valid values 1-7)
+//     00 = unused/reserved; client should set to zero (not enforced, but
+//          strongly recommended in case of future additions)
 //
 // If the first byte has value 64 (0x40), it's an SBA message.  This type of 
 // message sets all 32 outputs individually ON or OFF according to the next 
 // 32 bits (4 bytes) of the message, and sets the flash speed to the value in 
-// the sixth byte.  (The flash speed sets the global cycle rate for flashing
-// outputs - outputs with their values set to the range 128-132 - to a   
-// relative speed, scaled linearly in frequency.  1 is the slowest at about 
-// 2 Hz, 7 is the fastest at about 14 Hz.)
+// the sixth byte.  The flash speed sets the global cycle rate for flashing
+// outputs - outputs with their values set to the range 128-132.  The speed
+// parameter is in ad hoc units that aren't documented in the LedWiz API, but
+// observations of real LedWiz units show that the "speed" is actually the
+// period, each unit representing 0.25s: so speed 1 is a 0.25s period, or 4Hz,
+// speed 2 is a 0.5s period or 2Hz, etc., up to speed 7 as a 1.75s period or
+// 0.57Hz.  The period is the full waveform cycle time.
 //
-// 0-49 or 128-132 -> PBA (bb bb bb bb bb bb bb bb)
-//                    bb = brightness level/flash pattern for one output
 //
-// If the first byte is any valid brightness setting, it's a PBA message.
-// Valid brightness settings are:
+// "PBA" message:  bb bb bb bb bb bb bb bb
+//     bb = brightness level, 0-49 or 128-132
+//
+// Note that there's no prefix byte indicating this message type.  This
+// message is indicated simply by the first byte being in one of the valid
+// ranges.
+//
+// Each byte gives the new brightness level or flash pattern for one part.
+// The valid values are:
 //
 //     0-48 = fixed brightness level, linearly from 0% to 100% intensity
 //     49   = fixed brightness level at 100% intensity (same as 48)
@@ -316,27 +365,17 @@
 //     130  = flashing pattern, on / off (square wave)
 //     131  = flashing pattern, on for 50% duty cycle / fade down
 //     132  = flashing pattern, fade up / on for 50% duty cycle
-//     
-// A PBA message sets 8 outputs out of 32.  Which 8 are to be set is 
-// implicit in the message sequence: the first PBA sets outputs 1-8, the 
-// second sets 9-16, and so on, rolling around after each fourth PBA.  
-// An SBA also resets the implicit "bank" for the next PBA to outputs 1-8.
 //
-// Note that there's no special first byte to indicate the PBA message
-// type, as there is in an SBA.  The first byte of a PBA is simply the
-// first output setting.  The way the LedWiz creators conceived this, an
-// SBA message is distinguishable from a PBA because there's no such thing
-// as a brightness level 64, hence 64 is never valid as a byte in an PBA
-// message, hence a message starting with 64 must be something other than
-// an PBA message.
+// This message sets new brightness/flash settings for 8 ports.  There's
+// no port number specified in the message; instead, the port is given by
+// the protocol state.  Specifically, the device has an internal register
+// containing the base port for PBA messages.  On reset AND after any SBA
+// message is received, the base port is set to 0.  After any PBA message
+// is received and processed, the base port is incremented by 8, resetting
+// to 0 when it reaches 32.  The bytes of the message set the brightness
+// levels for the base port, base port + 1, ..., base port + 7 respectively.
 //
-// Our extended protocol uses the same principle, taking advantage of the
-// many other byte values that are also invalid in PBA messages.  To be a 
-// valid PBA message, the first byte must be in the range 0-49 or 129-132.  
-// As already mentioned, byte value 64 indicates an SBA message, so we
-// can't use that one for private extensions.  This still leaves many
-// other byte values for us, though, namely 50-63, 65-128, and 133-255.
-
+//
 
 // --- PRIVATE EXTENDED MESSAGES ---
 //
@@ -386,9 +425,9 @@
 //             (see above; see also USBJoystick.cpp), then resumes sending normal 
 //             joystick reports.
 //
-//        5 -> Turn all outputs off and restore LedWiz defaults.  Sets output ports
-//             1-32 to OFF and LedWiz brightness/mode setting 48, sets outputs 33 and
-//             higher to brightness level 0, and sets the LedWiz global flash speed to 2.
+//        5 -> Turn all outputs off and restore LedWiz defaults.  Sets all output 
+//             ports to OFF and LedWiz brightness/mode setting 48, and sets the LedWiz
+//             global flash speed to 2.
 //
 //        6 -> Save configuration to flash.  This saves all variable updates sent via
 //             type 66 messages since the last reboot, then automatically reboots the
@@ -433,26 +472,7 @@
 //                 1 = turn relay on
 //                 2 = pulse the relay as though the power-on delay timer fired
 //
-//       12 -> Select virtual LedWiz unit.  This selects a bank of 32 ports that
-//             will be addressed by subsequent SBA and PBA messages.  After this
-//             command is sent, all SBA and PBA messages will address the bank of
-//             ports selected by this command.  Send this command again with a new
-//             bank number to address other ports with SBA/PBA messages.
-//
-//             The rationale for this command is to allow legacy software that only
-//             uses the original LedWiz protocol to access more than 32 ports.  To
-//             do this, we must replace the LEDWIZ.DLL interface library on the PC
-//             with a new version that exposes each Pinscape unit as multiple virtual
-//             LedWiz devices.  The DLL creates a virtual LedWiz unit (each with its
-//             own unit number) for each bank of 32 ports on the Pincape unit.  When
-//             the DLL receives an SBA or PBA command addressed to one of the virtual
-//             LedWiz units, it first sends a "select virtual unit" command (i.e.,
-//             this message) to Pinscape, selecting the appropriate bank of 32 ports
-//             represented by the virtual unit being accessed by the client, then
-//             follows with the SBA/PBA command the client sent.
-//
-//             The third byte of the message is the bank number to select.  Bank 0
-//             is ports 1-32, bank 1 is ports 33-64, and so on.
+//       12 -> Unused
 //
 //       13 -> Get button status report.  The device sends one button status report
 //             in response (see section "2F" above).
@@ -466,6 +486,68 @@
 //        type 65 subtype 6 message (see above).  That saves the settings to flash and
 //        reboots the device, which makes the new settings active.
 //
+// 67  -> "SBX".  This is an extended form of the original LedWiz SBA message.  This
+//        version is specifically designed to support a replacement LEDWIZ.DLL on the
+//        host that exposes one Pinscape device as multiple virtual LedWiz devices,
+//        in order to give legacy clients access to more than 32 ports.  Each virtual
+//        LedWiz represents a block of 32 ports.  The format of this message is the
+//        same as for the original SBA, with the addition of one byte:
+//
+//            67 xx xx xx xx ss pp 00
+//               xx = on/off switches for 8 ports, one bit per port
+//               ss = global flash speed setting for this bank of ports, 1-7
+//               pp = port group: 0 for ports 1-32, 1 for ports 33-64, etc
+//               00 = unused/reserved; client should set to zero
+//
+//        As with SBA, this sets the on/off switch states for a block of 32 ports.
+//        SBA always addresses ports 1-32; SBX can address any set of 32 ports.
+//
+//        We keep a separate speed setting for each group of 32 ports.  The purpose
+//        of the SBX extension is to allow a custom LEDWIZ.DLL to expose multiple
+//        virtual LedWiz units to legacy clients, so clients will expect each unit
+//        to have its separate flash speed setting.  Each block of 32 ports maps to
+//        a virtual unit on the client side, so each block needs its own speed state.
+//
+// 68  -> "PBX".  This is an extended form of the original LedWiz PBA message; it's
+//        the PBA equivalent of our SBX extension above.
+//
+//            68 pp ee ee ee ee ee ee
+//               pp = port group: 0 for ports 1-8, 1 for 9-16, etc
+//               qq = sequence number: 0 for the first 8 ports in the group, etc
+//               ee = brightness/flash values, 6 bits per port, packed into the bytes
+//
+//        The port group 'pp' selects a group of 8 ports.  Note that, unlike PBA,
+//        the port group being updated is explicitly coded in the message, which makes
+//        the message stateless.  This eliminates any possibility of the client and
+//        host getting out of sync as to which ports they're talking about.  This
+//        message doesn't affect the PBA port address state.
+//
+//        The brightness values are *almost* the same as in PBA, but not quite.  We
+//        remap the flashing state values as follows:
+//
+//            0-48 = brightness level, 0% to 100%, on a linear scale
+//            49   = brightness level 100% (redundant with 48)
+//            60   = PBA 129 equivalent, sawtooth
+//            61   = PBA 130 equivalent, square wave (on/off)
+//            62   = PBA 131 equivalent, on/fade down
+//            63   = PBA 132 equivalent, fade up/on
+//
+//        We reassign the brightness levels like this because it allows us to pack
+//        every possible value into 6 bits.  This allows us to fit 8 port settings
+//        into six bytes.  The 6-bit fields are packed into the 8 bytes consecutively
+//        starting with the low-order bit of the first byte.  An efficient way to
+//        pack the 'ee' fields given the brightness values is to shift each group of 
+//        four bytes  into a uint, then shift the uint into three 'ee' bytes:
+//
+//           unsigned int tmp1 = bri[0] | (bri[1]<<6) | (bri[2]<<12) | (bri[3]<<18);
+//           unsigned int tmp2 = bri[4] | (bri[5]<<6) | (bri[6]<<12) | (bri[7]<<18);
+//           unsigned char port_group = FIRST_PORT_TO_ADDRESS / 8;
+//           unsigned char msg[8] = {
+//               68, pp, 
+//               tmp1 & 0xFF, (tmp1 >> 8) & 0xFF, (tmp1 >> 16) & 0xFF,
+//               tmp2 & 0xFF, (tmp2 >> 8) & 0xFF, (tmp2 >> 16) & 0xFF
+//           };
+//        
 // 200-228 -> Set extended output brightness.  This sets outputs N to N+6 to the
 //        respective brightness values in the 2nd through 8th bytes of the message
 //        (output N is set to the 2nd byte value, N+1 is set to the 3rd byte value, 
@@ -790,6 +872,48 @@
 //       other buttons.
 //
 //       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none.
+//
+//
+// SPECIAL DIAGNOSTICS VARIABLES:  These work like the array variables below,
+// the only difference being that we don't report these in the number of array
+// variables reported in the "variable 0" query.
+//
+// 220 -> Performance/diagnostics variables.  Items marked "read only" can't
+//        be written; any SET VARIABLE messages on these are ignored.  Items
+//        marked "diagnostic only" refer to counters or statistics that are
+//        collected only when the diagnostics are enabled via the diags.h
+//        macro ENABLE_DIAGNOSTICS.  These will simply return zero otherwise.
+//
+//          byte 3 = diagnostic index (see below)
+//
+//        Diagnostic index values:
+//
+//          1 -> Main loop cycle time [read only, diagnostic only]
+//               Retrieves the average time of one iteration of the main
+//               loop, in microseconds, as a uint32.  This excludes the
+//               time spent processing incoming messages, as well as any
+//               time spent waiting for a dropped USB connection to be
+//               restored.  This includes all subroutine time and polled
+//               task time, such as processing button and plunger input,
+//               sending USB joystick reports, etc.
+//
+//          2 -> Main loop message read time [read only, diagnostic only]
+//               Retrieves the average time spent processing incoming USB
+//               messages per iteration of the main loop, in microseconds, 
+//               as a uint32.  This only counts the processing time when 
+//               messages are actually present, so the average isn't reduced
+//               by iterations of the main loop where no messages are found.
+//               That is, if we run a million iterations of the main loop,
+//               and only five of them have messages at all, the average time
+//               includes only those five cycles with messages to process.
+//
+//          3 -> PWM update polling time [read only, diagnostic only]
+//               Retrieves the average time, as a uint32 in microseconds,
+//               spent in the PWM update polling routine.
+//
+//          4 -> LedWiz update polling time [read only, diagnostic only]
+//               Retrieves the average time, as a uint32 in microseconds,
+//               units, spent in the LedWiz flash cycle update routine.
 //
 //
 // ARRAY VARIABLES:  Each variable below is an array.  For each get/set message,

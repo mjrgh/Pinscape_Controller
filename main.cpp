@@ -39,7 +39,7 @@
 //    preferences in your  pinball software to tell it that an accelerometer 
 //    is attached.
 //
-//  - Plunger position sensing, with mulitple sensor options.  To use this feature,
+//  - Plunger position sensing, with multiple sensor options.  To use this feature,
 //    you need to choose a sensor and set it up, connect the sensor electrically to 
 //    the KL25Z, and configure the Pinscape software on the KL25Z to let it know how 
 //    the sensor is hooked up.  The Pinscape software monitors the sensor and sends
@@ -197,6 +197,7 @@
 
 #include "mbed.h"
 #include "math.h"
+#include "diags.h"
 #include "pinscape.h"
 #include "USBJoystick.h"
 #include "MMA8451Q.h"
@@ -211,7 +212,7 @@
 #include "potSensor.h"
 #include "nullSensor.h"
 #include "TinyDigitalIn.h"
-#include "FastPWM.h"
+
 
 #define DECL_EXTERNS
 #include "config.h"
@@ -280,6 +281,11 @@ const char *getBuildID()
     return BuildID + BuildID_prefix_length;
 }
 
+// --------------------------------------------------------------------------
+// Main loop iteration timing statistics.  Collected only if 
+// ENABLE_DIAGNOSTICS is set in diags.h.
+float mainLoopIterTime, mainLoopIterCount;
+float mainLoopMsgTime, mainLoopMsgCount;
 
 // --------------------------------------------------------------------------
 //
@@ -933,7 +939,7 @@ public:
 
 // Conversion table - 8-bit DOF output level to PWM duty cycle,
 // normalized to 0.0 to 1.0 scale.
-static const float pwm_level[] = {
+static const float dof_to_pwm[] = {
     0.000000f, 0.003922f, 0.007843f, 0.011765f, 0.015686f, 0.019608f, 0.023529f, 0.027451f, 
     0.031373f, 0.035294f, 0.039216f, 0.043137f, 0.047059f, 0.050980f, 0.054902f, 0.058824f, 
     0.062745f, 0.066667f, 0.070588f, 0.074510f, 0.078431f, 0.082353f, 0.086275f, 0.090196f, 
@@ -1009,41 +1015,162 @@ static const float dof_to_gamma_pwm[] = {
     0.925022f, 0.935504f, 0.946062f, 0.956696f, 0.967407f, 0.978194f, 0.989058f, 1.000000f
 };
 
-// LwOut class for a PWM-capable GPIO port.  Note that we use FastPWM for
-// the underlying port interface.  This isn't because we need the "fast"
-// part; it's because FastPWM fixes a bug in the base mbed PwmOut class
-// that makes it look ugly for fades.  The base PwmOut class resets
-// the cycle counter when changing the duty cycle, which makes the output
-// reset immediately on every change.  For an output connected to a lamp
-// or LED, this causes obvious flickering when performing a rapid series
-// of writes, such as during a fade.  The KL25Z TPM hardware is specifically
-// designed to make it easy for software to avoid this kind of flickering 
-// when used correctly: it has an internal staging register for the duty
-// cycle register that gets latched at the start of the next cycle, ensuring
-// that the duty cycle setting never changes mid-cycle.  The mbed PwmOut
-// defeats this by resetting the cycle counter on every write, which aborts 
-// the current cycle at the moment of the write, causing an effectively random 
-// drop in brightness on each write (by artificially shortening a cycle).
-// Fortunately, we can fix this by switching to the API-compatible FastPWM
-// class, which does the write right (heh).
+// MyPwmOut - a slight customization of the base mbed PwmOut class.  The 
+// mbed version of PwmOut.write() resets the PWM cycle counter on every 
+// update.  That's problematic, because the counter reset interrupts the
+// cycle in progress, causing a momentary drop in brightness that's visible
+// to the eye if the output is connected to an LED or other light source.
+// This is especially noticeable when making gradual changes consisting of
+// many updates in a short time, such as a slow fade, because the light 
+// visibly flickers on every step of the transition.  This customized 
+// version removes the cycle reset, which makes for glitch-free updates 
+// and nice smooth fades.
+//
+// Initially, I thought the counter reset in the mbed code was simply a
+// bug.  According to the KL25Z hardware reference, you update the duty
+// cycle by writing to the "compare values" (CvN) register.  There's no
+// hint that you should reset the cycle counter, and indeed, the hardware
+// goes out of its way to allow updates mid-cycle (as we'll see shortly).
+// They went to lengths specifically so that you *don't* have to reset
+// that counter.  And there's no comment in the mbed code explaining the
+// cycle reset, so it looked to me like something that must have been
+// added by someone who didn't read the manual carefully enough and didn't
+// test the result thoroughly enough to find the glitch it causes.
+//
+// After some experimentation, though, I've come to think the code was
+// added intentionally, as a workaround for a rather nasty KL25Z hardware
+// bug.   Whoever wrote the code didn't add any comments explaning why it's
+// there, so we can't know for sure, but it does happen to work around the 
+// bug, so it's a good bet the original programmer found the same hardware
+// problem and came up with the counter reset as an imperfect solution.
+//
+// We'll get to the KL25Z hardware bug shortly, but first we need to look at
+// how the hardware is *supposed* to work.  The KL25Z is *supposed* to make
+// it super easy for software to do glitch-free updates of the duty cycle of 
+// a PWM channel.  With PWM hardware in general, you have to be careful to
+// update the duty cycle counter between grayscale cycles, beacuse otherwise
+// you might interrupt the cycle in progress and cause a brightness glitch.  
+// The KL25Z TPM simplifies this with a "staging" register for the duty
+// cycle counter.  At the end of each cycle, the TPM moves the value from
+// the staging register into its internal register that actually controls 
+// the duty cycle.  The idea is that the software can write a new value to
+// the staging register at any time, and the hardware will take care of
+// synchronizing the actual internal update with the grayscale cycle.  In
+// principle, this frees the software of any special timing considerations
+// for PWM updates.  
+//
+// Now for the bug.  The staging register works as advertised, except for
+// one little detail: it seems to be implemented as a one-element queue
+// that won't accept a new write until the existing value has been read.
+// The read only happens at the start of the new cycle.  So the effect is
+// that we can only write one update per cycle.  Any writes after the first
+// are simply dropped, lost forever.  That causes even worse problems than
+// the original glitch.  For example, if we're doing a fade-out, the last
+// couple of updates in the fade might get lost, leaving the output slightly
+// on at the end, when it's supposed to be completely off.
+//
+// The mbed workaround of resetting the cycle counter fixes the lost-update
+// problem, but it causes the constant glitching during fades.  So we need
+// a third way that works around the hardware problem without causing 
+// update glitches.
+//
+// Here's my solution: we basically implement our own staging register,
+// using the same principle as the hardware staging register, but hopefully
+// with an implementation that actually works!  First, when we update a PWM 
+// output, we won't actually write the value to the hardware register.
+// Instead, we'll just stash it internally, effectively in our own staging
+// register (but actually just a member variable of this object).  Then
+// we'll periodically transfer these staged updates to the actual hardware 
+// registers, being careful to do this no more than once per PWM cycle.
+// One way to do this would be to use an interrupt handler that fires at
+// the end of the PWM cycle, but that would be fairly complex because we
+// have many (up to 10) PWM channels.  Instead, we'll just use polling:
+// we'll call a routine periodically in our main loop, and we'll transfer
+// updates for all of the channels that have been updated since the last
+// pass.  We can get away with this simple polling approach because the
+// hardware design *partially* works: it does manage to free us from the
+// need to synchronize updates with the exact end of a PWM cycle.  As long
+// as we do no more than one write per cycle, we're golden.  That's easy
+// to accomplish, too: all we need to do is make sure that our polling
+// interval is slightly longer than the PWM period.  That ensures that
+// we can never have two updates during one PWM cycle.  It does mean that
+// we might have zero updates on some cycles, causing a one-cycle delay
+// before an update is actually put into effect, but that shouldn't ever
+// be noticeable since the cycles are so short.  Specifically, we'll use
+// the mbed default 20ms PWM period, and we'll do our update polling 
+// every 25ms.
+class LessGlitchyPwmOut: public PwmOut
+{
+public:
+    LessGlitchyPwmOut(PinName pin) : PwmOut(pin) { }
+    
+    void write(float value)
+    {
+        // Update the counter without resetting the counter.
+        //
+        // NB: this causes problems if there are multiple writes in one
+        // PWM cycle: the first write will be applied and later writes 
+        // during the same cycle will be lost.  Callers must take care
+        // to limit writes to one per cycle.
+        *_pwm.CnV = uint32_t((*_pwm.MOD + 1) * value);
+    }
+};
+
+
+// Collection of PwmOut objects to update on each polling cycle.  The
+// KL25Z has 10 physical PWM channels, so we need at most 10 polled outputs.
+static int numPolledPwm;
+static class LwPwmOut *polledPwm[10];
+
+// LwOut class for a PWM-capable GPIO port.
 class LwPwmOut: public LwOut
 {
 public:
     LwPwmOut(PinName pin, uint8_t initVal) : p(pin)
     {
-         prv = initVal ^ 0xFF;
+         // set the cycle time to 20ms
+         p.period_ms(20);
+         
+         // add myself to the list of polled outputs for periodic updates
+         if (numPolledPwm < countof(polledPwm))
+            polledPwm[numPolledPwm++] = this;
+         
+         // set the initial value, and an explicitly different previous value
+         prv = ~initVal;
          set(initVal);
     }
+
     virtual void set(uint8_t val) 
-    { 
-        if (val != prv)
-            p.write(pwm_level[prv = val]); 
+    {
+        // on set, just save the value for a later 'commit' 
+        this->val = val;
     }
-    FastPWM p;
-    uint8_t prv;
+
+    // handle periodic update polling
+    void poll()
+    {
+        // if the value has changed, commit it
+        if (val != prv)
+        {
+            prv = val;
+            commit(val);
+        }
+    }
+
+protected:
+    virtual void commit(uint8_t v)
+    {
+        // write the current value to the PWM controller if it's changed
+        p.write(dof_to_pwm[v]);
+    }
+    
+    LessGlitchyPwmOut p;
+    uint8_t val, prv;
 };
 
-// Gamma corrected PWM GPIO output
+// Gamma corrected PWM GPIO output.  This works exactly like the regular
+// PWM output, but translates DOF values through the gamma-corrected
+// table instead of the regular linear table.
 class LwPwmGammaOut: public LwPwmOut
 {
 public:
@@ -1051,13 +1178,43 @@ public:
         : LwPwmOut(pin, initVal)
     {
     }
-    virtual void set(uint8_t val)
+    
+protected:
+    virtual void commit(uint8_t v)
     {
-        if (val != prv)
-            p.write(dof_to_gamma_pwm[prv = val]);
+        // write the current value to the PWM controller if it's changed
+        p.write(dof_to_gamma_pwm[v]);
     }
 };
 
+// poll the PWM outputs
+Timer polledPwmTimer;
+float polledPwmTotalTime, polledPwmRunCount;
+void pollPwmUpdates()
+{
+    // if it's been at least 25ms since the last update, do another update
+    if (polledPwmTimer.read_us() >= 25000)
+    {
+        // time the run for statistics collection
+        IF_DIAG(
+          Timer t; 
+          t.start();
+        )
+        
+        // poll each output
+        for (int i = numPolledPwm ; i > 0 ; )
+            polledPwm[--i]->poll();
+        
+        // reset the timer for the next cycle
+        polledPwmTimer.reset();
+        
+        // collect statistics
+        IF_DIAG(
+          polledPwmTotalTime += t.read();
+          polledPwmRunCount += 1;
+        )
+    }
+}
 
 // LwOut class for a Digital-Only (Non-PWM) GPIO port
 class LwDigOut: public LwOut
@@ -1094,15 +1251,12 @@ static LwOut **lwPin;
 //
 // Even though the original LedWiz protocol can only access 32 ports, we
 // maintain LedWiz state for every port, even if we have more than 32.  Our
-// extended protocol allows the client to select a bank of 32 outputs to
-// address via original protocol commands (SBA/PBA), which allows for one
-// Pinscape unit with more than 32 ports to be exposed on the client as
-// multiple virtual LedWiz units through a modified LEDWIZ.DLL interface
-// library.
-
-// Current LedWiz virtual unit: 0 = ports 1-32, 1 = ports 33-64, etc.
-// SBA and PBA messages address the block of ports set by this unit.
-uint8_t ledWizBank = 0;
+// extended protocol allows the client to send LedWiz-style messages that
+// control any set of ports.  A replacement LEDWIZ.DLL can make a single
+// Pinscape unit look like multiple virtual LedWiz units to legacy clients,
+// allowing them to control all of our ports.  The clients will still be
+// using LedWiz-style states to control the ports, so we need to support
+// the LedWiz scheme with separate on/off and brightness control per port.
 
 // on/off state for each LedWiz output
 static uint8_t *wizOn;
@@ -1124,17 +1278,24 @@ static uint8_t *wizOn;
 static uint8_t *wizVal;
 
 // LedWiz flash speed.  This is a value from 1 to 7 giving the pulse
-// rate for lights in blinking states.  Each bank of 32 lights has its
-// own pulse rate, so we need ceiling(number_of_physical_outputs/32)
-// entries here.  Note that we could allocate this dynamically, but
-// the maximum size is so small that it's more efficient to preallocate
-// it at the maximum size.
+// rate for lights in blinking states.  The LedWiz API doesn't document
+// what the numbers mean in real time units, but by observation, the
+// "speed" setting represents the period of the flash cycle in 0.25s
+// units, so speed 1 = 0.25 period = 4Hz, speed 7 = 1.75s period = 0.57Hz.
+// The period is the full cycle time of the flash waveform.
+//
+// Each bank of 32 lights has its independent own pulse rate, so we need 
+// one entry per bank.  Each bank has 32 outputs, so we need a total of
+// ceil(number_of_physical_outputs/32) entries.  Note that we could allocate 
+// this dynamically once we know the number of actual outputs, but the 
+// upper limit is low enough that it's more efficient to use a fixed array
+// at the maximum size.
 static const int MAX_LW_BANKS = (MAX_OUT_PORTS+31)/32;
 static uint8_t wizSpeed[MAX_LW_BANKS];
 
-// Current LedWiz flash cycle counter.  This runs from 0 to 255
-// during each cycle. 
+// LedWiz cycle counters.  These must be updated before calling wizState().
 static uint8_t wizFlashCounter[MAX_LW_BANKS];
+
 
 // Current absolute brightness levels for all outputs.  These are
 // DOF brightness level value, from 0 for fully off to 255 for fully
@@ -1323,34 +1484,40 @@ void initLwOut(Config &cfg)
 // protocol and a private extended protocol (which is 100% backwards
 // compatible with the LedWiz protocol: we recognize all valid legacy
 // protocol commands and handle them the same way a real LedWiz does).
-// The legacy protocol can access the first 32 ports; the extended
-// protocol can access all ports, including the first 32 as well as
-// the higher numbered ports.  This means that the first 32 ports
-// can be addressed with either protocol, which muddies the waters
-// a bit because of the different approaches the two protocols take.
-// The legacy protocol separates the brightness/flash state of an
-// output (which it calls the "profile" state) from the on/off state.
-// The extended protocol doesn't; "off" is simply represented as
-// brightness 0.  
 //
-// To deal with the different approaches, we use this flag to keep
-// track of the global protocol state.  Each time we get an output
-// port command, we switch the protocol state to the protocol that
-// was used in the command.  On a legacy SBA or PBA, we switch to
-// LedWiz mode; on an extended output set message, we switch to
-// extended mode.  We remember the LedWiz and extended output state
-// for each LW port (1-32) separately.  Any time the mode changes, 
-// we set ports 1-32 back to the state for the new mode.
+// The legacy LedWiz protocol has only two message types, which
+// set output port states for a fixed set of 32 outputs.  One message
+// sets the "switch" state (on/off) of the ports, and the other sets
+// the "profile" state (brightness or flash pattern).  The two states
+// are stored independently, so turning a port off via the switch state
+// doesn't forget or change its brightness: turning it back on will
+// restore the same brightness or flash pattern as before.  The "profile"
+// state can be a brightness level from 1 to 49, or one of four flash
+// patterns, identified by a value from 129 to 132.  The flash pattern
+// and brightness levels are mutually exclusive, since the single
+// "profile" setting per port selects which is used.
 //
-// The reasoning here is that any given client (on the PC) will use
-// one mode or the other, and won't mix the two.  An older program
-// that only knows about the LedWiz protocol will use the legacy
-// protocol only, and never send us an extended command.  A DOF-based
-// program might use one or the other, according to how the user has
-// configured DOF.  We have to be able to switch seamlessly between
-// the protocols to accommodate switching from one type of program
-// on the PC to the other, but we shouldn't have to worry about one
-// program switching back and forth.
+// The extended protocol discards the flash pattern options and instead
+// uses the full byte range 0..255 for brightness levels.  Modern clients
+// based on DOF don't use the flash patterns, since DOF simply sends
+// the individual brightness updates when it wants to create fades or 
+// flashes.  What we gain by dropping the flash options is finer 
+// gradations of brightness - 256 levels rather than the LedWiz's 48.
+// This makes for noticeably smoother fades and a wider gamut for RGB
+// color mixing.  The extended protocol also drops the LedWiz notion of 
+// separate "switch" and "profile" settings, and instead combines the 
+// two into the single brightness setting, with brightness 0 meaning off.
+// This also is the way DOF thinks about the problem, so it's a better 
+// match to modern clients.  
+//
+// To reconcile the different approaches in the two protocols to setting 
+// output port states, we use a global mode: LedWiz mode or Pinscape mode.
+// Whenever an output port message is received, we switch this flag to the
+// mode of the message.  The assumption is that only one client at a time
+// will be manipulating output ports, and that any given client uses one
+// protocol exclusively.  There's no reason a client should mix the
+// protocols; if a client is aware of the Pinscape protocol at all, it
+// should use it exclusively.
 static uint8_t ledWizMode = true;
 
 // translate an LedWiz brightness level (0-49) to a DOF brightness
@@ -1365,7 +1532,100 @@ static const uint8_t lw_to_dof[] = {
      255,  255
 };
 
+// LedWiz flash cycle tables.  For efficiency, we use a lookup table
+// rather than calculating these on the fly.  The flash cycles are
+// generated by the following formulas, where 'c' is the current
+// cycle counter, from 0 to 255:
+//
+//  mode 129 = sawtooth = (c < 128 ? c*2 + 1 : (255-c)*2)
+//  mode 130 = flash on/off = (c < 128 ? 255 : 0)
+//  mode 131 = on/ramp down = (c < 128 ? 255 : (255-c)*2)
+//  mode 132 = ramp up/on = (c < 128 ? c*2 : 255)
+//
+// To look up the current output value for a given mode and a given
+// cycle counter 'c', index the table with ((mode-129)*256)+c.
+static const uint8_t wizFlashLookup[] = {
+    // mode 129 = sawtooth = (c < 128 ? c*2 + 1 : (255-c)*2)
+    0x01, 0x03, 0x05, 0x07, 0x09, 0x0b, 0x0d, 0x0f, 0x11, 0x13, 0x15, 0x17, 0x19, 0x1b, 0x1d, 0x1f,
+    0x21, 0x23, 0x25, 0x27, 0x29, 0x2b, 0x2d, 0x2f, 0x31, 0x33, 0x35, 0x37, 0x39, 0x3b, 0x3d, 0x3f,
+    0x41, 0x43, 0x45, 0x47, 0x49, 0x4b, 0x4d, 0x4f, 0x51, 0x53, 0x55, 0x57, 0x59, 0x5b, 0x5d, 0x5f,
+    0x61, 0x63, 0x65, 0x67, 0x69, 0x6b, 0x6d, 0x6f, 0x71, 0x73, 0x75, 0x77, 0x79, 0x7b, 0x7d, 0x7f,
+    0x81, 0x83, 0x85, 0x87, 0x89, 0x8b, 0x8d, 0x8f, 0x91, 0x93, 0x95, 0x97, 0x99, 0x9b, 0x9d, 0x9f,
+    0xa1, 0xa3, 0xa5, 0xa7, 0xa9, 0xab, 0xad, 0xaf, 0xb1, 0xb3, 0xb5, 0xb7, 0xb9, 0xbb, 0xbd, 0xbf,
+    0xc1, 0xc3, 0xc5, 0xc7, 0xc9, 0xcb, 0xcd, 0xcf, 0xd1, 0xd3, 0xd5, 0xd7, 0xd9, 0xdb, 0xdd, 0xdf,
+    0xe1, 0xe3, 0xe5, 0xe7, 0xe9, 0xeb, 0xed, 0xef, 0xf1, 0xf3, 0xf5, 0xf7, 0xf9, 0xfb, 0xfd, 0xff,
+    0xfe, 0xfc, 0xfa, 0xf8, 0xf6, 0xf4, 0xf2, 0xf0, 0xee, 0xec, 0xea, 0xe8, 0xe6, 0xe4, 0xe2, 0xe0,
+    0xde, 0xdc, 0xda, 0xd8, 0xd6, 0xd4, 0xd2, 0xd0, 0xce, 0xcc, 0xca, 0xc8, 0xc6, 0xc4, 0xc2, 0xc0,
+    0xbe, 0xbc, 0xba, 0xb8, 0xb6, 0xb4, 0xb2, 0xb0, 0xae, 0xac, 0xaa, 0xa8, 0xa6, 0xa4, 0xa2, 0xa0,
+    0x9e, 0x9c, 0x9a, 0x98, 0x96, 0x94, 0x92, 0x90, 0x8e, 0x8c, 0x8a, 0x88, 0x86, 0x84, 0x82, 0x80,
+    0x7e, 0x7c, 0x7a, 0x78, 0x76, 0x74, 0x72, 0x70, 0x6e, 0x6c, 0x6a, 0x68, 0x66, 0x64, 0x62, 0x60,
+    0x5e, 0x5c, 0x5a, 0x58, 0x56, 0x54, 0x52, 0x50, 0x4e, 0x4c, 0x4a, 0x48, 0x46, 0x44, 0x42, 0x40,
+    0x3e, 0x3c, 0x3a, 0x38, 0x36, 0x34, 0x32, 0x30, 0x2e, 0x2c, 0x2a, 0x28, 0x26, 0x24, 0x22, 0x20,
+    0x1e, 0x1c, 0x1a, 0x18, 0x16, 0x14, 0x12, 0x10, 0x0e, 0x0c, 0x0a, 0x08, 0x06, 0x04, 0x02, 0x00,
+
+    // mode 130 = flash on/off = (c < 128 ? 255 : 0)
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+    // mode 131 = on/ramp down = c < 128 ? 255 : (255 - c)*2
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xfe, 0xfc, 0xfa, 0xf8, 0xf6, 0xf4, 0xf2, 0xf0, 0xee, 0xec, 0xea, 0xe8, 0xe6, 0xe4, 0xe2, 0xe0,
+    0xde, 0xdc, 0xda, 0xd8, 0xd6, 0xd4, 0xd2, 0xd0, 0xce, 0xcc, 0xca, 0xc8, 0xc6, 0xc4, 0xc2, 0xc0,
+    0xbe, 0xbc, 0xba, 0xb8, 0xb6, 0xb4, 0xb2, 0xb0, 0xae, 0xac, 0xaa, 0xa8, 0xa6, 0xa4, 0xa2, 0xa0,
+    0x9e, 0x9c, 0x9a, 0x98, 0x96, 0x94, 0x92, 0x90, 0x8e, 0x8c, 0x8a, 0x88, 0x86, 0x84, 0x82, 0x80,
+    0x7e, 0x7c, 0x7a, 0x78, 0x76, 0x74, 0x72, 0x70, 0x6e, 0x6c, 0x6a, 0x68, 0x66, 0x64, 0x62, 0x60,
+    0x5e, 0x5c, 0x5a, 0x58, 0x56, 0x54, 0x52, 0x50, 0x4e, 0x4c, 0x4a, 0x48, 0x46, 0x44, 0x42, 0x40,
+    0x3e, 0x3c, 0x3a, 0x38, 0x36, 0x34, 0x32, 0x30, 0x2e, 0x2c, 0x2a, 0x28, 0x26, 0x24, 0x22, 0x20,
+    0x1e, 0x1c, 0x1a, 0x18, 0x16, 0x14, 0x12, 0x10, 0x0e, 0x0c, 0x0a, 0x08, 0x06, 0x04, 0x02, 0x00,
+
+    // mode 132 = ramp up/on = c < 128 ? c*2 : 255
+    0x00, 0x02, 0x04, 0x06, 0x08, 0x0a, 0x0c, 0x0e, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1a, 0x1c, 0x1e,
+    0x20, 0x22, 0x24, 0x26, 0x28, 0x2a, 0x2c, 0x2e, 0x30, 0x32, 0x34, 0x36, 0x38, 0x3a, 0x3c, 0x3e,
+    0x40, 0x42, 0x44, 0x46, 0x48, 0x4a, 0x4c, 0x4e, 0x50, 0x52, 0x54, 0x56, 0x58, 0x5a, 0x5c, 0x5e,
+    0x60, 0x62, 0x64, 0x66, 0x68, 0x6a, 0x6c, 0x6e, 0x70, 0x72, 0x74, 0x76, 0x78, 0x7a, 0x7c, 0x7e,
+    0x80, 0x82, 0x84, 0x86, 0x88, 0x8a, 0x8c, 0x8e, 0x90, 0x92, 0x94, 0x96, 0x98, 0x9a, 0x9c, 0x9e,
+    0xa0, 0xa2, 0xa4, 0xa6, 0xa8, 0xaa, 0xac, 0xae, 0xb0, 0xb2, 0xb4, 0xb6, 0xb8, 0xba, 0xbc, 0xbe,
+    0xc0, 0xc2, 0xc4, 0xc6, 0xc8, 0xca, 0xcc, 0xce, 0xd0, 0xd2, 0xd4, 0xd6, 0xd8, 0xda, 0xdc, 0xde,
+    0xe0, 0xe2, 0xe4, 0xe6, 0xe8, 0xea, 0xec, 0xee, 0xf0, 0xf2, 0xf4, 0xf6, 0xf8, 0xfa, 0xfc, 0xfe,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
+};
+
 // Translate an LedWiz output (ports 1-32) to a DOF brightness level.
+// Note: update all wizFlashCounter[] entries before calling this to
+// ensure that we're at the right place in each flash cycle.
+//
+// Important: the caller must update the wizFlashCounter[] array before
+// calling this.  We leave it to the caller to update the array rather
+// than doing it here, because each set of 32 outputs shares the same
+// counter entry.
 static uint8_t wizState(int idx)
 {
     // If we're in extended protocol mode, ignore the LedWiz setting
@@ -1408,29 +1668,12 @@ static uint8_t wizState(int idx)
         // it the same way for compatibility.
         return lw_to_dof[val];
     }
-    else if (val == 129)
+    else if (val >= 129 && val <= 132)
     {
-        // 129 = ramp up / ramp down
+        // flash mode - get the current counter for the bank, and look
+        // up the current position in the cycle for the mode
         const int c = wizFlashCounter[idx/32];
-        return c < 128 ? c*2 + 1 : (255 - c)*2;
-    }
-    else if (val == 130)
-    {
-        // 130 = flash on / off
-        const int c = wizFlashCounter[idx/32];
-        return c < 128 ? 255 : 0;
-    }
-    else if (val == 131)
-    {
-        // 131 = on / ramp down
-        const int c = wizFlashCounter[idx/32];
-        return c < 128 ? 255 : (255 - c)*2;
-    }
-    else if (val == 132)
-    {
-        // 132 = ramp up / on
-        const int c = wizFlashCounter[idx/32];
-        return c < 128 ? c*2 : 255;
+        return wizFlashLookup[((val-129)*256) + c];
     }
     else
     {
@@ -1443,68 +1686,187 @@ static uint8_t wizState(int idx)
     }
 }
 
-// LedWiz flash timer pulse.  This fires periodically to update 
-// LedWiz flashing outputs.  At the slowest pulse speed set via
-// the SBA command, each waveform cycle has 256 steps, so we
-// choose the pulse time base so that the slowest cycle completes
-// in 2 seconds.  This seems to roughly match the real LedWiz
-// behavior.  We run the pulse timer at the same rate regardless
-// of the pulse speed; at higher pulse speeds, we simply use
-// larger steps through the cycle on each interrupt.  Running
-// every 1/127 of a second = 8ms seems to be a pretty light load.
-Timeout wizPulseTimer;
-#define WIZ_PULSE_TIME_BASE  (1.0f/127.0f)
+// LedWiz flash cycle timer.  This runs continuously.  On each update,
+// we use this to figure out where we are on the cycle for each bank.
+Timer wizCycleTimer;
+
+// Update the LedWiz flash cycle counters
+static void updateWizCycleCounts()
+{
+    // Update the LedWiz flash cycle positions.  Each cycle is 2/N
+    // seconds long, where N is the speed setting for the bank.  N
+    // ranges from 1 to 7.
+    //
+    // Note that we treat the microsecond clock as a 32-bit unsigned
+    // int.  This rolls over (i.e., exceeds 0xffffffff) every 71 minutes.
+    // We only care about the phase of the current LedWiz cycle, so we
+    // don't actually care about the absolute time - we only care about
+    // the time relative to some arbitrary starting point.  Whenever the
+    // clock rolls over, it effectively sets a new starting point; since
+    // we only need an arbitrary starting point, that's largely okay.
+    // The one drawback is that these epoch resets can obviously occur
+    // in the middle of a cycle.  When this occurs, the update just before
+    // the rollover and the update just after the rollover will use
+    // different epochs, so their phases might be misaligned.  That could
+    // cause a sudden jump in brightness between the two updates and a 
+    // shorter-than-usual or longer-than-usual time for that cycle.  To
+    // avoid that, we'd have to use a higher-precision clock (say, a 64-bit
+    // microsecond counter) and do all of the calculations at the higher
+    // precision.  Given that the rollover only happens once every 71
+    // minutes, and that the only problem it causes is a momentary glitch
+    // in the flash pattern, I think it's an equitable trade for the slightly
+    // faster processing in the 32-bit domain.  This routine is called 
+    // frequently from the main loop, so it's critial to minimize execution
+    // time.
+    uint32_t tcur = wizCycleTimer.read_us();
+    for (int i = 0 ; i < MAX_LW_BANKS ; ++i)
+    {
+        // Figure the point in the cycle.  The LedWiz "speed" setting is
+        // waveform period in 0.25s units.  (There's no official LedWiz
+        // documentation of what the speed means in real units, so this is
+        // based on observations.)
+        //
+        // We do this calculation frequently from the main loop, since we
+        // have to do it every time we update the output flash cycles,
+        // which in turn has to be done frequently to make the cycles
+        // appear smooth to users.  So we're going to get a bit tricky
+        // with integer arithmetic to streamline it.  The goal is to find
+        // the current phase position in the output waveform; in abstract
+        // terms, we're trying to find the angle, 0 to 2*pi, in the current
+        // cycle.  Floating point arithmetic is expensive on the KL25Z
+        // since it's all done in software, so we'll do everything in
+        // integers.  To do that, rather than trying to find the phase
+        // angle as a continuous quantity, we'll quantize it, into 256
+        // quanta per cycle.  Each quantum is 1/256 of the cycle length,
+        // so for a 1-second cycle (LedWiz speed 4), each quantum is
+        // 1/256 of second or about 3.9ms.  To find the phase, then, we
+        // simply take the current time (as an elapsed time from an
+        // arbitrary zero point aka epoch), quantize it into 3.9ms chunks,
+        // and calculate the remainder mod 256.  Remainder mod 256 is a
+        // fast operation since it's equivalent to bit masking with 0xFF.
+        // (That's why we chose a power of two for the number of quanta
+        // per cycle.)  Our timer gives us microseconds since it started,
+        // so to convert to quanta, we divide by microseconds per quantum;
+        // in the case of speed 1 with its 3.906ms quanta, we divide by 
+        // 3906.  But we can take this one step further, getting really
+        // tricky now.  Dividing by N is the same as muliplying by X/N
+        // for some X, and then dividing the result by X.  Why, you ask,
+        // would we want to do two operations where we could do one?
+        // Because if we're clever, the two operations will be much 
+        // faster the the one.  The M0+ has no DIVIDE instruction, so
+        // integer division has to be done in software, at a cost of about
+        // 100 clocks per operation.  The KL25Z M0+ has a one-cycle
+        // hardware multiplier, though.  But doesn't that leave that
+        // second division still to do?  Yes, but if we choose a power
+        // of 2 for X, we can do that division with a bit shift, another
+        // single-cycle operation.  So we can do the division in two
+        // cycles by breaking it up into a multiply + shift.
+        //
+        // Each entry in this array represents X/N for the corresponding
+        // LedWiz speed, where N is the number of time quanta per cycle
+        // and X is 2^24.  The time quanta are chosen such that 256
+        // quanta add up to approximately (LedWiz speed setting * 0.25s).
+        // 
+        // Note that the calculation has an implicit bit mask (result & 0xFF)
+        // to get the final result mod 256.  But we don't have to actually
+        // do that work because we're using 32-bit ints and a 2^24 fixed
+        // point base (X in the narrative above).  The final shift right by
+        // 24 bits to divide out the base will leave us with only 8 bits in
+        // the result, since we started with 32.
+#if 1
+        static const uint32_t inv_us_per_quantum[] = { // indexed by LedWiz speed
+            0, 17172, 8590, 5726, 4295, 3436, 2863, 2454
+        };
+        wizFlashCounter[i] = ((tcur * inv_us_per_quantum[wizSpeed[i]]) >> 24);
+#else
+        // Old, slightly less tricky way: this is almost the same as
+        // above, but does the division the straightforward way.  The
+        // array gives us the length of the quantum per microsecond for
+        // each speed setting, so we just divide the microsecond counter
+        // by the quantum size to get the current time in quantum units,
+        // then figure the remainder mod 256 of the result to get the 
+        // current cycle phase position.
+        static const uint32_t us_per_quantum[] = {  // indexed by LedWiz "speed"
+            0, 977, 1953, 2930, 3906, 4883, 5859, 6836
+        };
+        wizFlashCounter[i] = (tcur/us_per_quantum[wizSpeed[i]]) & 0xFF;
+#endif
+    }
+}
+
+// LedWiz flash timer pulse.  The main loop calls this periodically
+// to update outputs set to LedWiz flash modes.
+Timer wizPulseTimer;
+float wizPulseTotalTime, wizPulseRunCount;
+const uint32_t WIZ_INTERVAL_US = 8000;
 static void wizPulse()
 {
-    // update the flash counter in each bank
-    for (int bank = 0 ; bank < countof(wizFlashCounter) ; ++bank)
+    // if it's been long enough, update the LedWiz outputs
+    if (wizPulseTimer.read_us() >= WIZ_INTERVAL_US)
     {
-        // increase the counter by the speed increment, and wrap at 256
-        wizFlashCounter[bank] = (wizFlashCounter[bank] + wizSpeed[bank]) & 0xff;
-    }
+        // reset the timer for the next round
+        wizPulseTimer.reset();
 
-    // look for outputs set to LedWiz flash modes 
-    int flashing = false;
-    for (int i = 0 ; i < numOutputs ; ++i)
-    {
-        if (wizOn[i])
+        // if we're in LedWiz mode, update flashing outputs
+        if (ledWizMode)
         {
-            uint8_t s = wizVal[i];
-            if (s >= 129 && s <= 132)
+            // start a timer for statistics collection
+            IF_DIAG(
+              Timer t;
+              t.start();
+            )
+            
+            // update the cycle counters
+            updateWizCycleCounts();
+
+            // update all outputs set to flashing values
+            for (int i = numOutputs ; i > 0 ; )
             {
-                lwPin[i]->set(wizState(i));
-                flashing = true;
+                if (wizOn[--i])
+                {
+                    // If the "brightness" is in the range 129..132, it's a 
+                    // flash mode.  Note that we only have to check the high
+                    // bit here, because the protocol message handler validates
+                    // the wizVal[] entries when storing them: the only valid
+                    // values with the high bit set are 129..132.  Skipping
+                    // validation here saves us a tiny bit of work, which we
+                    // care about because we have to loop over all outputs
+                    // here, and we invoke this frequently from the main loop.
+                    const uint8_t val = wizVal[i];
+                    if ((val & 0x80) != 0)
+                    {
+                        // get the current cycle time, then look up the 
+                        // value for the mode at the cycle time
+                        const int c = wizFlashCounter[i >> 5];
+                        lwPin[i]->set(wizFlashLookup[((val-129) << 8) + c]);
+                    }
+                }
             }
+            
+            // flush changes to 74HC595 chips, if attached
+            if (hc595 != 0)
+                hc595->update();
+
+            // collect timing statistics
+            IF_DIAG(
+              wizPulseTotalTime += t.read();
+              wizPulseRunCount += 1;
+            )
         }
     }    
-
-    // Set up the next timer pulse only if we found anything flashing.
-    // To minimize overhead from this feature, we only enable the interrupt
-    // when we need it.  This eliminates any performance penalty to other
-    // features when the host software doesn't care about the flashing 
-    // modes.  For example, DOF never uses these modes, so there's no 
-    // need for them when running Visual Pinball.
-    if (flashing)
-        wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
 }
 
 // Update the physical outputs connected to the LedWiz ports.  This is 
 // called after any update from an LedWiz protocol message.
 static void updateWizOuts()
 {
-    // update each output
-    int pulse = false;
-    for (int i = 0 ; i < numOutputs ; ++i)
-    {
-        pulse |= (wizVal[i] >= 129 && wizVal[i] <= 132);
-        lwPin[i]->set(wizState(i));
-    }
+    // update the cycle counters
+    updateWizCycleCounts();
     
-    // if any outputs are set to flashing mode, and the pulse timer
-    // isn't running, turn it on
-    if (pulse)
-        wizPulseTimer.attach(wizPulse, WIZ_PULSE_TIME_BASE);
-        
+    // update each output
+    for (int i = 0 ; i < numOutputs ; ++i)
+        lwPin[i]->set(wizState(i));
+    
     // flush changes to 74HC595 chips, if attached
     if (hc595 != 0)
         hc595->update();
@@ -1514,13 +1876,8 @@ static void updateWizOuts()
 // setting that affects all outputs, such as engaging or canceling Night Mode.
 static void updateAllOuts()
 {
-    // uddate each output
-    for (int i = 0 ; i < numOutputs ; ++i)
-        lwPin[i]->set(wizState(i));
-        
-    // flush 74HC595 changes, if necessary
-    if (hc595 != 0)
-        hc595->update();
+    // update LedWiz states
+    updateWizOuts();
 }
 
 //
@@ -1545,13 +1902,75 @@ void allOutputsOff()
     for (int i = 0 ; i < countof(wizSpeed) ; ++i)
         wizSpeed[i] = 2;
         
-    // set bank 0
-    ledWizBank = 0;
+    // revert to LedWiz mode for output controls
+    ledWizMode = true;
     
     // flush changes to hc595, if applicable
     if (hc595 != 0)
         hc595->update();
 }
+
+// Cary out an SBA or SBX message.  portGroup is 0 for ports 1-32,
+// 1 for ports 33-64, etc.  Original protocol SBA messages always
+// address port group 0; our private SBX extension messages can 
+// address any port group.
+void sba_sbx(int portGroup, const uint8_t *data)
+{
+    // switch to LedWiz protocol mode
+    ledWizMode = true;
+    
+    // update all on/off states
+    for (int i = 0, bit = 1, imsg = 1, port = portGroup*32 ; 
+         i < 32 && port < numOutputs ; 
+         ++i, bit <<= 1, ++port)
+    {
+        // figure the on/off state bit for this output
+        if (bit == 0x100) {
+            bit = 1;
+            ++imsg;
+        }
+        
+        // set the on/off state
+        wizOn[port] = ((data[imsg] & bit) != 0);
+    }
+    
+    // set the flash speed for the port group
+    if (portGroup < countof(wizSpeed))
+        wizSpeed[portGroup] = (data[5] < 1 ? 1 : data[5] > 7 ? 7 : data[5]);
+
+    // update the physical outputs with the new LedWiz states
+    updateWizOuts();
+}
+
+// Carry out a PBA or PBX message.
+void pba_pbx(int basePort, const uint8_t *data)
+{
+    // switch LedWiz protocol mode
+    ledWizMode = true;
+
+    // update each wizVal entry from the brightness data
+    for (int i = 0, iwiz = basePort ; i < 8 && iwiz < numOutputs ; ++i, ++iwiz)
+    {
+        // get the value
+        uint8_t v = data[i];
+        
+        // Validate it.  The legal values are 0..49 for brightness
+        // levels, and 128..132 for flash modes.  Set anything invalid
+        // to full brightness (48) instead.  Note that 49 isn't actually
+        // a valid documented value, but in practice some clients send
+        // this to mean 100% brightness, and the real LedWiz treats it
+        // as such.
+        if ((v > 49 && v < 129) || v > 132)
+            v = 48;
+        
+        // store it
+        wizVal[iwiz] = v;
+    }
+
+    // update the physical outputs
+    updateWizOuts();
+}
+
 
 // ---------------------------------------------------------------------------
 //
@@ -2348,8 +2767,9 @@ public:
     // makes the device look to the PC like it's electrically unplugged.
     // When we reconnect on the device side, the PC thinks a new device
     // has been plugged in and initiates the logical connection setup.
-    // We have to remain disconnected for a macroscopic interval for
-    // this to happen - 5ms seems to do the trick.
+    // We have to remain disconnected for some minimum interval before
+    // the host notices; the exact minimum is unclear, but 5ms seems 
+    // reliable in practice.
     // 
     // Here's the full algorithm:
     //
@@ -2468,7 +2888,7 @@ protected:
 //
 // We install an interrupt handler on the accelerometer "data ready" 
 // interrupt to ensure that we fetch each sample immediately when it
-// becomes available.  The accelerometer data rate is fiarly high
+// becomes available.  The accelerometer data rate is fairly high
 // (800 Hz), so it's not practical to keep up with it by polling.
 // Using an interrupt handler lets us respond quickly and read
 // every sample.
@@ -3779,58 +4199,58 @@ public:
 
 private:
 
-// Plunger data filtering mode:  optionally apply filtering to the raw 
-// plunger sensor readings to try to reduce noise in the signal.  This
-// is designed for the TSL1410/12 optical sensors, where essentially all
-// of the noise in the signal comes from lack of sharpness in the shadow
-// edge.  When the shadow is blurry, the edge detector has to pick a pixel,
-// even though the edge is actually a gradient spanning several pixels.
-// The edge detection algorithm decides on the exact pixel, but whatever
-// the algorithm, the choice is going to be somewhat arbitrary given that
-// there's really no one pixel that's "the edge" when the edge actually
-// covers multiple pixels.  This can make the choice of pixel sensitive to
-// small changes in exposure and pixel respose from frame to frame, which
-// means that the reported edge position can move by a pixel or two from
-// one frame to the next even when the physical plunger is perfectly still.
-// That's the noise we're talking about.
-//
-// We previously applied a mild hysteresis filter to the signal to try to
-// eliminate this noise.  The filter tracked the average over the last
-// several samples, and rejected readings that wandered within a few
-// pixels of the average.  If a certain number of readings moved away from
-// the average in the same direction, even by small amounts, the filter
-// accepted the changes, on the assumption that they represented actual
-// slow movement of the plunger.  This filter was applied after the firing
-// detection.
-//
-// I also tried a simpler filter that rejected changes that were too fast
-// to be physically possible, as well as changes that were very close to
-// the last reported position (i.e., simple hysteresis).  The "too fast"
-// filter was there to reject spurious readings where the edge detector
-// mistook a bad pixel value as an edge.  
-//
-// The new "mode 2" edge detector (see ccdSensor.h) seems to do a better
-// job of rejecting pixel-level noise by itself than the older "mode 0"
-// algorithm did, so I removed the filtering entirely.  Any filtering has
-// some downsides, so it's better to reduce noise in the underlying signal
-// as much as possible first.  It seems possible to get a very stable signal
-// now with a combination of the mode 2 edge detector and optimizing the
-// physical sensor arrangement, especially optimizing the light source to
-// cast as sharp as shadow as possible and adjusting the brightness to
-// maximize bright/dark contrast in the image.
-//
-//   0 = No filtering (current default)
-//   1 = Filter the data after firing detection using moving average
-//       hysteresis filter (old version, used in most 2016 releases)
-//   2 = Filter the data before firing detection using simple hysteresis
-//       plus spurious "too fast" motion rejection
-//
+    // Plunger data filtering mode:  optionally apply filtering to the raw 
+    // plunger sensor readings to try to reduce noise in the signal.  This
+    // is designed for the TSL1410/12 optical sensors, where essentially all
+    // of the noise in the signal comes from lack of sharpness in the shadow
+    // edge.  When the shadow is blurry, the edge detector has to pick a pixel,
+    // even though the edge is actually a gradient spanning several pixels.
+    // The edge detection algorithm decides on the exact pixel, but whatever
+    // the algorithm, the choice is going to be somewhat arbitrary given that
+    // there's really no one pixel that's "the edge" when the edge actually
+    // covers multiple pixels.  This can make the choice of pixel sensitive to
+    // small changes in exposure and pixel respose from frame to frame, which
+    // means that the reported edge position can move by a pixel or two from
+    // one frame to the next even when the physical plunger is perfectly still.
+    // That's the noise we're talking about.
+    //
+    // We previously applied a mild hysteresis filter to the signal to try to
+    // eliminate this noise.  The filter tracked the average over the last
+    // several samples, and rejected readings that wandered within a few
+    // pixels of the average.  If a certain number of readings moved away from
+    // the average in the same direction, even by small amounts, the filter
+    // accepted the changes, on the assumption that they represented actual
+    // slow movement of the plunger.  This filter was applied after the firing
+    // detection.
+    //
+    // I also tried a simpler filter that rejected changes that were too fast
+    // to be physically possible, as well as changes that were very close to
+    // the last reported position (i.e., simple hysteresis).  The "too fast"
+    // filter was there to reject spurious readings where the edge detector
+    // mistook a bad pixel value as an edge.  
+    //
+    // The new "mode 2" edge detector (see ccdSensor.h) seems to do a better
+    // job of rejecting pixel-level noise by itself than the older "mode 0"
+    // algorithm did, so I removed the filtering entirely.  Any filtering has
+    // some downsides, so it's better to reduce noise in the underlying signal
+    // as much as possible first.  It seems possible to get a very stable signal
+    // now with a combination of the mode 2 edge detector and optimizing the
+    // physical sensor arrangement, especially optimizing the light source to
+    // cast as sharp as shadow as possible and adjusting the brightness to
+    // maximize bright/dark contrast in the image.
+    //
+    //   0 = No filtering (current default)
+    //   1 = Filter the data after firing detection using moving average
+    //       hysteresis filter (old version, used in most 2016 releases)
+    //   2 = Filter the data before firing detection using simple hysteresis
+    //       plus spurious "too fast" motion rejection
+    //
 #define PLUNGER_FILTERING_MODE  0
 
 #if PLUNGER_FILTERING_MODE == 0
     // Disable all filtering
-    void applyPreFilter(PlungerReading &r) { }
-    int applyPostFilter() { return z; }
+    inline void applyPreFilter(PlungerReading &r) { }
+    inline int applyPostFilter() { return z; }
 #elif PLUNGER_FILTERING_MODE == 1
     // Apply pre-processing filter.  This filter is applied to the raw
     // value coming off the sensor, before calibration or fire-event
@@ -4044,13 +4464,13 @@ private:
     // a firing event once it's somewhat under way, so we need a little
     // retrospective information to accurately determine after the fact
     // exactly when it started.  We throttle our readings to no more
-    // than one every 2ms, so we have at least N*2ms of history in this
+    // than one every 1ms, so we have at least N*1ms of history in this
     // array.
-    PlungerReading hist[25];
+    PlungerReading hist[32];
     int histIdx;
     
     // get the nth history item (0=last, 1=2nd to last, etc)
-    const PlungerReading &nthHist(int n) const
+    inline const PlungerReading &nthHist(int n) const
     {
         // histIdx-1 is the last written; go from there
         n = histIdx - 1 - n;
@@ -4358,6 +4778,8 @@ int calBtnLit = false;
 #define v_ui16(var, ofs)    cfg.var = wireUI16(data+(ofs))
 #define v_pin(var, ofs)     cfg.var = wirePinName(data[ofs])
 #define v_byte_ro(val, ofs) // ignore read-only variables on SET
+#define v_ui32_ro(val, ofs) // ignore read-only variables on SET
+#define VAR_MODE_SET 1      // we're in SET mode
 #define v_func configVarSet
 #include "cfgVarMsgMap.h"
 
@@ -4367,6 +4789,8 @@ int calBtnLit = false;
 #undef v_ui16
 #undef v_pin
 #undef v_byte_ro
+#undef v_ui32_ro
+#undef VAR_MODE_SET
 #undef v_func
 
 // Handle GET messages - read variable values and return in USB message daa
@@ -4375,6 +4799,8 @@ int calBtnLit = false;
 #define v_ui16(var, ofs)    ui16Wire(data+(ofs), cfg.var)
 #define v_pin(var, ofs)     pinNameWire(data+(ofs), cfg.var)
 #define v_byte_ro(val, ofs) data[ofs] = (val)
+#define v_ui32_ro(val, ofs) ui32Wire(data+(ofs), val);
+#define VAR_MODE_SET 0      // we're in GET mode
 #define v_func  configVarGet
 #include "cfgVarMsgMap.h"
 
@@ -4396,50 +4822,23 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
     // So our full protocol is as follows:
     //
     // first byte =
-    //   0-48     -> LWZ-PBA
-    //   64       -> LWZ SBA 
+    //   0-48     -> PBA
+    //   64       -> SBA 
     //   65       -> private control message; second byte specifies subtype
-    //   129-132  -> LWZ-PBA
+    //   129-132  -> PBA
     //   200-228  -> extended bank brightness set for outputs N to N+6, where
     //               N is (first byte - 200)*7
     //   other    -> reserved for future use
     //
     uint8_t *data = lwm.data;
-    if (data[0] == 64) 
+    if (data[0] == 64)
     {
-        // LWZ-SBA - first four bytes are bit-packed on/off flags
-        // for the outputs; 5th byte is the pulse speed (1-7)
-        //printf("LWZ-SBA %02x %02x %02x %02x ; %02x\r\n",
+        // 64 = SBA (original LedWiz command to set on/off switches for ports 1-32)
+        //printf("SBA %02x %02x %02x %02x, speed %02x\r\n",
         //       data[1], data[2], data[3], data[4], data[5]);
+        sba_sbx(0, data);
 
-        // switch to LedWiz protocol mode
-        ledWizMode = true;
-
-        // update all on/off states
-        for (int i = 0, bit = 1, imsg = 1, iwiz = ledWizBank*32 ; 
-             i < 32 && iwiz < numOutputs ;
-             ++i, ++iwiz, bit <<= 1)
-        {
-            // figure the on/off state bit for this output
-            if (bit == 0x100) {
-                bit = 1;
-                ++imsg;
-            }
-            
-            // set the on/off state
-            wizOn[iwiz] = ((data[imsg] & bit) != 0);
-        }
-        
-        // set the flash speed - enforce the value range 1-7
-        if (ledWizBank < countof(wizSpeed))
-            wizSpeed[ledWizBank] = (data[5] < 1 ? 1 : data[5] > 7 ? 7 : data[5]);
-
-        // update the physical outputs
-        updateWizOuts();
-        if (hc595 != 0)
-            hc595->update();
-        
-        // reset the PBA counter
+        // SBA resets the PBA port group counter
         pbaIdx = 0;
     }
     else if (data[0] == 65)
@@ -4576,9 +4975,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             break;
             
         case 12:
-            // 12 = Select virtual LedWiz unit.  This selects a bank of 32
-            // outputs for subsequent SBA and PBA messages.
-            ledWizBank = data[2];
+            // Unused
             break;
             
         case 13:
@@ -4594,6 +4991,40 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         // to update, and the remaining bytes give the new value,
         // in a variable-dependent format.
         configVarSet(data);
+    }
+    else if (data[0] == 67)
+    {
+        // SBX - extended SBA message.  This is the same as SBA, except
+        // that the 7th byte selects a group of 32 ports, to allow access
+        // to ports beyond the first 32.
+        sba_sbx(data[6], data);
+    }
+    else if (data[0] == 68)
+    {
+        // PBX - extended PBA message.  This is similar to PBA, but
+        // allows access to more than the first 32 ports by encoding
+        // a port group byte that selects a block of 8 ports.
+        
+        // get the port group - the first port is 8*group
+        int portGroup = data[1];
+        
+        // unpack the brightness values
+        uint32_t tmp1 = data[2] | (data[3]<<8) | (data[4]<<16);
+        uint32_t tmp2 = data[5] | (data[6]<<8) | (data[7]<<16);
+        uint8_t bri[8] = {
+            tmp1 & 0x3F, (tmp1>>6) & 0x3F, (tmp1>>12) & 0x3F, (tmp1>>18) & 0x3F,
+            tmp2 & 0x3F, (tmp2>>6) & 0x3F, (tmp2>>12) & 0x3F, (tmp2>>18) & 0x3F
+        };
+        
+        // map the flash levels: 60->129, 61->130, 62->131, 63->132
+        for (int i = 0 ; i < 8 ; ++i)
+        {
+            if (bri[i] >= 60)
+                bri[i] += 129-60;
+        }
+        
+        // Carry out the PBA
+        pba_pbx(portGroup*8, bri);
     }
     else if (data[0] >= 200 && data[0] <= 228)
     {
@@ -4618,7 +5049,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         // address those ports anyway.
         
         // flag that we're in extended protocol mode
-        ledWizMode = false;
+        ledWizMode = true;
         
         // figure the block of 7 ports covered in the message
         int i0 = (data[0] - 200)*7;
@@ -4631,6 +5062,12 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             uint8_t b = data[i-i0+1];
             outLevel[i] = b;
             
+            // set the port's LedWiz state to the nearest equivalent, so
+            // that it maintains its current setting if we switch back to
+            // LedWiz mode on a future update
+            wizOn[i] = (b != 0);
+            wizVal[i] = (b*48)/255;
+            
             // set the output
             lwPin[i]->set(b);
         }
@@ -4641,17 +5078,15 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
     }
     else 
     {
-        // Everything else is LWZ-PBA.  This is a full "profile"
-        // dump from the host for one bank of 8 outputs.  Each
-        // byte sets one output in the current bank.  The current
-        // bank is implied; the bank starts at 0 and is reset to 0
-        // by any LWZ-SBA message, and is incremented to the next
-        // bank by each LWZ-PBA message.  Our variable pbaIdx keeps
-        // track of our notion of the current bank.  There's no direct
-        // way for the host to select the bank; it just has to count
-        // on us staying in sync.  In practice, the host will always
-        // send a full set of 4 PBA messages in a row to set all 32
-        // outputs.
+        // Everything else is an LedWiz PBA message.  This is a full 
+        // "profile" dump from the host for one bank of 8 outputs.  Each
+        // byte sets one output in the current bank.  The current bank
+        // is implied; the bank starts at 0 and is reset to 0 by any SBA
+        // message, and is incremented to the next bank by each PBA.  Our
+        // variable pbaIdx keeps track of the current bank.  There's no 
+        // direct way for the host to select the bank; it just has to count
+        // on us staying in sync.  In practice, clients always send the
+        // full set of 4 PBA messages in a row to set all 32 outputs.
         //
         // Note that a PBA implicitly overrides our extended profile
         // messages (message prefix 200-219), because this sets the
@@ -4662,31 +5097,13 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         //printf("LWZ-PBA[%d] %02x %02x %02x %02x %02x %02x %02x %02x\r\n",
         //       pbaIdx, data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7]);
 
-        // flag that we received an LedWiz message
-        ledWizMode = true;
-
-        // Update all output profile settings for the current bank
-        for (int i = 0, iwiz = ledWizBank*32 + pbaIdx ; 
-             i < 8 && iwiz < numOutputs ; 
-             ++i, ++iwiz)
-            wizVal[iwiz] = data[i];
-
-        // Update the physical LED state if this is the last bank.
-        // Note that hosts always send a full set of four PBA
-        // messages, so there's no need to do a physical update
-        // until we've received the last bank's PBA message.
-        if (pbaIdx >= 24)
-        {
-            updateWizOuts();
-            if (hc595 != 0)
-                hc595->update();
-            pbaIdx = 0;
-        }
-        else
-            pbaIdx += 8;
+        // carry out the PBA
+        pba_pbx(pbaIdx, data);
+        
+        // update the PBX index state for the next message
+        pbaIdx = (pbaIdx + 8) % 32;
     }
 }
-
 
 // ---------------------------------------------------------------------------
 //
@@ -4860,11 +5277,24 @@ int main(void)
         tlc5940->enable(true);
     if (hc595 != 0)
         hc595->enable(true);
+        
+    // start the LedWiz flash cycle timers
+    wizPulseTimer.start();
+    wizCycleTimer.start();
+    
+    // start the PWM update polling timer
+    polledPwmTimer.start();
     
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
     for (;;)
     {
+        // start the main loop timer for diagnostic data collection
+        IF_DIAG(
+            Timer mainLoopTimer;
+            mainLoopTimer.start();
+        )
+            
         // Process incoming reports on the joystick interface.  The joystick
         // "out" (receive) endpoint is used for LedWiz commands and our 
         // extended protocol commands.  Limit processing time to 5ms to
@@ -4872,8 +5302,27 @@ int main(void)
         LedWizMsg lwm;
         Timer lwt;
         lwt.start();
+        IF_DIAG(int msgCount = 0;)
         while (js.readLedWizMsg(lwm) && lwt.read_us() < 5000)
+        {
             handleInputMsg(lwm, js);
+            IF_DIAG(++msgCount;)
+        }
+        
+        // collect performance statistics on the message reader, if desired
+        IF_DIAG(
+            if (msgCount != 0)
+            {
+                mainLoopMsgTime += lwt.read();
+                mainLoopMsgCount++;
+            }
+        )
+        
+        // update flashing LedWiz outputs periodically
+        wizPulse();
+        
+        // update PWM outputs
+        pollPwmUpdates();
             
         // send TLC5940 data updates if applicable
         if (tlc5940 != 0)
@@ -5155,6 +5604,9 @@ int main(void)
             Timer diagTimer;
             diagTimer.reset();
             diagTimer.start();
+            
+            // turn off the main loop timer while spinning
+            IF_DIAG(mainLoopTimer.stop();)
 
             // loop until we get our connection back            
             while (!js.isConnected() || js.isSleeping())
@@ -5184,6 +5636,9 @@ int main(void)
                     && reconnTimeoutTimer.read() > cfg.disconnectRebootTimeout)
                     reboot(js, false, 0);
             }
+            
+            // resume the main loop timer
+            IF_DIAG(mainLoopTimer.start();)
             
             // if we made it out of that loop alive, we're connected again!
             connected = true;
@@ -5260,5 +5715,11 @@ int main(void)
             hbTimer.reset();
             ++hbcnt;
         }
+        
+        // collect statistics on the main loop time, if desired
+        IF_DIAG(
+            mainLoopIterTime += mainLoopTimer.read();
+            mainLoopIterCount++;
+        )
     }
 }

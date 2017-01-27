@@ -141,7 +141,7 @@ void v_func(uint8_t *data)
         v_ui16(plunger.cal.zero, 2);
         v_ui16(plunger.cal.max, 4);
         v_byte(plunger.cal.tRelease, 6);
-        v_byte(plunger.cal.calibrated, 7);  // on SET, set 'calibrated' to true
+        v_byte(plunger.cal.calibrated, 7);
         break;
         
     case 14:
@@ -165,19 +165,59 @@ void v_func(uint8_t *data)
         v_byte(shiftButton, 2);
         break;
         
-    // case n: // new scalar variable
+    // case N: // new scalar variable
     //
-    // ATTENTION!
+    // !!! ATTENTION !!!
     // UPDATE CASE 0 ABOVE WHEN ADDING A NEW VARIABLE!!!
 
     
-        
-        // ********** ARRAY VARIABLES **********
-
-
-    // case n: // new array variable
+    // ********** SPECIAL DIAGNOSTIC VARIBLES **********
     //
-    // ATTENTION!
+    // This is a set of variables that act like the array variables
+    // below.  However, these are generally read-only, and since they
+    // don't contain restorable configuration data, they're not 
+    // included in the variable counts reported by a "variable 0"
+    // query above.
+    case 220:
+#if !VAR_MODE_SET
+        {
+            uint32_t a;
+            switch (data[2])
+            {
+                case 1:
+                    // main loop, average iteration time in us
+                    a = uint32_t(mainLoopIterTime/mainLoopIterCount*1000000.0f);
+                    v_ui32_ro(a, 3);
+                    break;
+                    
+                case 2:
+                    // incoming message average processing time in us
+                    a = uint32_t(mainLoopMsgTime/mainLoopMsgCount*1000000.0f);
+                    v_ui32_ro(a, 3);
+                    break;
+                
+                case 3:
+                    // PWM update polling routine, average time per call in us
+                    a = uint32_t(polledPwmTotalTime/polledPwmRunCount*1000000.0f);
+                    v_ui32_ro(a, 3);
+                    break;
+                
+                case 4:
+                    // LedWiz flash update routine, average time per call in us
+                    uint32_t a = uint32_t(wizPulseTotalTime/wizPulseRunCount*1000000.0f);
+                    v_ui32_ro(a, 3);
+                    break;
+            }
+        }
+#endif
+        break;
+        
+    // ********** ARRAY VARIABLES **********
+
+
+    // case N: // new array variable
+    //
+    // !!! ATTENTION !!!
     // UPDATE CASE 0 ABOVE WHEN ADDING A NEW ARRAY VARIABLE!!!
     
     case 253:
@@ -201,7 +241,7 @@ void v_func(uint8_t *data)
             }                
         }
         break;
-        
+
     case 254:
         // button setup
         {
