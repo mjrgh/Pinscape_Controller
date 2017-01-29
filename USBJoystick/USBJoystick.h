@@ -244,11 +244,12 @@ class USBJoystick: public USBHID {
          * @param plungerMax plunger max calibration point
          * @param plungerRlsTime measured plunger release time, in milliseconds
          * @param configured true if a configuration has been saved to flash from the host
+         * @param sbxpbx true if this firmware version supports SBX/PBX protocol extensions
          * @param freeHeapBytes number of free bytes in the malloc heap
          */
          bool reportConfig(int numOutputs, int unitNo, 
             int plungerZero, int plungerMax, int plunterRlsTime, 
-            bool configured, size_t freeHeapBytes);
+            bool configured, bool sbxpbx, size_t freeHeapBytes);
             
          /**
          * Write a configuration variable query report.

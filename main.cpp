@@ -1773,24 +1773,10 @@ static void updateWizCycleCounts()
         // point base (X in the narrative above).  The final shift right by
         // 24 bits to divide out the base will leave us with only 8 bits in
         // the result, since we started with 32.
-#if 1
         static const uint32_t inv_us_per_quantum[] = { // indexed by LedWiz speed
             0, 17172, 8590, 5726, 4295, 3436, 2863, 2454
         };
         wizFlashCounter[i] = ((tcur * inv_us_per_quantum[wizSpeed[i]]) >> 24);
-#else
-        // Old, slightly less tricky way: this is almost the same as
-        // above, but does the division the straightforward way.  The
-        // array gives us the length of the quantum per microsecond for
-        // each speed setting, so we just divide the microsecond counter
-        // by the quantum size to get the current time in quantum units,
-        // then figure the remainder mod 256 of the result to get the 
-        // current cycle phase position.
-        static const uint32_t us_per_quantum[] = {  // indexed by LedWiz "speed"
-            0, 977, 1953, 2930, 3906, 4883, 5859, 6836
-        };
-        wizFlashCounter[i] = (tcur/us_per_quantum[wizSpeed[i]]) & 0xFF;
-#endif
     }
 }
 
@@ -3035,7 +3021,7 @@ public:
              if (nAccPrv_ >= maxAccPrv)
              {
                  // check if we've been stable for all recent samples
-                 static const float accTol = .01;
+                 static const float accTol = .01f;
                  AccHist *p0 = accPrv_;
                  if (p0[0].d < accTol
                      && p0[1].d < accTol
@@ -3045,8 +3031,8 @@ public:
                  {
                      // Figure the new calibration point as the average of
                      // the samples over the rest period
-                     cx_ = (p0[0].xAvg() + p0[1].xAvg() + p0[2].xAvg() + p0[3].xAvg() + p0[4].xAvg())/5.0;
-                     cy_ = (p0[0].yAvg() + p0[1].yAvg() + p0[2].yAvg() + p0[3].yAvg() + p0[4].yAvg())/5.0;
+                     cx_ = (p0[0].xAvg() + p0[1].xAvg() + p0[2].xAvg() + p0[3].xAvg() + p0[4].xAvg())/5.0f;
+                     cy_ = (p0[0].yAvg() + p0[1].yAvg() + p0[2].yAvg() + p0[3].yAvg() + p0[4].yAvg())/5.0f;
                  }
              }
              else
@@ -4910,7 +4896,9 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
                 numOutputs, 
                 cfg.psUnitNo - 1,   // report 0-15 range for unit number (we store 1-16 internally)
                 cfg.plunger.cal.zero, cfg.plunger.cal.max, cfg.plunger.cal.tRelease,
-                nvm.valid(), xmalloc_rem);
+                nvm.valid(),        // a config is loaded if the config memory block is valid
+                true,               // we support sbx/pbx extensions
+                xmalloc_rem);       // remaining memory size
             break;
             
         case 5:

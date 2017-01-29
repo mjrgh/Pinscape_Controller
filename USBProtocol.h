@@ -184,7 +184,8 @@
 //    bytes 2:3 = total number of configured outputs, little endian.  This
 //                is the number of outputs with assigned functions in the
 //                active configuration.
-//    bytes 4:5 = Pinscape unit number (0-15), little endian
+//    byte  4   = Pinscape unit number (0-15), little endian
+//    byte  5   = reserved (currently always zero)
 //    bytes 6:7 = plunger calibration zero point, little endian
 //    bytes 8:9 = plunger calibration maximum point, little endian
 //    byte  10  = plunger calibration release time, in milliseconds
