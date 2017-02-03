@@ -1,6 +1,28 @@
 #if defined TARGET_KL25Z || defined TARGET_KL46Z
 #include "SimpleDMA.h"
 
+// DMA - Register Layout Typedef (from mbed MKL25Z4.h)
+// Break out the DMA[n] register array as a named struct,
+// so that we can create pointers to it.
+typedef struct {
+    __IO uint32_t SAR;                               /**< Source Address Register, array offset: 0x100, array step: 0x10 */
+    __IO uint32_t DAR;                               /**< Destination Address Register, array offset: 0x104, array step: 0x10 */
+    union {                                          /* offset: 0x108, array step: 0x10 */
+      __IO uint32_t DSR_BCR;                           /**< DMA Status Register / Byte Count Register, array offset: 0x108, array step: 0x10 */
+      struct {                                         /* offset: 0x108, array step: 0x10 */
+             uint8_t RESERVED_0[3];
+        __IO uint8_t DSR;                                /**< DMA_DSR0 register...DMA_DSR3 register., array offset: 0x10B, array step: 0x10 */
+      } DMA_DSR_ACCESS8BIT;
+    };
+    __IO uint32_t DCR;                               /**< DMA Control Register, array offset: 0x10C, array step: 0x10 */
+} DMA_Reg_Type;
+typedef struct {
+    union {                                          /* offset: 0x0 */
+        __IO uint8_t REQC_ARR[4];                        /**< DMA_REQC0 register...DMA_REQC3 register., array offset: 0x0, array step: 0x1 */
+    };
+    uint8_t RESERVED_0[252];
+    DMA_Reg_Type DMA[4];
+} MyDMA_Type;
 
 
 SimpleDMA *SimpleDMA::irq_owner[4] = {NULL};
@@ -56,12 +78,16 @@ int SimpleDMA::start(uint32_t length, bool wait)
         return -1;
 
     irq_owner[_channel] = this;
+    
+    // get pointers to the register locations
+    volatile uint8_t *chcfg = &DMAMUX0->CHCFG[_channel];
+    volatile DMA_Reg_Type *dmareg = (volatile DMA_Reg_Type *)&DMA0->DMA[_channel];
 
     // disable the channel while we're setting it up
-    DMAMUX0->CHCFG[_channel] = 0;
+    *chcfg = 0;
     
     // set the DONE flag on the channel
-    DMA0->DMA[_channel].DSR_BCR = DMA_DSR_BCR_DONE_MASK;
+    dmareg->DSR_BCR = DMA_DSR_BCR_DONE_MASK;
 
     uint32_t config = 
         DMA_DCR_EINT_MASK 
@@ -95,14 +121,14 @@ int SimpleDMA::start(uint32_t length, bool wait)
         break;
     }
     
-    DMA0->DMA[_channel].SAR = _source;
-    DMA0->DMA[_channel].DAR = _destination;
-    DMAMUX0->CHCFG[_channel] = _trigger;
-    DMA0->DMA[_channel].DCR = config;      
-    DMA0->DMA[_channel].DSR_BCR = length;
+    dmareg->SAR = _source;
+    dmareg->DAR = _destination;
+    *chcfg = _trigger;
+    dmareg->DCR = config;      
+    dmareg->DSR_BCR = length;
     
     // Start - set the ENBL bit in the DMAMUX channel config register
-    DMAMUX0->CHCFG[_channel] |= DMAMUX_CHCFG_ENBL_MASK;
+    *chcfg |= DMAMUX_CHCFG_ENBL_MASK;
 
     return 0;
 }

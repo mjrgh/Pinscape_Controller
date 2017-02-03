@@ -95,6 +95,15 @@ public:
         // we don't know the direction yet
         dir = 0;
         
+        // Figure the scaling factor for converting native pixel readings
+        // to our normalized 0..65535 range.  The effective calculation we
+        // need to perform is (reading*65535)/(npix-1).  Division is slow
+        // on the M0+, so recast this as a multiply, in 64K-scaled fixed
+        // point ints.  To apply this, multiply by this inverse value and
+        // shift right 16 bits.
+        native_npix = nativePix;
+        scaling_factor = (65535U*65536U) / nativePix;
+        
         // set the midpoint history arbitrarily to the absolute halfway point
         memset(midpt, 127, sizeof(midpt));
         midptIdx = 0;
@@ -108,6 +117,7 @@ public:
         ccd.clear();
     }
     
+    virtual bool ready() const { return ccd.ready(); }
     
     virtual bool read(PlungerReading &r)
     {
@@ -118,18 +128,19 @@ public:
         
         // get the image array from the last capture
         uint8_t *pix;
-        int n;
         uint32_t tpix;
-        ccd.getPix(pix, n, tpix);
+        ccd.getPix(pix, tpix);
         
         // process the pixels and look for the edge position
         int pixpos;
-        if (process(pix, n, pixpos))
+        if (process(pix, native_npix, pixpos))
         {            
-            // Normalize to the 16-bit range.  Our reading from the 
-            // sensor is a pixel position, 0..n-1.  To rescale to the
-            // normalized range, figure pixpos*65535/(n-1).
-            r.pos = uint16_t(((pixpos << 16) - pixpos) / (n-1));
+            // Normalize to the 16-bit range by applying the scaling
+            // factor.  The scaling factor is 65535/npix expressed as
+            // a fixed-point number with 64K scale, so multiplying the
+            // pixel reading by this will give us the result with 64K
+            // scale: so shift right 16 bits to get the final answer.
+            r.pos = uint16_t((scaling_factor * uint32_t(pixpos)) >> 16);
             r.t = tpix;
             
             // success
@@ -396,9 +407,12 @@ public:
     // Scan method 2: scan for steepest brightness slope.
     bool process(uint8_t *pix, int n, int &pos)
     {        
-        // Get the levels at each end
-        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
-        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
+        // Get the levels at each end by averaging across several pixels.
+        // Compute just the sums: don't bother dividing by the count, since 
+        // the sums are equivalent to the averages as long as we know 
+        // everything is multiplied by the number of samples.
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
+        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5]);
         
         // Figure the sensor orientation based on the relative brightness
         // levels at the opposite ends of the image.  We're going to scan
@@ -406,12 +420,12 @@ public:
         // scanning from the bright side, 'di' is the starting index on
         // the dark side.  'binc' and 'dinc' are the pixel increments
         // for the respective indices.
-        if (a > b + 10)
+        if (a > b + 50)
         {
             // left end is brighter - standard orientation
             dir = 1;
         }
-        else if (b > a + 10)
+        else if (b > a + 50)
         {
             // right end is brighter - reverse orientation
             dir = -1;
@@ -549,9 +563,8 @@ public:
         
         // get the pixel array
         uint8_t *pix;
-        int n;
         uint32_t t;
-        ccd.getPix(pix, n, t);
+        ccd.getPix(pix, t);
 
         // start a timer to measure the processing time
         Timer pt;
@@ -559,6 +572,7 @@ public:
 
         // process the pixels and read the position
         int pos;
+        int n = native_npix;
         if (!process(pix, n, pos))
             pos = 0xFFFF;
         
@@ -638,6 +652,16 @@ protected:
     // on the fly even if the user repositions the sensor while the software
     // is running.
     int dir;
+    
+    // number of pixels
+    int native_npix;
+    
+    // Scaling factor for converting a native pixel reading to the normalized
+    // 0..65535 plunger reading scale.  This value contains 65535*65536/npix,
+    // which is equivalent to 65535/npix as a fixed-point number with a 64K
+    // scale.  To apply this, multiply a pixel reading by this value and
+    // shift right by 16 bits.
+    uint32_t scaling_factor;
 
     // History of midpoint brightness levels for the last few successful
     // scans.  This is a circular buffer that we write on each scan where

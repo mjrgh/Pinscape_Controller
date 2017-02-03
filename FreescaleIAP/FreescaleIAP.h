@@ -58,22 +58,10 @@ enum IAPCode {
 class FreescaleIAP
 {
 public:
-    FreescaleIAP();
-    ~FreescaleIAP();
+    FreescaleIAP() { }
+    ~FreescaleIAP() { }
  
-    /** Erase a flash sector
-     *
-     * The size erased depends on the used device
-     *
-     * @param address address in the sector which needs to be erased
-     * @param return Success if no errors were encountered, otherwise one of the error states
-     */
-    IAPCode erase_sector(int address);
-     
-    /** Program flash
-     *
-     * Before programming the used area needs to be erased. The erase state is checked
-     * before programming, and will return an error if not erased.
+    /** Program flash.  This erases the area to be written, then writes the data.
      *
      * @param address starting address where the data needs to be programmed (must be longword alligned: two LSBs must be zero)
      * @param data pointer to array with the data to program

@@ -218,6 +218,10 @@
 #define GPIO_PORT_BASE(pin)   ((GPIO_Type *)(PTA_BASE + GPIO_PORT(pin) * 0x40))
 #define GPIO_PINMASK(pin)     gpio_set(pin)
  
+IF_DIAG(
+    extern uint64_t mainLoopIterCheckpt[];
+    extern Timer mainLoopTimer;)
+        
 class TSL1410R
 {
 public:
@@ -301,7 +305,7 @@ public:
     
         // add this sample to the timing statistics (we collect the data
         // merely to report to the config tool, for diagnostic purposes)
-        totalTime += (t.read_us() - t0);
+        totalTime += uint32_t(t.read_us() - t0);
         nRuns += 1;
         
         // the sampler is no long running
@@ -311,7 +315,7 @@ public:
     // Get the stable pixel array.  This is the image array from the
     // previous capture.  It remains valid until the next startCapture()
     // call, at which point this buffer will be reused for the new capture.
-    void getPix(uint8_t * &pix, int &n, uint32_t &t)
+    void getPix(uint8_t * &pix, uint32_t &t)
     {
         // return the pixel array that ISN'T assigned to the DMA
         if (pixDMA)
@@ -326,9 +330,6 @@ public:
             pix = pix2;
             t = t2;
         }
-        
-        // return the pixel count
-        n = nPixSensor;
     }
     
     // Start an image capture from the sensor.  Waits the previous
@@ -338,14 +339,21 @@ public:
     // processing during the capture.
     void startCapture()
     {
-        // wait for the current capture to finish
+        IF_DIAG(uint32_t tDiag0 = mainLoopTimer.read_us();)
+        
+        // wait for the last current capture to finish
         while (running) { }
+
+        // we're starting a new capture immediately        
+        running = true;
+
+        IF_DIAG(mainLoopIterCheckpt[8] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
+
+        // note the start time of this transfer
+        t0 = t.read_us();
         
         // swap to the other DMA buffer for reading the new pixel samples
         pixDMA ^= 1;
-        
-        // note the start time of this transfer
-        t0 = t.read_us();
         
         // Set up the active pixel array as the destination buffer for 
         // the ADC DMA channel. 
@@ -371,7 +379,7 @@ public:
         // the photons collected between tInt and right now (actually, the
         // SI pulse above, but close enough).  Set the timestamp to the 
         // midpoint between tInt and now.
-        uint32_t tmid = tInt + (t0 - tInt)/2;
+        uint32_t tmid = (t0 + tInt) >> 1;
         if (pixDMA)
             t2 = tmid;
         else
@@ -390,7 +398,6 @@ public:
         // pixel array and pulse the CCD serial data clock to load the next
         // pixel onto the analog sampler pin.  This will all happen without
         // any CPU involvement, so we can continue with other work.
-        running = true;
         ao1.start();
         
         // The new integration cycle starts with the 19th clock pulse
@@ -404,6 +411,8 @@ public:
         // (around 2.5ms), so even if the 19*2us estimate is off by 100%, our
         // overall time estimate will still be accurate to about 1.5%.
         tInt = t.read_us() + 38;
+        
+        IF_DIAG(mainLoopIterCheckpt[9] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
     }
     
     // Wait for the current capture to finish
@@ -412,6 +421,9 @@ public:
         while (running) { }
     }
     
+    // Is a reading ready?
+    bool ready() const { return !running; }
+        
     // Clock through all pixels to clear the array.  Pulses SI at the
     // beginning of the operation, which starts a new integration cycle.
     void clear()

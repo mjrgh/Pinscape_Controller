@@ -24,7 +24,7 @@
 // encoded for the USB protocol message.
 
 
-void v_func(uint8_t *data)
+void v_func
 {
     switch (data[1])
     {
@@ -179,34 +179,56 @@ void v_func(uint8_t *data)
     // included in the variable counts reported by a "variable 0"
     // query above.
     case 220:
-#if !VAR_MODE_SET
+#if !VAR_MODE_SET && ENABLE_DIAGNOSTICS
         {
             uint32_t a;
             switch (data[2])
             {
                 case 1:
                     // main loop, average iteration time in us
-                    a = uint32_t(mainLoopIterTime/mainLoopIterCount*1000000.0f);
+                    a = uint32_t(mainLoopIterTime/mainLoopIterCount);
                     v_ui32_ro(a, 3);
                     break;
                     
                 case 2:
                     // incoming message average processing time in us
-                    a = uint32_t(mainLoopMsgTime/mainLoopMsgCount*1000000.0f);
+                    a = uint32_t(mainLoopMsgTime/mainLoopMsgCount);
                     v_ui32_ro(a, 3);
                     break;
                 
                 case 3:
                     // PWM update polling routine, average time per call in us
-                    a = uint32_t(polledPwmTotalTime/polledPwmRunCount*1000000.0f);
+                    a = uint32_t(polledPwmTotalTime/polledPwmRunCount);
                     v_ui32_ro(a, 3);
                     break;
                 
                 case 4:
                     // LedWiz flash update routine, average time per call in us
-                    uint32_t a = uint32_t(wizPulseTotalTime/wizPulseRunCount*1000000.0f);
+                    a = uint32_t(wizPulseTotalTime/wizPulseRunCount);
                     v_ui32_ro(a, 3);
                     break;
+                    
+                case 5:
+                case 6:
+                case 7:
+                case 8:
+                case 9:
+                case 10:
+                case 11:
+                case 12:
+                case 13:
+                case 14:
+                case 15:
+                case 16:
+                    // main loop checkpoint N, time in us
+                    a = uint32_t(mainLoopIterCheckpt[data[2]-5]/mainLoopIterCount);
+                    v_ui32_ro(a, 3);
+                    break;
+                    
+                case 30:
+                    a = (plungerSensor != 0 ? plungerSensor->getAvgScanTime() : 0);
+                    v_ui32_ro(a, 3);
+                    break;                    
             }
         }
 #endif

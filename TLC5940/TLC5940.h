@@ -327,6 +327,12 @@ public:
         armReset();
     }
     
+    // stop the timer
+    void stop()
+    {
+        disarmReset();
+    }
+    
      /*
       *  Set an output.  'idx' is the output index: 0 is OUT0 on the first
       *  chip, 1 is OUT1 on the first chip, 16 is OUT0 on the second chip
@@ -522,11 +528,11 @@ private:
         // for some reason the main loop doesn't do the transmission before
         // this timer fires, it'll see the "cts" flag turned off and won't
         // attempt the transmission on this round.  (That should essentially
-        // never happen, but it wouldn't be a problem if it happened even with
+        // never happen, but it wouldn't be a problem even if it happened with
         // some regularity, because we'd just transmit the data on the next
-        // cycle.  Human users won't notice such a delay.)
-        windowTimer.attach(this, &TLC5940::closeSendWindow, 
-            (1.0/GSCLK_SPEED)*4096.0*2.0/3.0);
+        // cycle.)
+        windowTimer.attach_us(this, &TLC5940::closeSendWindow, 
+            uint32_t((1.0f/GSCLK_SPEED)*4096.0f*2.0f/3.0f*1000000.0f));
 #endif
 
         // end the blanking interval
@@ -567,7 +573,13 @@ private:
     // arm the reset handler - this fires at the end of each GS cycle    
     void armReset()
     {
-        resetTimer.attach(this, &TLC5940::reset, (1.0/GSCLK_SPEED)*4096.0);
+        resetTimer.attach_us(this, &TLC5940::reset, 
+            uint32_t((1.0/GSCLK_SPEED)*4096.0*1000000.0f));
+    }
+    
+    void disarmReset()
+    {
+        resetTimer.detach();
     }
 
     void startBlank()

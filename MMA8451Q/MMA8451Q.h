@@ -131,6 +131,11 @@ public:
    * PTAxx pin.
    */
   void setInterruptMode(int pin);
+  
+  /**
+   * Disable interrupts.
+   */
+  void clearInterruptMode();
 
 private:
   I2C m_i2c;

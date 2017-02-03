@@ -217,6 +217,8 @@
 #define DECL_EXTERNS
 #include "config.h"
 
+// forward declarations
+static void waitPlungerIdle(void);
 
 // --------------------------------------------------------------------------
 // 
@@ -284,8 +286,12 @@ const char *getBuildID()
 // --------------------------------------------------------------------------
 // Main loop iteration timing statistics.  Collected only if 
 // ENABLE_DIAGNOSTICS is set in diags.h.
-float mainLoopIterTime, mainLoopIterCount;
-float mainLoopMsgTime, mainLoopMsgCount;
+#if ENABLE_DIAGNOSTICS
+  uint64_t mainLoopIterTime, mainLoopIterCheckpt[15], mainLoopIterCount;
+  uint64_t mainLoopMsgTime, mainLoopMsgCount;
+  Timer mainLoopTimer;
+#endif
+
 
 // --------------------------------------------------------------------------
 //
@@ -640,32 +646,133 @@ void initDiagLEDs(Config &cfg)
 
 // ---------------------------------------------------------------------------
 //
-// LedWiz emulation, and enhanced TLC5940 output controller
-//
-// There are two modes for this feature.  The default mode uses the on-board
-// GPIO ports to implement device outputs - each LedWiz software port is
-// connected to a physical GPIO pin on the KL25Z.  The KL25Z only has 10
-// PWM channels, so in this mode only 10 LedWiz ports will be dimmable; the
-// rest are strictly on/off.  The KL25Z also has a limited number of GPIO
-// ports overall - not enough for the full complement of 32 LedWiz ports
-// and 24 VP joystick inputs, so it's necessary to trade one against the
-// other if both features are to be used.
-//
-// The alternative, enhanced mode uses external TLC5940 PWM controller
-// chips to control device outputs.  In this mode, each LedWiz software
-// port is mapped to an output on one of the external TLC5940 chips.
-// Two 5940s is enough for the full set of 32 LedWiz ports, and we can
-// support even more chips for even more outputs (although doing so requires
-// breaking LedWiz compatibility, since the LedWiz USB protocol is hardwired
-// for 32 outputs).  Every port in this mode has full PWM support.
+// LedWiz emulation
 //
 
+// LedWiz output states.
+//
+// The LedWiz protocol has two separate control axes for each output.
+// One axis is its on/off state; the other is its "profile" state, which
+// is either a fixed brightness or a blinking pattern for the light.
+// The two axes are independent.
+//
+// Even though the original LedWiz protocol can only access 32 ports, we
+// maintain LedWiz state for every port, even if we have more than 32.  Our
+// extended protocol allows the client to send LedWiz-style messages that
+// control any set of ports.  A replacement LEDWIZ.DLL can make a single
+// Pinscape unit look like multiple virtual LedWiz units to legacy clients,
+// allowing them to control all of our ports.  The clients will still be
+// using LedWiz-style states to control the ports, so we need to support
+// the LedWiz scheme with separate on/off and brightness control per port.
+
+// On/off state for each LedWiz output
+static uint8_t *wizOn;
+
+// LedWiz "Profile State" (the LedWiz brightness level or blink mode)
+// for each LedWiz output.  If the output was last updated through an 
+// LedWiz protocol message, it will have one of these values:
+//
+//   0-48 = fixed brightness 0% to 100%
+//   49  = fixed brightness 100% (equivalent to 48)
+//   129 = ramp up / ramp down
+//   130 = flash on / off
+//   131 = on / ramp down
+//   132 = ramp up / on
+//
+// (Note that value 49 isn't documented in the LedWiz spec, but real
+// LedWiz units treat it as equivalent to 48, and some PC software uses
+// it, so we need to accept it for compatibility.)
+static uint8_t *wizVal;
+
+// Current actual brightness for each output.  This is a simple linear
+// value on a 0..255 scale.  This is EITHER the linear brightness computed 
+// from the LedWiz setting for the port, OR the 0..255 value set explicitly 
+// by the extended protocol:
+//
+// - If the last command that updated the port was an extended protocol 
+//   SET BRIGHTNESS command, this is the value set by that command.  In
+//   addition, wizOn[port] is set to 0 if the brightness is 0, 1 otherwise;
+//   and wizVal[port] is set to the brightness rescaled to the 0..48 range
+//   if the brightness is non-zero.
+//
+// - If the last command that updated the port was an LedWiz command
+//   (SBA/PBA/SBX/PBX), this contains the brightness value computed from
+//   the combination of wizOn[port] and wizVal[port].  If wizOn[port] is 
+//   zero, this is simply 0, otherwise it's wizVal[port] rescaled to the
+//   0..255 range.
+//
+// - For a port set to wizOn[port]=1 and wizVal[port] in 129..132, this is
+//   also updated continuously to reflect the current flashing brightness
+//   level.
+//
+static uint8_t *outLevel;
+
+
+// LedWiz flash speed.  This is a value from 1 to 7 giving the pulse
+// rate for lights in blinking states.  The LedWiz API doesn't document
+// what the numbers mean in real time units, but by observation, the
+// "speed" setting represents the period of the flash cycle in 0.25s
+// units, so speed 1 = 0.25 period = 4Hz, speed 7 = 1.75s period = 0.57Hz.
+// The period is the full cycle time of the flash waveform.
+//
+// Each bank of 32 lights has its independent own pulse rate, so we need 
+// one entry per bank.  Each bank has 32 outputs, so we need a total of
+// ceil(number_of_physical_outputs/32) entries.  Note that we could allocate 
+// this dynamically once we know the number of actual outputs, but the 
+// upper limit is low enough that it's more efficient to use a fixed array
+// at the maximum size.
+static const int MAX_LW_BANKS = (MAX_OUT_PORTS+31)/32;
+static uint8_t wizSpeed[MAX_LW_BANKS];
 
 // Current starting output index for "PBA" messages from the PC (using
 // the LedWiz USB protocol).  Each PBA message implicitly uses the
 // current index as the starting point for the ports referenced in
 // the message, and increases it (by 8) for the next call.
 static int pbaIdx = 0;
+
+
+// ---------------------------------------------------------------------------
+//
+// Output Ports
+//
+// There are two way to connect outputs.  First, you can use the on-board
+// GPIO ports to implement device outputs: each LedWiz software port is
+// connected to a physical GPIO pin on the KL25Z.  This has some pretty
+// strict limits, though.  The KL25Z only has 10 PWM channels, so only 10
+// GPIO LedWiz ports can be made dimmable; the rest are strictly on/off.  
+// The KL25Z also simply doesn't have enough exposed GPIO ports overall to 
+// support all of the features the software supports.  The software allows 
+// for up to 128 outputs, 48 button inputs, plunger input (requiring 1-5 
+// GPIO pins), and various other external devices.  The KL25Z only exposes
+// about 50 GPIO pins.  So if you want to do everything with GPIO ports,
+// you have to ration pins among features.
+//
+// To overcome some of these limitations, we also provide two types of
+// peripheral controllers that allow adding many more outputs, using only
+// a small number of GPIO pins to interface with the peripherals.  First,
+// we support TLC5940 PWM controller chips.  Each TLC5940 provides 16 ports
+// with full PWM, and multiple TLC5940 chips can be daisy-chained.  The
+// chip only requires 5 GPIO pins for the interface, no matter how many
+// chips are in the chain, so it effectively converts 5 GPIO pins into 
+// almost any number of PWM outputs.  Second, we support 74HC595 chips.
+// These provide only digital outputs, but like the TLC5940 they can be
+// daisy-chained to provide almost unlimited outputs with a few GPIO pins
+// to control the whole chain.
+//
+// Direct GPIO output ports and peripheral controllers can be mixed and
+// matched in one system.  The assignment of pins to ports and the 
+// configuration of peripheral controllers is all handled in the software
+// setup, so a physical system can be expanded and updated at any time.
+//
+// To handle the diversity of output port types, we start with an abstract
+// base class for outputs.  Each type of physical output interface has a
+// concrete subclass.  During initialization, we create the appropriate
+// subclass for each software port, mapping it to the assigned GPIO pin 
+// or peripheral port.   Most of the rest of the software only cares about
+// the abstract interface, so once the subclassed port objects are set up,
+// the rest of the system can control the ports without knowing which types
+// of physical devices they're connected to.
+
 
 // Generic LedWiz output port interface.  We create a cover class to 
 // virtualize digital vs PWM outputs, and on-board KL25Z GPIO vs external 
@@ -1189,7 +1296,7 @@ protected:
 
 // poll the PWM outputs
 Timer polledPwmTimer;
-float polledPwmTotalTime, polledPwmRunCount;
+uint64_t polledPwmTotalTime, polledPwmRunCount;
 void pollPwmUpdates()
 {
     // if it's been at least 25ms since the last update, do another update
@@ -1210,7 +1317,7 @@ void pollPwmUpdates()
         
         // collect statistics
         IF_DIAG(
-          polledPwmTotalTime += t.read();
+          polledPwmTotalTime += t.read_us();
           polledPwmRunCount += 1;
         )
     }
@@ -1241,68 +1348,6 @@ public:
 // 74HC595 ports).
 static int numOutputs;
 static LwOut **lwPin;
-
-// LedWiz output states.
-//
-// The LedWiz protocol has two separate control axes for each output.
-// One axis is its on/off state; the other is its "profile" state, which
-// is either a fixed brightness or a blinking pattern for the light.
-// The two axes are independent.
-//
-// Even though the original LedWiz protocol can only access 32 ports, we
-// maintain LedWiz state for every port, even if we have more than 32.  Our
-// extended protocol allows the client to send LedWiz-style messages that
-// control any set of ports.  A replacement LEDWIZ.DLL can make a single
-// Pinscape unit look like multiple virtual LedWiz units to legacy clients,
-// allowing them to control all of our ports.  The clients will still be
-// using LedWiz-style states to control the ports, so we need to support
-// the LedWiz scheme with separate on/off and brightness control per port.
-
-// on/off state for each LedWiz output
-static uint8_t *wizOn;
-
-// LedWiz "Profile State" (the LedWiz brightness level or blink mode)
-// for each LedWiz output.  If the output was last updated through an 
-// LedWiz protocol message, it will have one of these values:
-//
-//   0-48 = fixed brightness 0% to 100%
-//   49  = fixed brightness 100% (equivalent to 48)
-//   129 = ramp up / ramp down
-//   130 = flash on / off
-//   131 = on / ramp down
-//   132 = ramp up / on
-//
-// (Note that value 49 isn't documented in the LedWiz spec, but real
-// LedWiz units treat it as equivalent to 48, and some PC software uses
-// it, so we need to accept it for compatibility.)
-static uint8_t *wizVal;
-
-// LedWiz flash speed.  This is a value from 1 to 7 giving the pulse
-// rate for lights in blinking states.  The LedWiz API doesn't document
-// what the numbers mean in real time units, but by observation, the
-// "speed" setting represents the period of the flash cycle in 0.25s
-// units, so speed 1 = 0.25 period = 4Hz, speed 7 = 1.75s period = 0.57Hz.
-// The period is the full cycle time of the flash waveform.
-//
-// Each bank of 32 lights has its independent own pulse rate, so we need 
-// one entry per bank.  Each bank has 32 outputs, so we need a total of
-// ceil(number_of_physical_outputs/32) entries.  Note that we could allocate 
-// this dynamically once we know the number of actual outputs, but the 
-// upper limit is low enough that it's more efficient to use a fixed array
-// at the maximum size.
-static const int MAX_LW_BANKS = (MAX_OUT_PORTS+31)/32;
-static uint8_t wizSpeed[MAX_LW_BANKS];
-
-// LedWiz cycle counters.  These must be updated before calling wizState().
-static uint8_t wizFlashCounter[MAX_LW_BANKS];
-
-
-// Current absolute brightness levels for all outputs.  These are
-// DOF brightness level value, from 0 for fully off to 255 for fully
-// on.  These are always used for extended ports (33 and above), and
-// are used for LedWiz ports (1-32) when we're in extended protocol
-// mode (i.e., ledWizMode == false).
-static uint8_t *outLevel;
 
 // create a single output pin
 LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
@@ -1478,50 +1523,11 @@ void initLwOut(Config &cfg)
         lwPin[i] = createLwPin(i, cfg.outPort[i], cfg);
 }
 
-// LedWiz/Extended protocol mode.
-//
-// We implement output port control using both the legacy LedWiz
-// protocol and a private extended protocol (which is 100% backwards
-// compatible with the LedWiz protocol: we recognize all valid legacy
-// protocol commands and handle them the same way a real LedWiz does).
-//
-// The legacy LedWiz protocol has only two message types, which
-// set output port states for a fixed set of 32 outputs.  One message
-// sets the "switch" state (on/off) of the ports, and the other sets
-// the "profile" state (brightness or flash pattern).  The two states
-// are stored independently, so turning a port off via the switch state
-// doesn't forget or change its brightness: turning it back on will
-// restore the same brightness or flash pattern as before.  The "profile"
-// state can be a brightness level from 1 to 49, or one of four flash
-// patterns, identified by a value from 129 to 132.  The flash pattern
-// and brightness levels are mutually exclusive, since the single
-// "profile" setting per port selects which is used.
-//
-// The extended protocol discards the flash pattern options and instead
-// uses the full byte range 0..255 for brightness levels.  Modern clients
-// based on DOF don't use the flash patterns, since DOF simply sends
-// the individual brightness updates when it wants to create fades or 
-// flashes.  What we gain by dropping the flash options is finer 
-// gradations of brightness - 256 levels rather than the LedWiz's 48.
-// This makes for noticeably smoother fades and a wider gamut for RGB
-// color mixing.  The extended protocol also drops the LedWiz notion of 
-// separate "switch" and "profile" settings, and instead combines the 
-// two into the single brightness setting, with brightness 0 meaning off.
-// This also is the way DOF thinks about the problem, so it's a better 
-// match to modern clients.  
-//
-// To reconcile the different approaches in the two protocols to setting 
-// output port states, we use a global mode: LedWiz mode or Pinscape mode.
-// Whenever an output port message is received, we switch this flag to the
-// mode of the message.  The assumption is that only one client at a time
-// will be manipulating output ports, and that any given client uses one
-// protocol exclusively.  There's no reason a client should mix the
-// protocols; if a client is aware of the Pinscape protocol at all, it
-// should use it exclusively.
-static uint8_t ledWizMode = true;
-
-// translate an LedWiz brightness level (0-49) to a DOF brightness
-// level (0-255)
+// Translate an LedWiz brightness level (0..49) to a DOF brightness
+// level (0..255).  Note that brightness level 49 isn't actually valid,
+// according to the LedWiz API documentation, but many clients use it
+// anyway, and the real LedWiz accepts it and seems to treat it as 
+// equivalent to 48.
 static const uint8_t lw_to_dof[] = {
        0,    5,   11,   16,   21,   27,   32,   37, 
       43,   48,   53,   58,   64,   69,   74,   80, 
@@ -1530,6 +1536,27 @@ static const uint8_t lw_to_dof[] = {
      170,  175,  181,  186,  191,  197,  202,  207, 
      213,  218,  223,  228,  234,  239,  244,  250, 
      255,  255
+};
+
+// Translate a DOF brightness level (0..255) to an LedWiz brightness
+// level (1..48)
+static const uint8_t dof_to_lw[] = {
+     1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  3,  3,
+     3,  3,  3,  4,  4,  4,  4,  4,  5,  5,  5,  5,  5,  5,  6,  6,
+     6,  6,  6,  7,  7,  7,  7,  7,  8,  8,  8,  8,  8,  8,  9,  9,
+     9,  9,  9, 10, 10, 10, 10, 10, 11, 11, 11, 11, 11, 11, 12, 12,
+    12, 12, 12, 13, 13, 13, 13, 13, 14, 14, 14, 14, 14, 14, 15, 15,
+    15, 15, 15, 16, 16, 16, 16, 16, 17, 17, 17, 17, 17, 18, 18, 18,
+    18, 18, 18, 19, 19, 19, 19, 19, 20, 20, 20, 20, 20, 21, 21, 21,
+    21, 21, 21, 22, 22, 22, 22, 22, 23, 23, 23, 23, 23, 24, 24, 24,
+    24, 24, 24, 25, 25, 25, 25, 25, 26, 26, 26, 26, 26, 27, 27, 27,
+    27, 27, 27, 28, 28, 28, 28, 28, 29, 29, 29, 29, 29, 30, 30, 30,
+    30, 30, 30, 31, 31, 31, 31, 31, 32, 32, 32, 32, 32, 33, 33, 33,
+    33, 33, 34, 34, 34, 34, 34, 34, 35, 35, 35, 35, 35, 36, 36, 36,
+    36, 36, 37, 37, 37, 37, 37, 37, 38, 38, 38, 38, 38, 39, 39, 39,
+    39, 39, 40, 40, 40, 40, 40, 40, 41, 41, 41, 41, 41, 42, 42, 42,
+    42, 42, 43, 43, 43, 43, 43, 43, 44, 44, 44, 44, 44, 45, 45, 45,
+    45, 45, 46, 46, 46, 46, 46, 46, 47, 47, 47, 47, 47, 48, 48, 48
 };
 
 // LedWiz flash cycle tables.  For efficiency, we use a lookup table
@@ -1618,255 +1645,168 @@ static const uint8_t wizFlashLookup[] = {
     0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
 
-// Translate an LedWiz output (ports 1-32) to a DOF brightness level.
-// Note: update all wizFlashCounter[] entries before calling this to
-// ensure that we're at the right place in each flash cycle.
-//
-// Important: the caller must update the wizFlashCounter[] array before
-// calling this.  We leave it to the caller to update the array rather
-// than doing it here, because each set of 32 outputs shares the same
-// counter entry.
-static uint8_t wizState(int idx)
-{
-    // If we're in extended protocol mode, ignore the LedWiz setting
-    // for the port and use the new protocol setting instead.
-    if (!ledWizMode)
-        return outLevel[idx];
-    
-    // if it's off, show at zero intensity
-    if (!wizOn[idx])
-        return 0;
-
-    // check the state
-    uint8_t val = wizVal[idx];
-    if (val <= 49)
-    {
-        // PWM brightness/intensity level.  Rescale from the LedWiz
-        // 0..48 integer range to our internal PwmOut 0..1 float range.
-        // Note that on the actual LedWiz, level 48 is actually about
-        // 98% on - contrary to the LedWiz documentation, level 49 is 
-        // the true 100% level.  (In the documentation, level 49 is
-        // simply not a valid setting.)  Even so, we treat level 48 as
-        // 100% on to match the documentation.  This won't be perfectly
-        // compatible with the actual LedWiz, but it makes for such a
-        // small difference in brightness (if the output device is an
-        // LED, say) that no one should notice.  It seems better to
-        // err in this direction, because while the difference in
-        // brightness when attached to an LED won't be noticeable, the
-        // difference in duty cycle when attached to something like a
-        // contactor *can* be noticeable - anything less than 100%
-        // can cause a contactor or relay to chatter.  There's almost
-        // never a situation where you'd want values other than 0% and
-        // 100% for a contactor or relay, so treating level 48 as 100%
-        // makes us work properly with software that's expecting the
-        // documented LedWiz behavior and therefore uses level 48 to
-        // turn a contactor or relay fully on.
-        //
-        // Note that value 49 is undefined in the LedWiz documentation,
-        // but real LedWiz units treat it as 100%, equivalent to 48.
-        // Some software on the PC side uses this, so we need to treat
-        // it the same way for compatibility.
-        return lw_to_dof[val];
-    }
-    else if (val >= 129 && val <= 132)
-    {
-        // flash mode - get the current counter for the bank, and look
-        // up the current position in the cycle for the mode
-        const int c = wizFlashCounter[idx/32];
-        return wizFlashLookup[((val-129)*256) + c];
-    }
-    else
-    {
-        // Other values are undefined in the LedWiz documentation.  Hosts
-        // *should* never send undefined values, since whatever behavior an
-        // LedWiz unit exhibits in response is accidental and could change
-        // in a future version.  We'll treat all undefined values as equivalent 
-        // to 48 (fully on).
-        return 255;
-    }
-}
-
 // LedWiz flash cycle timer.  This runs continuously.  On each update,
 // we use this to figure out where we are on the cycle for each bank.
 Timer wizCycleTimer;
 
-// Update the LedWiz flash cycle counters
-static void updateWizCycleCounts()
-{
-    // Update the LedWiz flash cycle positions.  Each cycle is 2/N
-    // seconds long, where N is the speed setting for the bank.  N
-    // ranges from 1 to 7.
-    //
-    // Note that we treat the microsecond clock as a 32-bit unsigned
-    // int.  This rolls over (i.e., exceeds 0xffffffff) every 71 minutes.
-    // We only care about the phase of the current LedWiz cycle, so we
-    // don't actually care about the absolute time - we only care about
-    // the time relative to some arbitrary starting point.  Whenever the
-    // clock rolls over, it effectively sets a new starting point; since
-    // we only need an arbitrary starting point, that's largely okay.
-    // The one drawback is that these epoch resets can obviously occur
-    // in the middle of a cycle.  When this occurs, the update just before
-    // the rollover and the update just after the rollover will use
-    // different epochs, so their phases might be misaligned.  That could
-    // cause a sudden jump in brightness between the two updates and a 
-    // shorter-than-usual or longer-than-usual time for that cycle.  To
-    // avoid that, we'd have to use a higher-precision clock (say, a 64-bit
-    // microsecond counter) and do all of the calculations at the higher
-    // precision.  Given that the rollover only happens once every 71
-    // minutes, and that the only problem it causes is a momentary glitch
-    // in the flash pattern, I think it's an equitable trade for the slightly
-    // faster processing in the 32-bit domain.  This routine is called 
-    // frequently from the main loop, so it's critial to minimize execution
-    // time.
-    uint32_t tcur = wizCycleTimer.read_us();
-    for (int i = 0 ; i < MAX_LW_BANKS ; ++i)
-    {
-        // Figure the point in the cycle.  The LedWiz "speed" setting is
-        // waveform period in 0.25s units.  (There's no official LedWiz
-        // documentation of what the speed means in real units, so this is
-        // based on observations.)
-        //
-        // We do this calculation frequently from the main loop, since we
-        // have to do it every time we update the output flash cycles,
-        // which in turn has to be done frequently to make the cycles
-        // appear smooth to users.  So we're going to get a bit tricky
-        // with integer arithmetic to streamline it.  The goal is to find
-        // the current phase position in the output waveform; in abstract
-        // terms, we're trying to find the angle, 0 to 2*pi, in the current
-        // cycle.  Floating point arithmetic is expensive on the KL25Z
-        // since it's all done in software, so we'll do everything in
-        // integers.  To do that, rather than trying to find the phase
-        // angle as a continuous quantity, we'll quantize it, into 256
-        // quanta per cycle.  Each quantum is 1/256 of the cycle length,
-        // so for a 1-second cycle (LedWiz speed 4), each quantum is
-        // 1/256 of second or about 3.9ms.  To find the phase, then, we
-        // simply take the current time (as an elapsed time from an
-        // arbitrary zero point aka epoch), quantize it into 3.9ms chunks,
-        // and calculate the remainder mod 256.  Remainder mod 256 is a
-        // fast operation since it's equivalent to bit masking with 0xFF.
-        // (That's why we chose a power of two for the number of quanta
-        // per cycle.)  Our timer gives us microseconds since it started,
-        // so to convert to quanta, we divide by microseconds per quantum;
-        // in the case of speed 1 with its 3.906ms quanta, we divide by 
-        // 3906.  But we can take this one step further, getting really
-        // tricky now.  Dividing by N is the same as muliplying by X/N
-        // for some X, and then dividing the result by X.  Why, you ask,
-        // would we want to do two operations where we could do one?
-        // Because if we're clever, the two operations will be much 
-        // faster the the one.  The M0+ has no DIVIDE instruction, so
-        // integer division has to be done in software, at a cost of about
-        // 100 clocks per operation.  The KL25Z M0+ has a one-cycle
-        // hardware multiplier, though.  But doesn't that leave that
-        // second division still to do?  Yes, but if we choose a power
-        // of 2 for X, we can do that division with a bit shift, another
-        // single-cycle operation.  So we can do the division in two
-        // cycles by breaking it up into a multiply + shift.
-        //
-        // Each entry in this array represents X/N for the corresponding
-        // LedWiz speed, where N is the number of time quanta per cycle
-        // and X is 2^24.  The time quanta are chosen such that 256
-        // quanta add up to approximately (LedWiz speed setting * 0.25s).
-        // 
-        // Note that the calculation has an implicit bit mask (result & 0xFF)
-        // to get the final result mod 256.  But we don't have to actually
-        // do that work because we're using 32-bit ints and a 2^24 fixed
-        // point base (X in the narrative above).  The final shift right by
-        // 24 bits to divide out the base will leave us with only 8 bits in
-        // the result, since we started with 32.
-        static const uint32_t inv_us_per_quantum[] = { // indexed by LedWiz speed
-            0, 17172, 8590, 5726, 4295, 3436, 2863, 2454
-        };
-        wizFlashCounter[i] = ((tcur * inv_us_per_quantum[wizSpeed[i]]) >> 24);
-    }
-}
+// timing statistics for wizPulse()
+uint64_t wizPulseTotalTime, wizPulseRunCount;
 
-// LedWiz flash timer pulse.  The main loop calls this periodically
-// to update outputs set to LedWiz flash modes.
-Timer wizPulseTimer;
-float wizPulseTotalTime, wizPulseRunCount;
-const uint32_t WIZ_INTERVAL_US = 8000;
+// LedWiz flash timer pulse.  The main loop calls this on each cycle
+// to update outputs using LedWiz flash modes.  We do one bank of 32
+// outputs on each cycle.
 static void wizPulse()
 {
-    // if it's been long enough, update the LedWiz outputs
-    if (wizPulseTimer.read_us() >= WIZ_INTERVAL_US)
+    // current bank
+    static int wizPulseBank = 0;
+
+    // start a timer for statistics collection
+    IF_DIAG(
+      Timer t;
+      t.start();
+    )
+
+    // Update the current bank's cycle counter: figure the current
+    // phase of the LedWiz pulse cycle for this bank.
+    //
+    // The LedWiz speed setting gives the flash period in 0.25s units
+    // (speed 1 is a flash period of .25s, speed 7 is a period of 1.75s).
+    //
+    // What we're after here is the "phase", which is to say the point
+    // in the current cycle.  If we assume that the cycle has been running
+    // continuously since some arbitrary time zero in the past, we can
+    // figure where we are in the current cycle by dividing the time since
+    // that zero by the cycle period and taking the remainder.  E.g., if
+    // the cycle time is 5 seconds, and the time since t-zero is 17 seconds,
+    // we divide 17 by 5 to get a remainder of 2.  That says we're 2 seconds
+    // into the current 5-second cycle, or 2/5 of the way through the
+    // current cycle.
+    //
+    // We do this calculation on every iteration of the main loop, so we 
+    // want it to be very fast.  To streamline it, we'll use some tricky
+    // integer arithmetic.  The result will be the same as the straightforward
+    // remainder and fraction calculation we just explained, but we'll get
+    // there by less-than-obvious means.
+    //
+    // Rather than finding the phase as a continuous quantity or floating
+    // point number, we'll quantize it.  We'll divide each cycle into 256 
+    // time units, or quanta.  Each quantum is 1/256 of the cycle length,
+    // so for a 1-second cycle (LedWiz speed 4), each quantum is 1/256 of 
+    // a second, or about 3.9ms.  If we express the time since t-zero in
+    // these units, the time period of one cycle is exactly 256 units, so
+    // we can calculate our point in the cycle by taking the remainder of
+    // the time (in our funny units) divided by 256.  The special thing
+    // about making the cycle time equal to 256 units is that "x % 256" 
+    // is exactly the same as "x & 255", which is a much faster operation
+    // than division on ARM M0+: this CPU has no hardware DIVIDE operation,
+    // so an integer division takes about 5us.  The bit mask operation, in 
+    // contrast, takes only about 60ns - about 100x faster.  5us doesn't
+    // sound like much, but we do this on every main loop, so every little
+    // bit counts.  
+    //
+    // The snag is that our system timer gives us the elapsed time in
+    // microseconds.  We still need to convert this to our special quanta
+    // of 256 units per cycle.  The straightforward way to do that is by
+    // dividing by (microseconds per quantum).  E.g., for LedWiz speed 4,
+    // we decided that our quantum was 1/256 of a second, or 3906us, so
+    // dividing the current system time in microseconds by 3906 will give
+    // us the time in our quantum units.  But now we've just substituted
+    // one division for another!
+    //
+    // This is where our really tricky integer math comes in.  Dividing
+    // by X is the same as multiplying by 1/X.  In integer math, 1/3906
+    // is zero, so that won't work.  But we can get around that by doing
+    // the integer math as "fixed point" arithmetic instead.  It's still
+    // actually carried out as integer operations, but we'll scale our
+    // integers by a scaling factor, then take out the scaling factor
+    // later to get the final result.  The scaling factor we'll use is
+    // 2^24.  So we're going to calculate (time * 2^24/3906), then divide
+    // the result by 2^24 to get the final answer.  I know it seems like 
+    // we're substituting one division for another yet again, but this 
+    // time's the charm, because dividing by 2^24 is a bit shift operation,
+    // which is another single-cycle operation on M0+.  You might also
+    // wonder how all these tricks don't cause overflows or underflows
+    // or what not.  Well, the multiply by 2^24/3906 will cause an
+    // overflow, but we don't care, because the overflow will all be in
+    // the high-order bits that we're going to discard in the final 
+    // remainder calculation anyway.
+    //
+    // Each entry in the array below represents 2^24/N for the corresponding
+    // LedWiz speed, where N is the number of time quanta per cycle at that
+    // speed.  The time quanta are chosen such that 256 quanta add up to 
+    // approximately (LedWiz speed setting * 0.25s).
+    // 
+    // Note that the calculation has an implicit bit mask (result & 0xFF)
+    // to get the final result mod 256.  But we don't have to actually
+    // do that work because we're using 32-bit ints and a 2^24 fixed
+    // point base (X in the narrative above).  The final shift right by
+    // 24 bits to divide out the base will leave us with only 8 bits in
+    // the result, since we started with 32.
+    static const uint32_t inv_us_per_quantum[] = { // indexed by LedWiz speed
+        0, 17172, 8590, 5726, 4295, 3436, 2863, 2454
+    };
+    int counter = ((wizCycleTimer.read_us() * inv_us_per_quantum[wizSpeed[wizPulseBank]]) >> 24);
+        
+    // get the range of 32 output sin this bank
+    int fromPort = wizPulseBank*32;
+    int toPort = fromPort+32;
+    if (toPort > numOutputs)
+        toPort = numOutputs;
+        
+    // update all outputs set to flashing values
+    for (int i = fromPort ; i < toPort ; ++i)
     {
-        // reset the timer for the next round
-        wizPulseTimer.reset();
-
-        // if we're in LedWiz mode, update flashing outputs
-        if (ledWizMode)
+        // Update the port only if the LedWiz SBA switch for the port is on
+        // (wizOn[i]) AND the port is a PBA flash mode in the range 129..132.
+        // These modes and only these modes have the high bit (0x80) set, so
+        // we can test for them simply by testing the high bit.
+        if (wizOn[i])
         {
-            // start a timer for statistics collection
-            IF_DIAG(
-              Timer t;
-              t.start();
-            )
-            
-            // update the cycle counters
-            updateWizCycleCounts();
-
-            // update all outputs set to flashing values
-            for (int i = numOutputs ; i > 0 ; )
+            uint8_t val = wizVal[i];
+            if ((val & 0x80) != 0)
             {
-                if (wizOn[--i])
-                {
-                    // If the "brightness" is in the range 129..132, it's a 
-                    // flash mode.  Note that we only have to check the high
-                    // bit here, because the protocol message handler validates
-                    // the wizVal[] entries when storing them: the only valid
-                    // values with the high bit set are 129..132.  Skipping
-                    // validation here saves us a tiny bit of work, which we
-                    // care about because we have to loop over all outputs
-                    // here, and we invoke this frequently from the main loop.
-                    const uint8_t val = wizVal[i];
-                    if ((val & 0x80) != 0)
-                    {
-                        // get the current cycle time, then look up the 
-                        // value for the mode at the cycle time
-                        const int c = wizFlashCounter[i >> 5];
-                        lwPin[i]->set(wizFlashLookup[((val-129) << 8) + c]);
-                    }
-                }
+                // ook up the value for the mode at the cycle time
+                lwPin[i]->set(outLevel[i] = wizFlashLookup[((val-129) << 8) + counter]);
             }
-            
-            // flush changes to 74HC595 chips, if attached
-            if (hc595 != 0)
-                hc595->update();
-
-            // collect timing statistics
-            IF_DIAG(
-              wizPulseTotalTime += t.read();
-              wizPulseRunCount += 1;
-            )
         }
-    }    
-}
-
-// Update the physical outputs connected to the LedWiz ports.  This is 
-// called after any update from an LedWiz protocol message.
-static void updateWizOuts()
-{
-    // update the cycle counters
-    updateWizCycleCounts();
-    
-    // update each output
-    for (int i = 0 ; i < numOutputs ; ++i)
-        lwPin[i]->set(wizState(i));
-    
+    }
+        
     // flush changes to 74HC595 chips, if attached
     if (hc595 != 0)
         hc595->update();
+        
+    // switch to the next bank
+    if (++wizPulseBank >= MAX_LW_BANKS)
+        wizPulseBank = 0;
+
+    // collect timing statistics
+    IF_DIAG(
+      wizPulseTotalTime += t.read_us();
+      wizPulseRunCount += 1;
+    )
 }
 
-// Update all physical outputs.  This is called after a change to a global
-// setting that affects all outputs, such as engaging or canceling Night Mode.
-static void updateAllOuts()
+// Update a port to reflect its new LedWiz SBA+PBA setting.
+static void updateLwPort(int port)
 {
-    // update LedWiz states
-    updateWizOuts();
+    // check if the SBA switch is on or off
+    if (wizOn[port])
+    {
+        // It's on.  If the port is a valid static brightness level,
+        // set the output port to match.  Otherwise leave it as is:
+        // if it's a flashing mode, the flash mode pulse will update
+        // it on the next cycle.
+        int val = wizVal[port];
+        if (val <= 49)
+            lwPin[port]->set(outLevel[port] = lw_to_dof[val]);
+    }
+    else
+    {
+        // the port is off - set absolute brightness zero
+        lwPin[port]->set(outLevel[port] = 0);
+    }
 }
 
-//
 // Turn off all outputs and restore everything to the default LedWiz
 // state.  This sets outputs #1-32 to LedWiz profile value 48 (full
 // brightness) and switch state Off, sets all extended outputs (#33
@@ -1888,9 +1828,6 @@ void allOutputsOff()
     for (int i = 0 ; i < countof(wizSpeed) ; ++i)
         wizSpeed[i] = 2;
         
-    // revert to LedWiz mode for output controls
-    ledWizMode = true;
-    
     // flush changes to hc595, if applicable
     if (hc595 != 0)
         hc595->update();
@@ -1902,10 +1839,7 @@ void allOutputsOff()
 // address any port group.
 void sba_sbx(int portGroup, const uint8_t *data)
 {
-    // switch to LedWiz protocol mode
-    ledWizMode = true;
-    
-    // update all on/off states
+    // update all on/off states in the group
     for (int i = 0, bit = 1, imsg = 1, port = portGroup*32 ; 
          i < 32 && port < numOutputs ; 
          ++i, bit <<= 1, ++port)
@@ -1917,25 +1851,26 @@ void sba_sbx(int portGroup, const uint8_t *data)
         }
         
         // set the on/off state
-        wizOn[port] = ((data[imsg] & bit) != 0);
+        bool on = wizOn[port] = ((data[imsg] & bit) != 0);
+        
+        // set the output port brightness to match the new setting
+        updateLwPort(port);
     }
     
     // set the flash speed for the port group
     if (portGroup < countof(wizSpeed))
         wizSpeed[portGroup] = (data[5] < 1 ? 1 : data[5] > 7 ? 7 : data[5]);
 
-    // update the physical outputs with the new LedWiz states
-    updateWizOuts();
+    // update 74HC959 outputs
+    if (hc595 != 0)
+        hc595->update();
 }
 
 // Carry out a PBA or PBX message.
 void pba_pbx(int basePort, const uint8_t *data)
 {
-    // switch LedWiz protocol mode
-    ledWizMode = true;
-
     // update each wizVal entry from the brightness data
-    for (int i = 0, iwiz = basePort ; i < 8 && iwiz < numOutputs ; ++i, ++iwiz)
+    for (int i = 0, port = basePort ; i < 8 && port < numOutputs ; ++i, ++port)
     {
         // get the value
         uint8_t v = data[i];
@@ -1950,11 +1885,15 @@ void pba_pbx(int basePort, const uint8_t *data)
             v = 48;
         
         // store it
-        wizVal[iwiz] = v;
+        wizVal[port] = v;
+        
+        // update the port
+        updateLwPort(port);
     }
 
-    // update the physical outputs
-    updateWizOuts();
+    // update 74HC595 outputs
+    if (hc595 != 0)
+        hc595->update();
 }
 
 
@@ -2980,6 +2919,11 @@ public:
         tInt_.start();
     }
     
+    void disableInterrupts()
+    {
+        mma_.clearInterruptMode();
+    }
+    
     void get(int &x, int &y) 
     {
          // disable interrupts while manipulating the shared data
@@ -3054,13 +2998,13 @@ public:
              // will clear up this overrun condition and allow normal interrupt
              // generation to continue.
              //
-             // Note that this stuck condition *shouldn't* ever occur - if it does,
-             // it means that we're spending a long period with interrupts disabled
-             // (either in a critical section or in another interrupt handler), which
-             // will likely cause other worse problems beyond the sticky accelerometer.
-             // Even so, it's easy to detect and correct, so we'll do so for the sake
-             // of making the system more fault-tolerant.
-             if (tInt_.read() > 1.0f)
+             // Note that this stuck condition *shouldn't* ever occur, because if only
+             // happens if we're spending a long period with interrupts disabled (in
+             // a critical section or in another interrupt handler), which will likely
+             // cause other, worse problems beyond the sticky accelerometer.  Even so, 
+             // it's easy to detect and correct, so we'll do so for the sake of making 
+             // the system a little more fault-tolerant.
+             if (tInt_.read_us() > 1000000)
              {
                 float x, y, z;
                 mma_.getAccXYZ(x, y, z);
@@ -3165,7 +3109,6 @@ private:
     InterruptIn intIn_;
 };
 
-
 // ---------------------------------------------------------------------------
 //
 // Clear the I2C bus for the MMA8451Q.  This seems necessary some of the time
@@ -3197,7 +3140,8 @@ void clear_i2c()
         wait_us(20);
     }
 }
- 
+
+
 // ---------------------------------------------------------------------------
 //
 // Simple binary (on/off) input debouncer.  Requires an input to be stable 
@@ -3544,6 +3488,17 @@ NVM nvm;
 // flash memory controller interface
 FreescaleIAP iap;
 
+// NVM structure in memory.  This has to be aliend on a sector boundary,
+// since we have to be able to erase its page(s) in order to write it.
+// Further, we have to ensure that nothing else occupies any space within
+// the same pages, since we'll erase that entire space whenever we write.
+static const union
+{
+    NVM nvm;      // the NVM structure
+    char guard[((sizeof(NVM) + SECTOR_SIZE - 1)/SECTOR_SIZE)*SECTOR_SIZE];
+}
+flash_nvm_memory __attribute__ ((aligned(SECTOR_SIZE))) = { };
+
 // figure the flash address as a pointer along with the number of sectors
 // required to store the structure
 NVM *configFlashAddr(int &addr, int &numSectors)
@@ -3553,7 +3508,7 @@ NVM *configFlashAddr(int &addr, int &numSectors)
 
     // figure the address - this is the highest flash address where the
     // structure will fit with the start aligned on a sector boundary
-    addr = iap.flash_size() - (numSectors * SECTOR_SIZE);
+    addr = (int)&flash_nvm_memory;
     
     // return the address as a pointer
     return (NVM *)addr;
@@ -3566,8 +3521,11 @@ NVM *configFlashAddr()
     return configFlashAddr(addr, numSectors);
 }
 
-// Load the config from flash
-void loadConfigFromFlash()
+// Load the config from flash.  Returns true if a valid non-default
+// configuration was loaded, false if we not.  If we return false,
+// we load the factory defaults, so the configuration object is valid 
+// in either case.
+bool loadConfigFromFlash()
 {
     // We want to use the KL25Z's on-board flash to store our configuration
     // data persistently, so that we can restore it across power cycles.
@@ -3590,23 +3548,141 @@ void loadConfigFromFlash()
     NVM *flash = configFlashAddr();
     
     // if the flash is valid, load it; otherwise initialize to defaults
-    if (flash->valid()) 
+    bool nvm_valid = flash->valid();
+    if (nvm_valid) 
     {
         // flash is valid - load it into the RAM copy of the structure
         memcpy(&nvm, flash, sizeof(NVM));
     }
     else 
     {
-        // flash is invalid - load factory settings nito RAM structure
+        // flash is invalid - load factory settings into RAM structure
         cfg.setFactoryDefaults();
     }
+    
+    // tell the caller what happened
+    return nvm_valid;
 }
 
 void saveConfigToFlash()
 {
+    // make sure the plunger sensor isn't busy
+    waitPlungerIdle();
+    
+    // get the config block location in the flash memory
     int addr, sectors;
     configFlashAddr(addr, sectors);
-    nvm.save(iap, addr);
+    
+    // loop until we save it successfully
+    for (int i = 0 ; i < 5 ; ++i)
+    {
+        // show cyan while writing
+        diagLED(0, 1, 1);
+        
+        // save the data
+        nvm.save(iap, addr);
+    
+        // diagnostic lights off
+        diagLED(0, 0, 0);
+        
+        // verify the data
+        if (nvm.verify(addr))
+        {
+            // show a diagnostic success flash
+            for (int j = 0 ; j < 3 ; ++j)
+            {
+                diagLED(0, 1, 1);
+                wait_us(50000);
+                diagLED(0, 0, 0);
+                wait_us(50000);
+            }
+            
+            // success - no need to write again
+            break;
+        }
+        else
+        {            
+            // Write failed.  For diagnostic purposes, flash red a few times.
+            // Then go back through the loop to make another attempt at the
+            // write.
+            for (int j = 0 ; j < 5 ; ++j)
+            {
+                diagLED(1, 0, 0);
+                wait_us(50000);
+                diagLED(0, 0, 0);
+                wait_us(50000);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//
+// Host-loaded configuration.  The Flash NVM block above is designed to be
+// stored from within the firmware; in contrast, the host-loaded config is
+// stored by the host, by patching the firwmare binary (.bin) file before
+// downloading it to the device.
+//
+// Ideally, we'd use the host-loaded memory for all configuration updates,
+// because the KL25Z doesn't seem to be 100% reliable writing flash itself.
+// There seems to be a chance of memory bus contention while a write is in 
+// progress, which can either corrupt the write or cause the CPU to lock up
+// before the write is completed.  It seems more reliable to program the
+// flash externally, via the OpenSDA connection.  Unfortunately, none of
+// the available OpenSDA versions are capable of programming specific flash
+// sectors; they always erase the entire flash memory space.  We *could*
+// make the Windows config program simply re-download the entire firmware
+// for every configuration update, but I'd rather not because of the extra
+// wear this would put on the flash.  So, as a compromise, we'll use the
+// host-loaded config whenever the user explicitly updates the firmware,
+// but we'll use the on-board writer when only making a config change.
+//
+// The memory here is stored using the same format as the USB "Set Config
+// Variable" command.  These messages are 8 bytes long and start with a
+// byte value 66, followed by the variable ID, followed by the variable
+// value data in a format defined separately for each variable.  To load
+// the data, we'll start at the first byte after the signature, and 
+// interpret each 8-byte block as a type 66 message.  If the first byte
+// of a block is not 66, we'll take it as the end of the data.
+//
+// We provide a block of storage here big enough for 1,024 variables.
+// The header consists of a 30-byte signature followed by two bytes giving
+// the available space in the area, in this case 8192 == 0x0200.  The
+// length is little-endian.  Note that the linker will implicitly zero
+// the rest of the block, so if the host doesn't populate it, we'll see
+// that it's empty by virtue of not containing the required '66' byte
+// prefix for the first 8-byte variable block.
+static const uint8_t hostLoadedConfig[8192+32]
+    __attribute__ ((aligned(SECTOR_SIZE))) =
+    "///Pinscape.HostLoadedConfig//\0\040";   // 30 byte signature + 2 byte length
+
+// Get a pointer to the first byte of the configuration data
+const uint8_t *getHostLoadedConfigData()
+{
+    // the first configuration variable byte immediately follows the
+    // 32-byte signature header
+    return hostLoadedConfig + 32;
+};
+
+// forward reference to config var store function
+void configVarSet(const uint8_t *);
+
+// Load the host-loaded configuration data into the active (RAM)
+// configuration object.
+void loadHostLoadedConfig()
+{
+    // Start at the first configuration variable.  Each variable
+    // block is in the format of a Set Config Variable command in
+    // the USB protocol, so each block starts with a byte value of
+    // 66 and is 8 bytes long.  Continue as long as we find valid
+    // variable blocks, or reach end end of the block.
+    const uint8_t *start = getHostLoadedConfigData();
+    const uint8_t *end = hostLoadedConfig + sizeof(hostLoadedConfig);
+    for (const uint8_t *p = getHostLoadedConfigData() ; start < end && *p == 66 ; p += 8)
+    {
+        // load this variable
+        configVarSet(p);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3635,9 +3711,16 @@ static void setNightMode(bool on)
     int port = int(cfg.nightMode.port) - 1;
     if (port >= 0 && port < numOutputs)
         lwPin[port]->set(nightMode ? 255 : 0);
-
-    // update all outputs for the mode change
-    updateAllOuts();
+        
+    // Reset all outputs at their current value, so that the underlying
+    // physical outputs get turned on or off as appropriate for the night
+    // mode change.
+    for (int i = 0 ; i < numOutputs ; ++i)
+        lwPin[i]->set(outLevel[i]);
+        
+    // update 74HC595 outputs
+    if (hc595 != 0)
+        hc595->update();
 }
 
 // Toggle night mode
@@ -3654,6 +3737,12 @@ static void toggleNightMode()
 
 // the plunger sensor interface object
 PlungerSensor *plungerSensor = 0;
+
+// wait for the plunger sensor to complete any outstanding read
+static void waitPlungerIdle(void)
+{
+    while (!plungerSensor->ready()) { }
+}
 
 // Create the plunger sensor based on the current configuration.  If 
 // there's already a sensor object, we'll delete it.
@@ -3782,13 +3871,17 @@ public:
         // initialize the filter
         initFilter();
     }
-
+    
     // Collect a reading from the plunger sensor.  The main loop calls
     // this frequently to read the current raw position data from the
     // sensor.  We analyze the raw data to produce the calibrated
     // position that we report to the PC via the joystick interface.
     void read()
     {
+        // if the sensor is busy, skip the reading on this round
+        if (!plungerSensor->ready())
+            return;
+        
         // Read a sample from the sensor
         PlungerReading r;
         if (plungerSensor->read(r))
@@ -3825,6 +3918,9 @@ public:
                     cfg.plunger.cal.max = r.pos;
                 if (r.pos < cfg.plunger.cal.min)
                     cfg.plunger.cal.min = r.pos;
+                    
+                // update our cached calibration data
+                onUpdateCal();
 
                 // If we're in calibration state 0, we're waiting for the
                 // plunger to come to rest at the park position so that we
@@ -3843,6 +3939,7 @@ public:
                             
                             // update the zero position from the new average
                             cfg.plunger.cal.zero = uint16_t(calZeroPosSum / calZeroPosN);
+                            onUpdateCal();
                             
                             // switch to calibration state 1 - at rest
                             calState = 1;
@@ -3866,9 +3963,7 @@ public:
             {
                 // Not in calibration mode.  Apply the existing calibration and 
                 // rescale to the joystick range.
-                r.pos = int(
-                    (long(r.pos - cfg.plunger.cal.zero) * JOYMAX)
-                    / (cfg.plunger.cal.max - cfg.plunger.cal.zero));
+                r.pos = applyCal(r.pos);
                     
                 // limit the result to the valid joystick range
                 if (r.pos > JOYMAX)
@@ -3902,12 +3997,23 @@ public:
             // since we only use the velocity for comparison purposes,
             // to detect acceleration trends.  We therefore save ourselves
             // a little CPU time by using the natural units of our inputs.
+            //
+            // We don't care about the absolute velocity; this is a purely
+            // relative calculation.  So to speed things up, calculate it
+            // in the integer domain, using a fixed-point representation
+            // with a 64K scale.  In other words, with the stored values
+            // shifted left 16 bits from the actual values: the value 1
+            // is stored as 1<<16.  The position readings are in the range
+            // -JOYMAX..JOYMAX, which fits in 16 bits, and the time 
+            // differences will generally be on the scale of a few 
+            // milliseconds = thousands of microseconds.  So the velocity
+            // figures will fit nicely into a 32-bit fixed point value with
+            // a 64K scale factor.
             const PlungerReading &prv2 = nthHist(1);
-            float v = float(r.pos - prv2.pos)/float(r.t - prv2.t);
+            int v = ((r.pos - prv2.pos) << 16)/(r.t - prv2.t);
             
             // presume we'll report the latest instantaneous reading
             z = r.pos;
-            vz = v;
             
             // Check firing events
             switch (firing)
@@ -4104,8 +4210,9 @@ public:
             vprv = v;
             
             // add the new reading to the history
-            hist[histIdx++] = r;
-            histIdx %= countof(hist);
+            hist[histIdx] = r;
+            if (++histIdx > countof(hist))
+                histIdx = 0;
             
             // apply the post-processing filter
             zf = applyPostFilter();
@@ -4119,9 +4226,6 @@ public:
         return zf;
     }
         
-    // Get the current velocity (joystick distance units per microsecond)
-    float getVelocity() const { return vz; }
-    
     // get the timestamp of the current joystick report (microseconds)
     uint32_t getTimestamp() const { return nthHist(0).t; }
 
@@ -4148,6 +4252,7 @@ public:
                 // got a reading - use it as the initial zero point
                 applyPreFilter(r);
                 cfg.plunger.cal.zero = r.pos;
+                onUpdateCal();
                 
                 // use it as the starting point for the settling watch
                 calZeroStart = r;
@@ -4156,6 +4261,7 @@ public:
             {
                 // no reading available - use the default 1/6 position
                 cfg.plunger.cal.zero = 0xffff/6;
+                onUpdateCal();
                 
                 // we don't have a starting point for the setting watch
                 calZeroStart.pos = -65535;
@@ -4173,6 +4279,7 @@ public:
                 // bad settings - reset to defaults
                 cfg.plunger.cal.max = 0xffff;
                 cfg.plunger.cal.zero = 0xffff/6;
+                onUpdateCal();
             }
         }
             
@@ -4180,9 +4287,33 @@ public:
         plungerCalMode = f; 
     }
     
+    // Cached inverse of the calibration range.  This is for calculating
+    // the calibrated plunger position given a raw sensor reading.  The
+    // cached inverse is calculated as
+    //
+    //    64K * JOYMAX / (cfg.plunger.cal.max - cfg.plunger.cal.zero)
+    //
+    // To convert a raw sensor reading to a calibrated position, calculate
+    //
+    //    ((reading - cfg.plunger.cal.zero)*invCalRange) >> 16
+    //
+    // That yields the calibration result without performing a division.
+    int invCalRange;
+    
+    // apply the calibration range to a reading
+    inline int applyCal(int reading)
+    {
+        return ((reading - cfg.plunger.cal.zero)*invCalRange) >> 16;
+    }
+    
+    void onUpdateCal()
+    {
+        invCalRange = (JOYMAX << 16)/(cfg.plunger.cal.max - cfg.plunger.cal.zero);
+    }
+
     // is a firing event in progress?
     bool isFiring() { return firing == 3; }
-
+    
 private:
 
     // Plunger data filtering mode:  optionally apply filtering to the raw 
@@ -4443,7 +4574,7 @@ private:
     }
 
     // velocity at previous reading, and the one before that
-    float vprv, vprv2;
+    int vprv, vprv2;
     
     // Circular buffer of recent readings.  We keep a short history
     // of readings to analyze during firing events.  We can only identify
@@ -4515,9 +4646,6 @@ private:
     // (in joystick distance units)
     int z;
     
-    // velocity of this reading (joystick distance units per microsecond)
-    float vz;
-
     // next filtered Z value to report to the joystick interface
     int zf;    
 };
@@ -4766,7 +4894,7 @@ int calBtnLit = false;
 #define v_byte_ro(val, ofs) // ignore read-only variables on SET
 #define v_ui32_ro(val, ofs) // ignore read-only variables on SET
 #define VAR_MODE_SET 1      // we're in SET mode
-#define v_func configVarSet
+#define v_func configVarSet(const uint8_t *data)
 #include "cfgVarMsgMap.h"
 
 // redefine everything for the SET messages
@@ -4787,7 +4915,7 @@ int calBtnLit = false;
 #define v_byte_ro(val, ofs) data[ofs] = (val)
 #define v_ui32_ro(val, ofs) ui32Wire(data+(ofs), val);
 #define VAR_MODE_SET 0      // we're in GET mode
-#define v_func  configVarGet
+#define v_func  configVarGet(uint8_t *data)
 #include "cfgVarMsgMap.h"
 
 
@@ -5036,9 +5164,6 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         // outputs above the LedWiz range, PBA/SBA messages can't
         // address those ports anyway.
         
-        // flag that we're in extended protocol mode
-        ledWizMode = true;
-        
         // figure the block of 7 ports covered in the message
         int i0 = (data[0] - 200)*7;
         int i1 = i0 + 7 < numOutputs ? i0 + 7 : numOutputs; 
@@ -5053,8 +5178,22 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             // set the port's LedWiz state to the nearest equivalent, so
             // that it maintains its current setting if we switch back to
             // LedWiz mode on a future update
-            wizOn[i] = (b != 0);
-            wizVal[i] = (b*48)/255;
+            if (b != 0)
+            {
+                // Non-zero brightness - set the SBA switch on, and set the
+                // PBA brightness to the DOF brightness rescaled to the 1..48
+                // LedWiz range.  If the port is subsequently addressed by an
+                // LedWiz command, this will carry the current DOF setting
+                // forward unchanged.
+                wizOn[i] = 1;
+                wizVal[i] = dof_to_lw[b];
+            }
+            else
+            {
+                // Zero brightness.  Set the SBA switch off, and leave the
+                // PBA brightness the same as it was.
+                wizOn[i] = 0;
+            }
             
             // set the output
             lwPin[i]->set(b);
@@ -5111,12 +5250,40 @@ int main(void)
     //    -> no longer very useful, since we use our own custom malloc/new allocator (see xmalloc() above)
     // {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);} 
     
-    // clear the I2C bus (for the accelerometer)
+    // clear the I2C connection
     clear_i2c();
 
-    // load the saved configuration (or set factory defaults if no flash
-    // configuration has ever been saved)
-    loadConfigFromFlash();
+    // Load the saved configuration.  There are two sources of the
+    // configuration data:
+    //
+    // - Look for an NVM (flash non-volatile memory) configuration.
+    // If this is valid, we'll load it.  The NVM is config data that can 
+    // be updated dynamically by the host via USB commands and then stored 
+    // in the flash by the firmware itself.  If this exists, it supersedes 
+    // any of the other settings stores.  The Windows config tool uses this
+    // to store user settings updates.
+    //
+    // - If there's no NVM, we'll load the factory defaults, then we'll
+    // load any settings stored in the host-loaded configuration.  The
+    // host can patch a set of configuration variable settings into the
+    // .bin file when loading new firmware, in the host-loaded config
+    // area that we reserve for this purpose.  This allows the host to
+    // restore a configuration at the same time it installs firmware,
+    // without a separate download of the config data.
+    //
+    // The NVM supersedes the host-loaded config, since it can be updated
+    // between firmware updated and is thus presumably more recent if it's
+    // present.  (Note that the NVM and host-loaded config are both in    
+    // flash, so in principle we could just have a single NVM store that
+    // the host patches.  The only reason we don't is that the NVM store
+    // is an image of our in-memory config structure, which is a native C
+    // struct, and we don't want the host to have to know the details of 
+    // its byte layout, for obvious reasons.  The host-loaded config, in
+    // contrast, uses the wire protocol format, which has a well-defined
+    // byte layout that's independent of the firmware version or the
+    // details of how the C compiler arranges the struct memory.)
+    if (!loadConfigFromFlash())
+        loadHostLoadedConfig();
     
     // initialize the diagnostic LEDs
     initDiagLEDs(cfg);
@@ -5127,6 +5294,9 @@ int main(void)
 
     // create the plunger sensor interface
     createPlunger();
+    
+    // update the plunger reader's cached calibration data
+    plungerReader.onUpdateCal();
 
     // set up the TLC5940 interface, if these chips are present
     init_tlc5940(cfg);
@@ -5249,7 +5419,7 @@ int main(void)
     
     // create the accelerometer object
     Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, MMA8451_INT_PIN);
-   
+       
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
     int x = 0, y = 0;
@@ -5266,8 +5436,7 @@ int main(void)
     if (hc595 != 0)
         hc595->enable(true);
         
-    // start the LedWiz flash cycle timers
-    wizPulseTimer.start();
+    // start the LedWiz flash cycle timer
     wizCycleTimer.start();
     
     // start the PWM update polling timer
@@ -5278,10 +5447,7 @@ int main(void)
     for (;;)
     {
         // start the main loop timer for diagnostic data collection
-        IF_DIAG(
-            Timer mainLoopTimer;
-            mainLoopTimer.start();
-        )
+        IF_DIAG(mainLoopTimer.reset(); mainLoopTimer.start();)
             
         // Process incoming reports on the joystick interface.  The joystick
         // "out" (receive) endpoint is used for LedWiz commands and our 
@@ -5301,7 +5467,7 @@ int main(void)
         IF_DIAG(
             if (msgCount != 0)
             {
-                mainLoopMsgTime += lwt.read();
+                mainLoopMsgTime += lwt.read_us();
                 mainLoopMsgCount++;
             }
         )
@@ -5312,10 +5478,16 @@ int main(void)
         // update PWM outputs
         pollPwmUpdates();
             
+        // collect diagnostic statistics, checkpoint 0
+        IF_DIAG(mainLoopIterCheckpt[0] += mainLoopTimer.read_us();)
+
         // send TLC5940 data updates if applicable
         if (tlc5940 != 0)
             tlc5940->send();
        
+        // collect diagnostic statistics, checkpoint 1
+        IF_DIAG(mainLoopIterCheckpt[1] += mainLoopTimer.read_us();)
+
         // check for plunger calibration
         if (calBtn != 0 && !calBtn->read())
         {
@@ -5419,15 +5591,27 @@ int main(void)
             }
         }
         
+        // collect diagnostic statistics, checkpoint 2
+        IF_DIAG(mainLoopIterCheckpt[2] += mainLoopTimer.read_us();)
+
         // read the plunger sensor
         plungerReader.read();
         
+        // collect diagnostic statistics, checkpoint 3
+        IF_DIAG(mainLoopIterCheckpt[3] += mainLoopTimer.read_us();)
+
         // update the ZB Launch Ball status
         zbLaunchBall.update();
         
+        // collect diagnostic statistics, checkpoint 4
+        IF_DIAG(mainLoopIterCheckpt[4] += mainLoopTimer.read_us();)
+
         // process button updates
         processButtons(cfg);
         
+        // collect diagnostic statistics, checkpoint 5
+        IF_DIAG(mainLoopIterCheckpt[5] += mainLoopTimer.read_us();)
+
         // send a keyboard report if we have new data
         if (kbState.changed)
         {
@@ -5444,6 +5628,9 @@ int main(void)
             mediaState.changed = false;
         }
         
+        // collect diagnostic statistics, checkpoint 6
+        IF_DIAG(mainLoopIterCheckpt[6] += mainLoopTimer.read_us();)
+
         // flag:  did we successfully send a joystick report on this round?
         bool jsOK = false;
         
@@ -5517,6 +5704,9 @@ int main(void)
             jsOKTimer.reset();
             jsOKTimer.start();
         }
+
+        // collect diagnostic statistics, checkpoint 7
+        IF_DIAG(mainLoopIterCheckpt[7] += mainLoopTimer.read_us();)
 
 #ifdef DEBUG_PRINTF
         if (x != 0 || y != 0)
@@ -5706,7 +5896,7 @@ int main(void)
         
         // collect statistics on the main loop time, if desired
         IF_DIAG(
-            mainLoopIterTime += mainLoopTimer.read();
+            mainLoopIterTime += mainLoopTimer.read_us();
             mainLoopIterCount++;
         )
     }

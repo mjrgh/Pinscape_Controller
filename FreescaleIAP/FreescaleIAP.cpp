@@ -1,6 +1,62 @@
+// FreescaleIAP, private version
+//
+// This is a heavily modified version of Erik Olieman's FreescaleIAP, a
+// flash memory writer for Freescale boards.  This version is adapted to
+// the special needs of the KL25Z.
+//
+// Simplifications:
+//
+// Unlike EO's original version, this version combines erase and write
+// into a single opreation, so the caller can simply give us a buffer
+// and a location, and we'll write it, including the erase prep.  We
+// don't need to be able to separate the operations, so the combined
+// interface is simpler at the API level and also lets us do all of the
+// interrupt masking in one place (see below).
+//
+// Stability improvements:
+//
+// The KL25Z has severe restrictions on flash writing that make it very
+// delicate.  The key restriction is that the flash controller (FTFA) 
+// doesn't allow any read operations while a sector erase is in progress.  
+// The reason this complicates things is that all program code is stored
+// in flash by default.  This means that every instruction fetch is a 
+// flash read operation.  The FTFA's response to a read while an erase is
+// in progress is to fail the read and return arbitrary data.  When the
+// read is actually an instruction fetch, this results in the CPU trying
+// to execute random garbage, which virtually always crashes the program
+// and freezes the CPU.  Making this even more complicated, the erase
+// operation runs a whole sector at a time, which takes a very long time
+// in CPU terms, on the order of milliseconds.  Even if the code that
+// initiates the erase is very careful to loop without branching to any
+// flash locations, it's still a long time to go without an interrupt
+// occurring
+//
+// We use two strategies to avoid flash fetches while we're working.
+// First, the code that performs all of the FTFA operations is written
+// in assembly, in a module AREA marked READWRITE.  This forces the
+// linker to put the code in RAM.  The code could otherwise just have
+// well been written in C++, but as far as I know there's no way to tell
+// the mbed C++ compiler to put code in RAM.  Since the FTFA code is all
+// in RAM, it doesn't trigger any flash fetches as it executes.  Second,
+// we explicitly disable all of the peripheral interrupts that we use
+// anywhere in the program (USB, all the timers, etc) via the NVIC.  It
+// isn't sufficient to disable interrupts with __disable_irq() or the
+// equivalent assembly instruction CPSID I; we have to turn them off at
+// the NVIC level.  My understanding of ARM system architecture isn't
+// detailed enough to know why this is required, but experimentally it
+// definitely seems to be needed.
+
 #include "FreescaleIAP.h"
  
 //#define IAPDEBUG
+
+// assembly interface
+extern "C" {
+    void iapEraseSector(FTFA_Type *ftfa, uint32_t address);
+    void iapProgramBlock(FTFA_Type *ftfa, uint32_t address, const void *src, uint32_t length);
+}
+
+
  
 enum FCMD {
     Read1s = 0x01,
@@ -15,259 +71,11 @@ enum FCMD {
     VerifyBackdoor = 0x45
 };
 
-static inline void run_command(FTFA_Type *);
-bool check_boundary(int address, unsigned int length);
-bool check_align(int address);
-IAPCode check_error(void);
-    
-FreescaleIAP::FreescaleIAP()
-{
-}
- 
-FreescaleIAP::~FreescaleIAP()
-{
-} 
 
-// We use an assembly language implementation of the EXEC function in
-// order to satisfy the requirement (mentioned in the hardware reference)
-// that code that writes to Flash must reside in RAM.  There's a potential
-// for a deadlock if the code that triggers a Flash write operation is 
-// itself stored in Flash, as an instruction fetch to Flash can deadlock 
-// against the erase/write.  In practice this seems to be rare, but I
-// seem to be able to trigger it once in a while.  (Which is to say that
-// I can trigger occasional lock-ups during writes.  It's not clear that
-// the Flash bus deadlock is the actual cause, but the timing strongly
-// suggests this.)
-// 
-// The mbed tools don't have a way to put a C function in RAM.  The mbed
-// assembler can, though.  So to get our invoking code into RAM, we have
-// to write it in assembly.  Fortunately, the code involved is very simple:
-// just a couple of writes to the memory-mapped Flash controller register,
-// and a looped read and bit test from the same location to wait until the
-// operation finishes.
-//
-#define USE_ASM_EXEC 1
-#if USE_ASM_EXEC
-extern "C" void iapExecAsm(volatile uint8_t *);
-#endif
-
-// execute an FTFA command
-static inline void run_command(FTFA_Type *ftfa) 
-{    
-#if USE_ASM_EXEC
-    // Call our RAM-based assembly routine to do this work.  The
-    // assembler routine implements the same ftfa->FSTAT register
-    // operations in the C alternative code below.
-    iapExecAsm(&ftfa->FSTAT);
-
-#else // USE_ASM_EXEC
-    // Clear possible old errors, start command, wait until done
-    ftfa->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
-    ftfa->FSTAT = FTFA_FSTAT_CCIF_MASK;
-    while (!(ftfa->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
-
-#endif // USE_ASM_EXEC
-}    
-
- 
-IAPCode FreescaleIAP::erase_sector(int address) {
-    #ifdef IAPDEBUG
-    printf("IAP: Erasing at %x\r\n", address);
-    #endif
-    if (check_align(address))
-        return AlignError;
-        
-    // divide the sector address into the three bytes for the three
-    // registers first, to reduce the risk of the operation being
-    // corrupted
-    uint8_t temp1 = (address >> 16) & 0xFF;
-    uint8_t temp2 = (address >> 8) & 0xFF;
-    uint8_t temp3 = address & 0xFF;
-    
-    // clear interrupts while working
-    __disable_irq();
-    
-    // wait for any previous commands to clear
-    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
-    
-    // clear previous errors
-    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
-    
-    // set up the command
-    FTFA->FCCOB0 = EraseSector;
-    FTFA->FCCOB1 = temp1;
-    FTFA->FCCOB2 = temp2;
-    FTFA->FCCOB3 = temp3;
-
-    // execute it    
-    run_command(FTFA);
-    
-    // re-enable interrupts
-    __enable_irq();
-    
-    return check_error();
-}
- 
-IAPCode FreescaleIAP::program_flash(int address, const void *vp, unsigned int length) {
-    
-    const char *data = (const char *)vp;
-    
-    #ifdef IAPDEBUG
-    printf("IAP: Programming flash at %x with length %d\r\n", address, length);
-    #endif
-    if (check_align(address))
-        return AlignError;
-        
-    IAPCode eraseCheck = verify_erased(address, length);
-    if (eraseCheck != Success)
-        return eraseCheck;
-    
-    IAPCode progResult;
-    for (int i = 0; i < length; i+=4) {
-        progResult = program_word(address + i, data + i);
-        if (progResult != Success)
-            return progResult;
-    }
-    
-    return Success;
-}
- 
-uint32_t FreescaleIAP::flash_size(void) {
-    uint32_t retval = (SIM->FCFG2 & 0x7F000000u) >> (24-13);
-    if (SIM->FCFG2 & (1<<23))           //Possible second flash bank
-        retval += (SIM->FCFG2 & 0x007F0000u) >> (16-13);
-    return retval;
-}
- 
-IAPCode FreescaleIAP::program_word(int address, const char *data) {
-    #ifdef IAPDEBUG
-    printf("IAP: Programming word at %x, %d - %d - %d - %d\r\n", address, data[0], data[1], data[2], data[3]);
-    #endif
-    if (check_align(address))
-        return AlignError;
-        
-        
-    // figure the three bytes of the address first
-    uint8_t temp1 = (address >> 16) & 0xFF;
-    uint8_t temp2 = (address >> 8) & 0xFF;
-    uint8_t temp3 = address & 0xFF;
-    
-    // get the data bytes into temps as well
-    uint8_t temp4 = data[3];
-    uint8_t temp5 = data[2];
-    uint8_t temp6 = data[1];
-    uint8_t temp7 = data[0];
-    
-    // interrupts off while working
-    __disable_irq();
-    
-    // wait for any previous commands to clear
-    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
-    
-    // clear previous errors
-    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
-        
-    // Set up the command
-    FTFA->FCCOB0 = ProgramLongword;
-    FTFA->FCCOB1 = temp1;
-    FTFA->FCCOB2 = temp2;
-    FTFA->FCCOB3 = temp3;
-    FTFA->FCCOB4 = temp4;
-    FTFA->FCCOB5 = temp5;
-    FTFA->FCCOB6 = temp6;
-    FTFA->FCCOB7 = temp7;
-
-    // execute the command    
-    run_command(FTFA);
-    
-    // interrupts on
-    __enable_irq();
-    
-    // return error indication
-    return check_error();
-}
- 
-/* Check if no flash boundary is violated
-   Returns true on violation */
-bool check_boundary(int address, unsigned int length) {
-    int temp = (address+length - 1) / SECTOR_SIZE;
-    address /= SECTOR_SIZE;
-    bool retval = (address != temp);
-    #ifdef IAPDEBUG
-    if (retval)
-        printf("IAP: Boundary violation\r\n");
-    #endif
-    return retval;
-}
- 
-/* Check if address is correctly aligned
-   Returns true on violation */
-bool check_align(int address) {
-    bool retval = address & 0x03;
-    #ifdef IAPDEBUG
-    if (retval)
-        printf("IAP: Alignment violation\r\n");
-    #endif
-    return retval;
-}
- 
-/* Check if an area of flash memory is erased
-   Returns error code or Success (in case of fully erased) */
-IAPCode FreescaleIAP::verify_erased(int address, unsigned int length) {
-    #ifdef IAPDEBUG
-    printf("IAP: Verify erased at %x with length %d\r\n", address, length);
-    #endif
-    
-    if (check_align(address))
-        return AlignError;
-    
-    // get the address into temps
-    uint8_t temp1 = (address >> 16) & 0xFF;
-    uint8_t temp2 = (address >> 8) & 0xFF;
-    uint8_t temp3 = address & 0xFF;
-    
-    // get the length into temps as well
-    uint8_t temp4 = (length >> 10) & 0xFF;
-    uint8_t temp5 = (length >> 2) & 0xFF;
-    
-    // interrupts off while working
-    __disable_irq();
-    
-    // wait for any previous commands to clear
-    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
-    
-    // clear previous errors
-    FTFA->FSTAT = FTFA_FSTAT_FPVIOL_MASK | FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_RDCOLERR_MASK;
-        
-    // Set up the command
-    FTFA->FCCOB0 = Read1s;
-    FTFA->FCCOB1 = temp1;
-    FTFA->FCCOB2 = temp2;
-    FTFA->FCCOB3 = temp3;
-    FTFA->FCCOB4 = temp4;
-    FTFA->FCCOB5 = temp5;
-    FTFA->FCCOB6 = 0;
-    
-    // execute
-    run_command(FTFA);
-    
-    // interrupts on
-    __enable_irq();
-    
-    IAPCode retval = check_error();
-    if (retval == RuntimeError) {
-        #ifdef IAPDEBUG
-        printf("IAP: Flash was not erased\r\n");
-        #endif
-        return EraseError;
-    }
-    return retval;
-        
-}
- 
 /* Check if an error occured 
    Returns error code or Success*/
-IAPCode check_error(void) {
+static IAPCode check_error(void) 
+{
     if (FTFA->FSTAT & FTFA_FSTAT_FPVIOL_MASK) {
         #ifdef IAPDEBUG
         printf("IAP: Protection violation\r\n");
@@ -297,3 +105,119 @@ IAPCode check_error(void) {
     #endif
     return Success;
 }
+ 
+IAPCode FreescaleIAP::program_flash(int address, const void *src, unsigned int length) 
+{    
+    #ifdef IAPDEBUG
+    printf("IAP: Programming flash at %x with length %d\r\n", address, length);
+    #endif
+    
+    // Disable peripheral IRQs.  Empirically, this seems to be vital to 
+    // getting the writing process (especially the erase step) to work 
+    // reliably.  Even with the CPU interrupt mask off (CPSID I in the
+    // assembly), it appears that peripheral interrupts will 
+    NVIC_DisableIRQ(PIT_IRQn);
+    NVIC_DisableIRQ(I2C0_IRQn);
+    NVIC_DisableIRQ(I2C1_IRQn);
+    NVIC_DisableIRQ(PORTA_IRQn);
+    NVIC_DisableIRQ(PORTD_IRQn);
+    NVIC_DisableIRQ(USB0_IRQn);
+    NVIC_DisableIRQ(TPM0_IRQn);
+    NVIC_DisableIRQ(TPM1_IRQn);
+    NVIC_DisableIRQ(TPM2_IRQn);
+    NVIC_DisableIRQ(RTC_IRQn);
+    NVIC_DisableIRQ(RTC_Seconds_IRQn);
+    NVIC_DisableIRQ(LPTimer_IRQn);
+            
+    // presume success
+    IAPCode status = Success;
+
+    // I'm not 100% convinced this is 100% reliable yet.  So let's show
+    // some diagnostic lights while we're working.  If anyone sees any
+    // freezes, the lights that are left on at the freeze will tell us
+    // which step is crashing.
+    extern void diagLED(int,int,int);
+    
+    // Erase the sector(s) covered by the write.  Before writing, we must
+    // erase each sector that we're going to touch on the write.
+    for (uint32_t ofs = 0 ; ofs < length ; ofs += SECTOR_SIZE)
+    {
+        // Show RED on the first sector, GREEN on second, BLUE on third.  Each
+        // sector is 1K, so I don't think we'll need more than 3 for the 
+        // foreseeable future.  (RAM on the KL25Z is so tight that it will
+        // probably stop us from adding enough features to require more
+        // configuration variables than 3K worth.)
+        diagLED(ofs/SECTOR_SIZE == 0, ofs/SECTOR_SIZE == 1, ofs/SECTOR_SIZE == 2);
+        
+        // erase the sector
+        iapEraseSector(FTFA, address + ofs);
+    }
+        
+    // If the erase was successful, write the data.
+    if ((status = check_error()) == Success)
+    {
+        // show cyan while the write is in progress
+        diagLED(0, 1, 1);
+
+        // do the write
+        iapProgramBlock(FTFA, address, src, length);
+        
+        // show white when the write completes
+        diagLED(1, 1, 1);
+        
+        // check again for errors
+        status = check_error();
+    }
+    
+    // restore peripheral IRQs
+    NVIC_EnableIRQ(PIT_IRQn);
+    NVIC_EnableIRQ(I2C0_IRQn);
+    NVIC_EnableIRQ(I2C1_IRQn);
+    NVIC_EnableIRQ(PORTA_IRQn);
+    NVIC_EnableIRQ(PORTD_IRQn);
+    NVIC_EnableIRQ(USB0_IRQn);
+    NVIC_EnableIRQ(TPM0_IRQn);
+    NVIC_EnableIRQ(TPM1_IRQn);
+    NVIC_EnableIRQ(TPM2_IRQn);
+    NVIC_EnableIRQ(RTC_IRQn);
+    NVIC_EnableIRQ(RTC_Seconds_IRQn);
+    NVIC_EnableIRQ(LPTimer_IRQn);
+
+    // return the result
+    return status;
+}
+ 
+uint32_t FreescaleIAP::flash_size(void) 
+{
+    uint32_t retval = (SIM->FCFG2 & 0x7F000000u) >> (24-13);
+    if (SIM->FCFG2 & (1<<23))           //Possible second flash bank
+        retval += (SIM->FCFG2 & 0x007F0000u) >> (16-13);
+    return retval;
+}
+ 
+/* Check if no flash boundary is violated
+   Returns true on violation */
+bool check_boundary(int address, unsigned int length) 
+{
+    int temp = (address+length - 1) / SECTOR_SIZE;
+    address /= SECTOR_SIZE;
+    bool retval = (address != temp);
+    #ifdef IAPDEBUG
+    if (retval)
+        printf("IAP: Boundary violation\r\n");
+    #endif
+    return retval;
+}
+ 
+/* Check if address is correctly aligned
+   Returns true on violation */
+bool check_align(int address) 
+{
+    bool retval = address & 0x03;
+    #ifdef IAPDEBUG
+    if (retval)
+        printf("IAP: Alignment violation\r\n");
+    #endif
+    return retval;
+}
+ 

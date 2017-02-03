@@ -34,6 +34,13 @@ public:
     // Initialize the physical sensor device.  This is called at startup
     // to set up the device for first use.
     virtual void init() = 0;
+    
+    // Is the sensor ready to take a reading?  The optical sensor requires
+    // a fairly long time (2.5ms) to transfer the data for each reading, but 
+    // this is done via DMA, so we can carry on other work while the transfer
+    // takes place.  This lets us poll the sensor to see if it's still busy
+    // working on the current reading's data transfer.
+    virtual bool ready() const { return true; }
 
     // Read the sensor position, if possible.  Returns true on success,
     // false if it wasn't possible to take a reading.  On success, fills
@@ -41,7 +48,7 @@ public:
     //
     // r.pos is set to the current raw sensor reading, normalized to the
     // range 0x0000..0xFFFF.  r.t is set to the timestamp of the reading,
-    // in 
+    // in microseconds.
     //
     // Also sets 't' to the microsecond timestamp of the reading, if a
     // reading was successfully taken.  This timestamp is relative to an

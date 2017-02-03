@@ -144,6 +144,19 @@ void MMA8451Q::setInterruptMode(int pin)
     active();
 }
 
+void MMA8451Q::clearInterruptMode()
+{
+    // go to standby mode
+    standby();
+    
+    // clear the interrupt register
+    uint8_t d1[2] = { REG_CTRL_REG_4, 0 };
+    writeRegs(d1, 2);
+
+    // enter active mode
+    active();
+}
+
 void MMA8451Q::standby()
 {
     // read the current control register

@@ -20,7 +20,7 @@
 // the front page, in the device listing section.  It doesn't mention
 // the diagnostics if they're missing, since that's the normal case.
 //
-#define ENABLE_DIAGNOSTICS  1
+#define ENABLE_DIAGNOSTICS  0
 
 
 // cover code with this to enable only when diagnostics are on
