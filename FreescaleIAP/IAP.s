@@ -1,8 +1,6 @@
 ; FreescaleIAP assembly functions
 ;
-; Put all code here in READWRITE memory, to ensure that it goes in RAM 
-; rather than flash.  
-    AREA iapexec_asm_code, CODE, READWRITE
+    AREA iap_main_asm_code, CODE, READONLY
     
 ;---------------------------------------------------------------------------
 ; iapEraseSector(FTFA_Type *FTFA, uint32_t address)
@@ -13,17 +11,6 @@
 iapEraseSector
     ; save registers
     STMFD   R13!,{R1,R4,LR}
-    
-    ; Ensure that no interrupts occur while we're erasing.  This is
-    ; vitally important, because the flash controller doesn't allow
-    ; anyone to read from flash while an erase is in progress.  Most
-    ; of the program code is in flash, which means that any interrupt
-    ; would invoke flash code, causing the CPU to fetch from flash,
-    ; violating the no-read-during-erase rule.  The CPU instruction
-    ; fetch would fail, causing the CPU to lock up.
-    CPSID I              ; interrupts off
-    DMB                  ; data memory barrier
-    ISB                  ; instruction synchronization barrier
     
     ; wait for any previous command to complete
     BL      iapWait
@@ -45,13 +32,9 @@ iapEraseSector
     MOVS    R1,R1,LSR #8 ; address >>= 8
     STRB    R1,[R0,#6]   ; FTFA->FCCOB1 <- address bits 0-7
     
-    ; execute and wait for completion
-    BL      iapExec
-    BL      iapWait
+    ; execute (and wait for completion)
+    BL      iapExecAndWait
     
-    ; restore interrupts
-    CPSIE I
-
     ; pop registers and return
     LDMFD   R13!,{R1,R4,PC}    
 
@@ -66,16 +49,6 @@ iapEraseSector
 iapProgramBlock
     ; save registers
     STMFD   R13!, {R1,R2,R3,R4,LR}
-    
-    ; Turn off interrupts while we're working.  Flash reading
-    ; while writing doesn't seem to be forbidden the way it is
-    ; while erasing (see above), but even so, each longword
-    ; transfer requires writing to 10 separate registers, so
-    ; there's a lot of static state involved - we don't want
-    ; any other code sneaking in and changing anything on us.
-    CPSID I              ; interrupts off
-    DMB                  ; data memory barrier
-    ISB                  ; instruction synchronization barrier
     
     ; wait for any previous command to complete
     BL      iapWait
@@ -116,7 +89,7 @@ LpLoop
     STRB    R4,[R0,#0xB] ; FTBA->FCCOB4 <- data[3]
     
     ; execute the command
-    BL      iapExec
+    BL      iapExecAndWait
     
     ; advance to the next longword
     ADDS    R1,R1,#4     ; flash address += 4
@@ -125,9 +98,6 @@ LpLoop
     B       LpLoop       ; back for the next iteration
     
 LpDone    
-    ; restore interrupts
-    CPSIE I
-    
     ; pop registers and return
     LDMFD   R13!, {R1,R2,R3,R4,PC}    
 
@@ -165,28 +135,80 @@ Lw0
     TSTS    R1, R2       ; test R1 & CCIF
     BEQ     Lw0          ; if zero, the command is still running
 
-LwDone
     ; pop registers and return
     LDMFD   R13!, {R1,R2,PC}    
 
 
 ;---------------------------------------------------------------------------
-; iapExec(FTFA_Type *FTFA)
-;   R0 = FTFA pointer
+;
+; The iapExecAndWait function MUST NOT BE IN FLASH, since we can't have
+; any fetches occur while an erase or write operation is executing.  Force
+; this portion to be in RAM by making it read-write.
 
-iapExec
+    AREA iap_ram_asm_code, CODE, READWRITE
+
+;---------------------------------------------------------------------------
+;
+; iapExecAndWait(FTFA_Type *FTFA)
+;   R0 = FTFA pointer
+;
+; This sets the bit in the FTFA status register to launch execution
+; of the command currently configured in the control registers.  The
+; caller must set up the control registers with the command code, and
+; any address data parameters requied for the command.  After launching
+; the command, we loop until the FTFA signals command completion.
+;
+; This routine turns off CPU interrupts and disables all peripheral
+; interrupts through the NVIC while the command is executing.  That
+; should eliminate any possibility of a hardware interrupt triggering
+; a flash fetch during a programming operation.  We restore interrupts
+; on return.  The caller doesn't need to (and shouldn't) do its own
+; interrupt manipulation.  In testing, it seems problematic to leave
+; interrupts disabled for long periods, so the safest approach seems
+; to be to disable the interrupts only for the actual command execution.
+
+NVIC_ISER  DCD 0xE000E100
+NVIC_ICER  DCD 0xE000E180
+
+    EXPORT iapExecAndWait
+    EXPORT iapExecAndWaitEnd
+iapExecAndWait
     ; save registers
-    STMFD   R13!, {R1,LR}
-        
-    ; write the CCIF bit to launch the command
+    STMFD   R13!, {R1,R2,R3,R4,LR}
+    
+    ; disable all interrupts in the NVIC
+    LDR     R3, =NVIC_ICER ; R3 <- NVIC_ICER
+    LDR     R4, [R3]     ; R4 <- current interrupt status
+    MOVS    R2, #0       ; R2 <- 0
+    SUBS    R2,R2,#1     ; R2 <= 0 - 1 = 0xFFFFFFFF
+    STR     R2, [R3]     ; [NVIC_ICER] <- 0xFFFFFFFF (disable all interrupts)
+
+    ; disable CPU interrupts
+    CPSID I              ; interrupts off
+    DMB                  ; data memory barrier
+    ISB                  ; instruction synchronization barrier
+
+    ; Launch the command by writing the CCIF bit to FTFA_FSTAT    
     MOVS    R1, #0x80    ; CCIF (0x80)
     STRB    R1, [R0]     ; FTFA->FSTAT = CCIF
     
-    ; wait until command completed
-    BL      iapWait
+    ; Wait for the command to complete.  The FTFA sets the CCIF
+    ; bit in FTFA_FSTAT when the command is finished, so spin until
+    ; the bit reads as set.
+Lew0
+    LDRB    R1, [R0]     ; R1 <- FTFA->FSTAT
+    MOVS    R2, #0x80    ; CCIF (0x80)
+    TSTS    R1, R2       ; test R1 & CCIF
+    BEQ     Lew0         ; if zero, the command is still running
+    
+    ; restore CPU interrupts
+    CPSIE I
 
+    ; re-enable NVIC interrupts
+    LDR     R3, =NVIC_ISER ; R3 <- NVIC_ISER
+    STR     R4, [R3]     ; NVIC_ISER = old interrupt enable vector
+    
     ; pop registers and return
-    LDMFD   R13!, {R1,PC}    
-    
+    LDMFD   R13!, {R1,R2,R3,R4,PC}
+
     END
-    

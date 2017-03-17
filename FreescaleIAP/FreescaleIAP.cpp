@@ -15,21 +15,20 @@
 //
 // Stability improvements:
 //
-// The KL25Z has severe restrictions on flash writing that make it very
-// delicate.  The key restriction is that the flash controller (FTFA) 
-// doesn't allow any read operations while a sector erase is in progress.  
-// The reason this complicates things is that all program code is stored
-// in flash by default.  This means that every instruction fetch is a 
-// flash read operation.  The FTFA's response to a read while an erase is
-// in progress is to fail the read and return arbitrary data.  When the
-// read is actually an instruction fetch, this results in the CPU trying
-// to execute random garbage, which virtually always crashes the program
-// and freezes the CPU.  Making this even more complicated, the erase
-// operation runs a whole sector at a time, which takes a very long time
-// in CPU terms, on the order of milliseconds.  Even if the code that
-// initiates the erase is very careful to loop without branching to any
-// flash locations, it's still a long time to go without an interrupt
-// occurring
+// The KL25Z has an important restriction on flash writing that makes it
+// very delicate.  Specifically, the flash controller (FTFA) doesn't allow 
+// any read operations while a sector erase is in progress.  This complicates
+// things for a KL25Z app because all program code is stored in flash by 
+// default.  This means that every instruction fetch is a flash read.  The
+// FTFA's response to a read while an erase is in progress is to fail the
+// read.  When the read is actually an instruction fetch, this results in
+// CPU lockup.  Making this even more complicated, the erase operation can
+// only operate on a whole sector at a time, which takes on the order of 
+// milliseconds, which is a very long time for the CPU to go without any
+// instruction fetches.  Even if the code that initiates the erase is 
+// located in RAM and is very careful to loop within the RAM code block,
+// any interrupt could take us out of the RAM loop and trigger a fetch
+// on a flash location.
 //
 // We use two strategies to avoid flash fetches while we're working.
 // First, the code that performs all of the FTFA operations is written
@@ -37,14 +36,19 @@
 // linker to put the code in RAM.  The code could otherwise just have
 // well been written in C++, but as far as I know there's no way to tell
 // the mbed C++ compiler to put code in RAM.  Since the FTFA code is all
-// in RAM, it doesn't trigger any flash fetches as it executes.  Second,
-// we explicitly disable all of the peripheral interrupts that we use
-// anywhere in the program (USB, all the timers, etc) via the NVIC.  It
-// isn't sufficient to disable interrupts with __disable_irq() or the
-// equivalent assembly instruction CPSID I; we have to turn them off at
-// the NVIC level.  My understanding of ARM system architecture isn't
-// detailed enough to know why this is required, but experimentally it
-// definitely seems to be needed.
+// in RAM, it doesn't by itself trigger any flash fetches as it executes,
+// so we're left with interrupts as the only concern.  Second, we explicitly 
+// disable all of the peripheral interrupts that we use anywhere in the 
+// program (USB, all the timers, GPIO ports, etc) via the NVIC.  From
+// testing, it's clear that disabling interrupts at the CPU level via
+// __disable_irq() (or the equivalent assembly instruction CPSID I) isn't
+// enough.  We have to turn interrupts off at the peripheral (NVIC) level.
+// I'm really not sure why this is required, since you'd think the CPSID I
+// masking would be enough, but experimentally it's clearly not.  This is
+// a detail of ARM hardware architecture that I need to look into more,
+// since it leaves me uneasy that there might be even more subtleties 
+// left to uncover.   But at least things seem very stable after blocking
+// interrupts at the NVIC level.
 
 #include "FreescaleIAP.h"
  
@@ -111,24 +115,7 @@ IAPCode FreescaleIAP::program_flash(int address, const void *src, unsigned int l
     #ifdef IAPDEBUG
     printf("IAP: Programming flash at %x with length %d\r\n", address, length);
     #endif
-    
-    // Disable peripheral IRQs.  Empirically, this seems to be vital to 
-    // getting the writing process (especially the erase step) to work 
-    // reliably.  Even with the CPU interrupt mask off (CPSID I in the
-    // assembly), it appears that peripheral interrupts will 
-    NVIC_DisableIRQ(PIT_IRQn);
-    NVIC_DisableIRQ(I2C0_IRQn);
-    NVIC_DisableIRQ(I2C1_IRQn);
-    NVIC_DisableIRQ(PORTA_IRQn);
-    NVIC_DisableIRQ(PORTD_IRQn);
-    NVIC_DisableIRQ(USB0_IRQn);
-    NVIC_DisableIRQ(TPM0_IRQn);
-    NVIC_DisableIRQ(TPM1_IRQn);
-    NVIC_DisableIRQ(TPM2_IRQn);
-    NVIC_DisableIRQ(RTC_IRQn);
-    NVIC_DisableIRQ(RTC_Seconds_IRQn);
-    NVIC_DisableIRQ(LPTimer_IRQn);
-            
+                
     // presume success
     IAPCode status = Success;
 
@@ -162,27 +149,13 @@ IAPCode FreescaleIAP::program_flash(int address, const void *src, unsigned int l
         // do the write
         iapProgramBlock(FTFA, address, src, length);
         
-        // show white when the write completes
-        diagLED(1, 1, 1);
+        // purple when done
+        diagLED(1, 0, 1);
         
         // check again for errors
         status = check_error();
     }
     
-    // restore peripheral IRQs
-    NVIC_EnableIRQ(PIT_IRQn);
-    NVIC_EnableIRQ(I2C0_IRQn);
-    NVIC_EnableIRQ(I2C1_IRQn);
-    NVIC_EnableIRQ(PORTA_IRQn);
-    NVIC_EnableIRQ(PORTD_IRQn);
-    NVIC_EnableIRQ(USB0_IRQn);
-    NVIC_EnableIRQ(TPM0_IRQn);
-    NVIC_EnableIRQ(TPM1_IRQn);
-    NVIC_EnableIRQ(TPM2_IRQn);
-    NVIC_EnableIRQ(RTC_IRQn);
-    NVIC_EnableIRQ(RTC_Seconds_IRQn);
-    NVIC_EnableIRQ(LPTimer_IRQn);
-
     // return the result
     return status;
 }
@@ -190,7 +163,7 @@ IAPCode FreescaleIAP::program_flash(int address, const void *src, unsigned int l
 uint32_t FreescaleIAP::flash_size(void) 
 {
     uint32_t retval = (SIM->FCFG2 & 0x7F000000u) >> (24-13);
-    if (SIM->FCFG2 & (1<<23))           //Possible second flash bank
+    if (SIM->FCFG2 & (1<<23))           // Possible second flash bank
         retval += (SIM->FCFG2 & 0x007F0000u) >> (16-13);
     return retval;
 }

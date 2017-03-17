@@ -105,11 +105,20 @@ public:
   void getAccXY(float &x, float &y);
   
   /**
-   *  Read X,Y,Z.  This is the most efficient way to fetch
-   *  all of the axes at once, since it fetches all three
-   *  in a single I2C transaction.
+   *  Read X,Y,Z as floats.  This is the second most efficient way 
+   *  to fetch all three axes (after the integer version), since it
+   *  fetches all axes in a single I2C transaction.
    */
   void getAccXYZ(float &x, float &y, float &z);
+  
+  /**
+   *  Read X,Y,Z as integers.  This reads the three axes in a single
+   *  I2C transaction and returns them in the native integer scale,
+   *  so it's the most efficient way to read the current 3D status.
+   *  Each axis value is represented an an integer using the device's 
+   *  native 14-bit scale, so each is in the range -8192..+8191.
+   */
+  void getAccXYZ(int &x, int &y, int &z);
 
   /**
    * Get Z axis acceleration
@@ -133,9 +142,24 @@ public:
   void setInterruptMode(int pin);
   
   /**
+   * Set the hardware dynamic range, in G.  Valid ranges are 2, 4, and 8.
+   */
+  void setRange(int g);
+  
+  /**
    * Disable interrupts.
    */
   void clearInterruptMode();
+  
+  /**
+   * Is a sample ready?
+   */
+  bool sampleReady();
+  
+  /**
+   * Get the number of FIFO samples available
+   */
+  int getFIFOCount();
 
 private:
   I2C m_i2c;
@@ -143,6 +167,24 @@ private:
   void readRegs(int addr, uint8_t * data, int len);
   void writeRegs(uint8_t * data, int len);
   int16_t getAccAxis(uint8_t addr);
+  
+  // Translate a 14-bit register value to a signed integer.  The
+  // most significant 8 bits are in the first byte, and the least
+  // significant 6 bits are in the second byte.  To adjust to a
+  // regular integer, left-justify the 14 bits in an int16_t, then
+  // divide by 4 to shift out the unused low two bits.  Note that
+  // we have to divide rather than right-shift (>>) to ensure proper
+  // filling of the sign bits.  The compiler should convert the
+  // divide-by-4 to an arithmetic shift right by 2, so this should
+  // still be efficient.
+  inline int xlat14(const uint8_t *buf)
+  {
+      // Store the 16 bits left-justified in an int16_t, then cast
+      // to a regular int to sign-extend to the full int width. 
+      // Divide the result by 4 to shift out the unused 2 bits
+      // at the right end.
+      return int(int16_t((buf[0] << 8) | buf[1])) / 4;
+  }
 
 };
 

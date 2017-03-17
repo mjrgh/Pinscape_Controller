@@ -48,8 +48,8 @@ void v_func
         
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
-        v_byte_ro(16, 2);       // number of SCALAR variables
-        v_byte_ro(3, 3);        // number of ARRAY variables
+        v_byte_ro(17, 2);       // number of SCALAR variables
+        v_byte_ro(6, 3);        // number of ARRAY variables
         break;
         
         // ********** SCALAR VARIABLES **********
@@ -72,8 +72,9 @@ void v_func
         break;
         
     case 4:
-        // Accelerometer orientation
+        // Accelerometer orientation and range
         v_byte(orientation, 2);
+        v_byte(accelRange, 3);
         break;
 
     case 5:
@@ -165,6 +166,12 @@ void v_func
         v_byte(shiftButton, 2);
         break;
         
+    case 17:
+        // IR sensor and emitter setup
+        v_byte(IR.sensor, 2);
+        v_byte(IR.emitter, 3);
+        break;
+        
     // case N: // new scalar variable
     //
     // !!! ATTENTION !!!
@@ -242,6 +249,57 @@ void v_func
     // !!! ATTENTION !!!
     // UPDATE CASE 0 ABOVE WHEN ADDING A NEW ARRAY VARIABLE!!!
     
+    case 250:
+        // IR command code - high 32 bits
+        {
+            int idx = data[2];
+            if (idx == 0)
+            {
+                v_byte_ro(MAX_IR_CODES, 3);
+            }
+            else if (idx > 0 && idx <= MAX_IR_CODES)
+            {
+                --idx;
+                v_ui32(IRCommand[idx].code.hi, 3);
+            }
+        }
+        break;
+    
+    case 251:
+        // IR command code - protocol and low 32 bits
+        {
+            int idx = data[2];
+            if (idx == 0)
+            {
+                v_byte_ro(MAX_IR_CODES, 3);
+            }
+            else if (idx > 0 && idx <= MAX_IR_CODES)
+            {
+                --idx;
+                v_byte(IRCommand[idx].protocol, 3);
+                v_ui32(IRCommand[idx].code.lo, 4);
+            }
+        }
+        break;
+    
+    case 252:
+        // IR command descriptor
+        {
+            int idx = data[2];
+            if (idx == 0)
+            {
+                v_byte_ro(MAX_IR_CODES, 3);
+            }
+            else if (idx > 0 && idx <= MAX_IR_CODES)
+            {
+                --idx;
+                v_byte(IRCommand[idx].flags, 3);
+                v_byte(IRCommand[idx].keytype, 4);
+                v_byte(IRCommand[idx].keycode, 5);
+            }
+        }
+        break;
+    
     case 253:
         // extended button setup
         {
@@ -260,6 +318,7 @@ void v_func
                 // transfer the values
                 v_byte(button[idx].typ2, 3);
                 v_byte(button[idx].val2, 4);
+                v_byte(button[idx].IRCommand2, 5);
             }                
         }
         break;
@@ -286,6 +345,7 @@ void v_func
                 v_byte(button[idx].typ, 4);
                 v_byte(button[idx].val, 5);
                 v_byte(button[idx].flags, 6);
+                v_byte(button[idx].IRCommand, 7);
             }
         }
         break;

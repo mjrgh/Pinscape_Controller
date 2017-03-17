@@ -2,20 +2,20 @@
 
 #define CRC32_POLYNOMIAL 0xEDB88320L
  
-void CRC32Value(unsigned long &CRC, unsigned char c)
+inline void CRC32Value(unsigned long &CRC, unsigned char c)
 {
     /////////////////////////////////////////////////////////////////////////////////////
     //CRC must be initialized as zero 
     //c is a character from the sequence that is used to form the CRC
     //this code is a modification of the code from the Novatel OEM615 specification
     /////////////////////////////////////////////////////////////////////////////////////
-    unsigned long ulTemp1 = ( CRC >> 8 ) & 0x00FFFFFFL;
-    unsigned long ulCRC = ((int) CRC ^ c ) & 0xff ;
-    for (int  j = 8 ; j > 0; j-- )
+    unsigned long ulTemp1 = (CRC >> 8) & 0x00FFFFFFL;
+    unsigned long ulCRC = ((int)CRC ^ c) & 0xff ;
+    for (int  j = 8 ; j > 0 ; j--)
     {
-        if ( ulCRC & 1 )
+        if (ulCRC & 1)
         {
-            ulCRC = ( ulCRC >> 1 ) ^ CRC32_POLYNOMIAL;
+            ulCRC = (ulCRC >> 1) ^ CRC32_POLYNOMIAL;
         }
         else
         {

@@ -37,7 +37,7 @@
 // 
 #define STANDARD_CONFIG       1     // standard settings, based on v1 base settings
 #define TEST_CONFIG_EXPAN     0     // configuration for the expansion boards
-#define TEST_KEEP_PRINTF      0     // for debugging purposes, keep printf() enabled
+#define TEST_KEEP_PRINTF      1     // for debugging purposes, keep printf() enabled
                                     // by leaving the SDA UART GPIO pins unallocated
 
 
@@ -65,6 +65,12 @@ const int OrientationLeft      = 1;      // ports pointed toward left side of ca
 const int OrientationRight     = 2;      // ports pointed toward right side of cabinet
 const int OrientationRear      = 3;      // ports pointed toward back of cabinet
 
+// Accelerometer dynamic range codes
+const int AccelRange1G         = 0;      // +/-1G
+const int AccelRange2G         = 1;      // +/-2G
+const int AccelRange4G         = 2;      // +/-4G
+const int AccelRange8G         = 3;      // +/-8G
+
 // input button types
 const int BtnTypeNone          = 0;      // unused
 const int BtnTypeJoystick      = 1;      // joystick button
@@ -87,6 +93,9 @@ struct ButtonCfg
                         //   none     -> no PC input reports (val is unused)
                         //   joystick -> val is joystick button number (1..32)
                         //   keyboard -> val is USB scan code
+    uint8_t IRCommand;  // IR command to send when the button is pressed, as
+                        // an IR command slot number: 1..MAX_IR_CODES, or 0
+                        // if no IR command is to be sent
                         
     // Shifted key type and value.  These used when the button is pressed 
     // while the Local Shift Button is being held down.  We send the key
@@ -95,6 +104,7 @@ struct ButtonCfg
     // not the shift button is being held.
     uint8_t typ2;       // shifted key type
     uint8_t val2;       // shifted key value
+    uint8_t IRCommand2; // IR command to send when shifted button is pressed
     
     // key flags - a bitwise combination of BtnFlagXxx values
     uint8_t flags;
@@ -104,7 +114,11 @@ struct ButtonCfg
         this->pin = pin;
         this->typ = typ;
         this->val = val;
+        this->IRCommand = 0;
         this->flags = flags;
+        this->typ2 = 0;
+        this->val2 = 0;
+        this->IRCommand2 = 0;
     }
         
 } __attribute__((packed));
@@ -152,7 +166,28 @@ struct LedWizPortCfg
         this->flags = flags;
     }
         
-} __attribute__((packed));
+} __attribute__ ((packed));
+
+// IR command configuration flags
+const uint8_t IRFlagTVON = 0x01;     // send command at TV ON time
+const uint8_t IRFlagDittos = 0x02;   // use "ditto" codes on send
+
+// IR command configuration data
+struct IRCommandCfg
+{
+    uint8_t flags;      // flags: a combination of IRFlagXxx values
+    uint8_t keytype;    // key type to send when IR command is received
+    uint8_t keycode;    // key code to send when IR command is received
+    uint8_t protocol;   // IR protocol ID (see IRRemote/IRProtocolID.h)
+    struct
+    {
+        uint32_t lo;    // low 32 bits of code
+        uint32_t hi;    // high 32 bits of code
+    } code;             // 64-bit command code (protocol-specific; see IRProtocols.h)
+} __attribute__ ((packed));
+
+// Maximum number of IR commands
+const int MAX_IR_CODES = 16;
 
 
 // Convert a physical pin name to a wire pin name
@@ -201,11 +236,11 @@ struct Config
         memset(expan.ext, 0, sizeof(expan.ext));
 
         // assume no plunger is attached
-        plunger.enabled = false;
+        plunger.enabled = 0x00;
         plunger.sensorType = PlungerType_None;
         
 #if TEST_CONFIG_EXPAN || STANDARD_CONFIG
-        plunger.enabled = true;
+        plunger.enabled = 0x01;
         plunger.sensorType = PlungerType_TSL1410RS;
         plunger.sensorPin[0] = PINNAME_TO_WIRE(PTE20); // SI
         plunger.sensorPin[1] = PINNAME_TO_WIRE(PTE21); // SCLK
@@ -287,6 +322,25 @@ struct Config
         hc595.latch = PINNAME_TO_WIRE(PTA12);
         hc595.ena = PINNAME_TO_WIRE(PTD4);
         
+        
+        // Default IR hardware pin assignments.  On the expansion boards,
+        // the sensor is connected to PTA13, and the emitter LED is on PTC9.
+#if TEST_CONFIG_EXPAN
+        IR.sensor = PINNAME_TO_WIRE(PTA13);
+        IR.emitter = PINNAME_TO_WIRE(PTC9);
+#else
+        IR.sensor = PINNAME_TO_WIRE(NC);
+        IR.emitter = PINNAME_TO_WIRE(NC);
+#endif     
+
+        // clear out all IR slots
+        memset(IRCommand, 0, sizeof(IRCommand));
+        for (int i = 0 ; i < MAX_IR_CODES ; ++i)
+        {
+            IRCommand[i].protocol = 0;
+            IRCommand[i].keytype = BtnTypeNone;
+        }
+   
         // initially configure with no LedWiz output ports
         outPort[0].typ = PortTypeDisabled;
         
@@ -472,7 +526,7 @@ struct Config
             
     // Are joystick reports enabled?  Joystick reports can be turned off, to
     // use the device as purely an output controller.
-    char joystickEnabled;
+    uint8_t joystickEnabled;
     
     // Timeout for rebooting the KL25Z when the connection is lost.  On some
     // hosts, the mbed USB stack has problems reconnecting after an initial
@@ -484,8 +538,11 @@ struct Config
     
     // --- ACCELEROMETER ---
     
-    // accelerometer orientation (ORIENTATION_xxx value)
-    char orientation;
+    // accelerometer orientation (OrientationXxx value)
+    uint8_t orientation;
+    
+    // dynamic range (AccelRangeXxx value)
+    uint8_t accelRange;
     
     
     // --- EXPANSION BOARDS ---
@@ -502,11 +559,15 @@ struct Config
     // --- PLUNGER CONFIGURATION ---
     struct
     {
-        // plunger enabled/disabled
-        char enabled;
+        // Plunger enabled/disabled.  Note that we use the status flag
+        // bit 0x01 if enabled, 0x00 if disabled.  This conveniently
+        // can be tested as though it's a bool, but should always be
+        // stored as 0x01 or 0x00 so that it can be OR'ed into the
+        // status report flag bits.
+        uint8_t enabled;
 
         // plunger sensor type
-        char sensorType;
+        uint8_t sensorType;
     
         // Plunger sensor pins.  To accommodate a wide range of sensor types,
         // we keep a generic list of 4 pin assignments.  The use of each pin
@@ -689,8 +750,19 @@ struct Config
         uint8_t ena;        // Enable signal - use any GPIO pin
     
     } hc595;
-
-
+    
+    
+    // --- IR Remote Control Hardware Setup ---
+    struct
+    {
+        // sensor (receiver) GPIO input pin; must be interrupt-capable
+        uint8_t sensor;
+        
+        // IR emitter LED GPIO output pin; must be PWM-capable
+        uint8_t emitter;
+    } IR;
+    
+    
     // --- Button Input Setup ---
     ButtonCfg button[MAX_BUTTONS + VIRTUAL_BUTTONS] __attribute__((packed));
     
@@ -724,8 +796,10 @@ struct Config
     uint8_t shiftButton;
 
     // --- LedWiz Output Port Setup ---
-    LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__((packed));  // LedWiz & extended output ports 
+    LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__ ((packed));  // LedWiz & extended output ports 
 
+    // --- IR Command Slots ---
+    IRCommandCfg IRCommand[MAX_IR_CODES] __attribute__ ((packed));
 };
 
 #endif

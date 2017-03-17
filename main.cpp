@@ -52,9 +52,10 @@
 //    that's supported, along with physical mounting and wiring details, can be found
 //    in the Build Guide.
 //
-//    Note VP has built-in support for plunger devices like this one, but some VP
-//    tables can't use it without some additional scripting work.  The Build Guide has 
-//    advice on adjusting tables to add plunger support when necessary.
+//    Note that VP has built-in support for plunger devices like this one, but 
+//    some VP tables can't use it without some additional scripting work.  The 
+//    Build Guide has advice on adjusting tables to add plunger support when 
+//    necessary.
 //
 //    For best results, the plunger sensor should be calibrated.  The calibration
 //    is stored in non-volatile memory on board the KL25Z, so it's only necessary
@@ -75,12 +76,11 @@
 //    let it shoot forward too far.  We want to measure the range from the park
 //    position to the fully retracted position only.)
 //
-//  - Button input wiring.  24 of the KL25Z's GPIO ports are mapped as digital inputs
-//    for buttons and switches.  You can wire each input to a physical pinball-style
-//    button or switch, such as flipper buttons, Start buttons, coin chute switches,
-//    tilt bobs, and service buttons.  Each button can be configured to be reported
-//    to the PC as a joystick button or as a keyboard key (you can select which key
-//    is used for each button).
+//  - Button input wiring.  You can assign GPIO ports as inputs for physical
+//    pinball-style buttons, such as flipper buttons, a Start button, coin
+//    chute switches, tilt bobs, and service panel buttons.  You can configure
+//    each button input to report a keyboard key or joystick button press to
+//    the PC when the physical button is pushed.
 //
 //  - LedWiz emulation.  The KL25Z can pretend to be an LedWiz device.  This lets
 //    you connect feedback devices (lights, solenoids, motors) to GPIO ports on the 
@@ -140,9 +140,26 @@
 //    power to the cabinet comes on, with a configurable delay timer.  This feature
 //    is for TVs that don't turn themselves on automatically when first plugged in.
 //    To use this feature, you have to build some external circuitry to allow the
-//    software to sense the power supply status, and you have to run wires to your
-//    TV's on/off button, which requires opening the case on your TV.  The Build
-//    Guide has details on the necessary circuitry and connections to the TV.
+//    software to sense the power supply status.  The Build Guide has details 
+//    on the necessary circuitry.  You can use this to switch your TV on via a
+//    hardwired connection to the TV's "on" button, which requires taking the
+//    TV apart to gain access to its internal wiring, or optionally via the IR
+//    remote control transmitter feature below.
+//
+//  - Infrared (IR) remote control receiver and transmitter.  You can attach an
+//    IR LED and/or an IR sensor (we recommend the TSOP384xx series) to make the
+//    KL25Z capable of sending and/or receiving IR remote control signals.  This
+//    can be used with the TV ON feature above to turn your TV(s) on when the
+//    system power comes on by sending the "on" command to them via IR, as though
+//    you pressed the "on" button on the remote control.  The sensor lets the
+//    Pinscape software learn the IR codes from your existing remotes, in the
+//    same manner as a handheld universal remote control, and the IR LED lets
+//    it transmit learned codes.  The sensor can also be used to receive codes
+//    during normal operation and turn them into PC keystrokes; this lets you
+//    access extra commands on the PC without adding more buttons to your
+//    cabinet.  The IR LED can also be used to transmit other codes when you
+//    press selected cabinet buttons, allowing you to assign cabinet buttons
+//    to send IR commands to your cabinet TV or other devices.
 //
 //
 //
@@ -212,6 +229,9 @@
 #include "potSensor.h"
 #include "nullSensor.h"
 #include "TinyDigitalIn.h"
+#include "IRReceiver.h"
+#include "IRTransmitter.h"
+#include "NewPwm.h"
 
 
 #define DECL_EXTERNS
@@ -313,83 +333,73 @@ const char *getBuildID()
 // left over after counting the static writable data and reserving space
 // for a reasonable stack.  I haven't looked at the mbed malloc to see why 
 // they're so stingy, but it appears from empirical testing that we can 
-// create a static array up to about 9K before things get crashy.
+// create a static array up to about 8K before things get crashy.
 
-// Dynamic memory pool.  We'll reserve space for all dynamic 
-// allocations by creating a simple C array of bytes.  The size
-// of this array is the maximum number of bytes we can allocate
-// with malloc or operator 'new'.
+
+// halt with a diagnostic display if we run out of memory
+void HaltOutOfMem()
+{
+    printf("\r\nOut Of Memory\r\n");
+    // halt with the diagnostic display (by looping forever)
+    for (;;)
+    {
+        diagLED(1, 0, 0);
+        wait_us(200000);
+        diagLED(1, 0, 1);
+        wait_us(200000);
+    }
+}
+
+#if 0//$$$
+// Memory pool.  We allocate two blocks at fixed addresses: one for
+// the malloc heap, and one for the native stack.  
 //
-// The maximum safe size for this array is, in essence, the
-// amount of physical KL25Z RAM left over after accounting for
-// static data throughout the rest of the program, the run-time
-// stack, and any other space reserved for compiler or MCU
-// overhead.  Unfortunately, it's not straightforward to
-// determine this analytically.  The big complication is that
-// the minimum stack size isn't easily predictable, as the stack
-// grows according to what the program does.  In addition, the
-// mbed platform tools don't give us detailed data on the
-// compiler/linker memory map.  All we get is a generic total
-// RAM requirement, which doesn't necessarily account for all
-// overhead (e.g., gaps inserted to get proper alignment for
-// particular memory blocks).  
+// We allocate the stack block at the very top of memory.  This is what 
+// the mbed startup code does anyway, so we don't actually ever move the 
+// stack pointer into this area ourselves.  The point of this block is
+// to reserve space with the linker, so that it won't put any other static
+// data here in this region.
 //
-// A very rough estimate: the total RAM size reported by the 
-// linker is about 3.5K (currently - that can obviously change 
-// as the project evolves) out of 16K total.  Assuming about a 
-// 3K stack, that leaves in the ballpark of 10K.  Empirically,
-// that seems pretty close.  In testing, we start to see some
-// instability at 10K, while 9K seems safe.  To be conservative,
-// we'll reduce this to 8K.
+// The heap block goes just below the stack block.  This is a contiguous 
+// block of bytes from which we allocate blocks for malloc() and 'operator 
+// new' requests.
 //
-// Our measured total usage in the base configuration (22 GPIO
-// output ports, TSL1410R plunger sensor) is about 4000 bytes.
-// A pretty fully decked-out configuration (121 output ports,
-// with 8 TLC5940 chips and 3 74HC595 chips, plus the TSL1412R
-// sensor with the higher pixel count, and all expansion board
-// features enabled) comes to about 6700 bytes.  That leaves
-// us with about 1.5K free out of our 8K, so we still have a 
-// little more headroom for future expansion.
-//
-// For comparison, the standard mbed malloc() runs out of
-// memory at about 6K.  That's what led to this custom malloc:
-// we can just fit the base configuration into that 4K, but
-// it's not enough space for more complex setups.  There's
-// still a little room for squeezing out unnecessary space
-// from the mbed library code, but at this point I'd prefer
-// to treat that as a last resort, since it would mean having
-// to fork private copies of the libraries.
-static const size_t XMALLOC_POOL_SIZE = 8*1024;
-static char xmalloc_pool[XMALLOC_POOL_SIZE];
+// WARNING!  When adding static data, be sure to check the build statistics
+// to ensure that static data fits in the available RAM.  The linker doesn't
+// seem to make such a check on its own, so you might not see an error if
+// added data pushes us past the 16K limit.
+
+// KL25Z address of top of RAM (one byte past end of RAM)
+const uint32_t TOP_OF_RAM = 0x20003000UL;
+
+// malloc pool size
+const size_t XMALLOC_POOL_SIZE = 8*1024;
+
+// stack size
+const size_t XMALLOC_STACK_SIZE = 2*1024;
+
+// figure the fixed locations of the malloc pool and stack: the stack goes
+// at the very top of RAM, and the malloc pool goes just below the stack
+const uint32_t XMALLOC_STACK_BASE = TOP_OF_RAM - XMALLOC_STACK_SIZE;
+const uint32_t XMALLOC_POOL_BASE = XMALLOC_STACK_BASE - XMALLOC_POOL_SIZE;
+
+// allocate the pools - use __attribute__((at)) to give them fixed addresses
+static char xmalloc_stack[XMALLOC_STACK_SIZE] __attribute__((at(XMALLOC_STACK_BASE)));
+static char xmalloc_pool[XMALLOC_POOL_SIZE] __attribute__((at(XMALLOC_POOL_BASE)));
+
+// malloc pool free pointer and space remaining
 static char *xmalloc_nxt = xmalloc_pool;
 static size_t xmalloc_rem = XMALLOC_POOL_SIZE;
     
+// allocate from our pool
 void *xmalloc(size_t siz)
 {
     // align to a 4-byte increment
     siz = (siz + 3) & ~3;
     
-    // If insufficient memory is available, halt and show a fast red/purple 
-    // diagnostic flash.  We don't want to return, since we assume throughout
-    // the program that all memory allocations must succeed.  Note that this
-    // is generally considered bad programming practice in applications on
-    // "real" computers, but for the purposes of this microcontroller app,
-    // there's no point in checking for failed allocations individually
-    // because there's no way to recover from them.  It's better in this 
-    // context to handle failed allocations as fatal errors centrally.  We
-    // can't recover from these automatically, so we have to resort to user
-    // intervention, which we signal with the diagnostic LED flashes.
+    // if we're out of memory, halt with a diagnostic display
     if (siz > xmalloc_rem)
-    {
-        // halt with the diagnostic display (by looping forever)
-        for (;;)
-        {
-            diagLED(1, 0, 0);
-            wait_us(200000);
-            diagLED(1, 0, 1);
-            wait_us(200000);
-        }
-    }
+        HaltOutOfMem();
 
     // get the next free location from the pool to return   
     char *ret = xmalloc_nxt;
@@ -401,8 +411,89 @@ void *xmalloc(size_t siz)
     // return the allocated block
     return ret;
 };
+#elif 1//$$$
+// For our custom malloc, we take advantage of the known layout of the
+// mbed library memory management.  The mbed library puts all of the
+// static read/write data at the low end of RAM; this includes the
+// initialized statics and the "ZI" (zero-initialized) statics.  The
+// malloc heap starts just after the last static, growing upwards as
+// memory is allocated.  The stack starts at the top of RAM and grows
+// downwards.  
+//
+// To figure out where the free memory starts, we simply call the system
+// malloc() to make a dummy allocation the first time we're called, and 
+// use the address it returns as the start of our free memory pool.  The
+// first malloc() call presumably returns the lowest byte of the pool in
+// the compiler RTL's way of thinking, and from what we know about the
+// mbed heap layout, we know everything above this point should be free,
+// at least until we reach the lowest address used by the stack.
+//
+// The ultimate size of the stack is of course dynamic and unpredictable.
+// In testing, it appears that we currently need a little over 1K.  To be
+// conservative, we'll reserve 2K for the stack, by taking it out of the
+// space at top of memory we consider fair game for malloc.
+//
+// Note that we could do this a little more low-level-ly if we wanted.
+// The ARM linker provides a pre-defined extern char[] variable named 
+// Image$$RW_IRAM1$$ZI$$Limit, which is always placed just after the
+// last static data variable.  In principle, this tells us the start
+// of the available malloc pool.  However, in testing, it doesn't seem
+// safe to use this as the start of our malloc pool.  I'm not sure why,
+// but probably something in the startup code (either in the C RTL or 
+// the mbed library) is allocating from the pool before we get control. 
+// So we won't use that approach.  Besides, that would tie us even more
+// closely to the ARM compiler.  With our malloc() probe approach, we're
+// at least portable to any compiler that uses the same basic memory
+// layout, with the heap above the statics and the stack at top of 
+// memory; this isn't universal, but it's very typical.
 
-// our malloc() replacement
+static char *xmalloc_nxt = 0;
+size_t xmalloc_rem = 0;
+void *xmalloc(size_t siz)
+{
+    if (xmalloc_nxt == 0)
+    {
+        xmalloc_nxt = (char *)malloc(4);
+        xmalloc_rem = 0x20003000UL - 2*1024 - uint32_t(xmalloc_nxt);
+    }
+    
+    siz = (siz + 3) & ~3;
+    if (siz > xmalloc_rem)
+        HaltOutOfMem();
+        
+    char *ret = xmalloc_nxt;
+    xmalloc_nxt += siz;
+    xmalloc_rem -= siz;
+    
+    return ret;
+}
+#else //$$$
+extern char Image$$RW_IRAM1$$ZI$$Limit[]; // linker marker for top of ZI region
+static char *xmalloc_nxt = Image$$RW_IRAM1$$ZI$$Limit;
+const uint32_t xmallocMinStack = 2*1024;
+char *const TopOfRAM = (char *)0x20003000UL;
+uint16_t xmalloc_rem = uint16_t(TopOfRAM - Image$$RW_IRAM1$$ZI$$Limit - xmallocMinStack);
+void *xmalloc(size_t siz)
+{
+    // align to a 4-byte increment
+    siz = (siz + 3) & ~3;
+    
+    // check to ensure we're leaving enough stack free
+    if (xmalloc_nxt + siz > TopOfRAM - xmallocMinStack)
+        HaltOutOfMem();
+        
+    // get the next free location from the pool to return
+    char *ret = xmalloc_nxt;
+    
+    // advance past the allocated memory
+    xmalloc_nxt += siz;
+    xmalloc_rem -= siz;
+    
+    // return the allocated block
+    printf("malloc(%d) -> %lx\r\n", siz, ret);
+    return ret;
+}
+#endif//$$$
 
 // Overload operator new to call our custom malloc.  This ensures that
 // all 'new' allocations throughout the program (including library code)
@@ -427,7 +518,8 @@ void toggleNightMode();
 // ---------------------------------------------------------------------------
 // utilities
 
-// floating point square of a number
+// int/float point square of a number
+inline int square(int x) { return x*x; }
 inline float square(float x) { return x*x; }
 
 // floating point rounding
@@ -439,10 +531,10 @@ inline float round(float x) { return x > 0 ? floor(x + 0.5) : ceil(x - 0.5); }
 // Extended verison of Timer class.  This adds the ability to interrogate
 // the running state.
 //
-class Timer2: public Timer
+class ExtTimer: public Timer
 {
 public:
-    Timer2() : running(false) { }
+    ExtTimer() : running(false) { }
 
     void start() { running = true; Timer::start(); }
     void stop()  { running = false; Timer::stop(); }
@@ -453,13 +545,6 @@ private:
     bool running;
 };
 
-
-// --------------------------------------------------------------------------
-//
-// Reboot timer.  When we have a deferred reboot operation pending, we
-// set the target time and start the timer.
-Timer2 rebootTimer;
-long rebootTime_us;
 
 // --------------------------------------------------------------------------
 // 
@@ -564,7 +649,8 @@ inline void pinNameWire(uint8_t *b, PinName n)
 DigitalOut *ledR, *ledG, *ledB;
 
 // Power on timer state for diagnostics.  We flash the blue LED when
-// nothing else is going on.  State 0-1 = off, 2-3 = on
+// nothing else is going on.  State 0-1 = off, 2-3 = on blue.  Also
+// show red when transmitting an LED signal, indicated by state 4.
 uint8_t powerTimerDiagState = 0;
 
 // Show the indicated pattern on the diagnostic LEDs.  0 is off, 1 is
@@ -578,7 +664,10 @@ void diagLED(int r, int g, int b)
     // if turning everything off, use the power timer state instead, 
     // applying it to the blue LED
     if (diagLEDState == 0)
-        b = (powerTimerDiagState >= 2);
+    {
+        b = (powerTimerDiagState == 2 || powerTimerDiagState == 3);
+        r = (powerTimerDiagState == 4);
+    }
         
     // set the new state
     if (ledR != 0 && r != -1) ledR->write(!r);
@@ -592,7 +681,7 @@ void diagLED(void)
     diagLED(
         diagLEDState & 0x01,
         (diagLEDState >> 1) & 0x01,
-        (diagLEDState >> 1) & 0x02);
+        (diagLEDState >> 2) & 0x01);
 }
 
 // check an output port assignment to see if it conflicts with
@@ -868,8 +957,10 @@ private:
     LwOut *out;
 };
 
-// global night mode flag
-static bool nightMode = false;
+// Global night mode flag.  To minimize overhead when reporting
+// the status, we set this to the status report flag bit for
+// night mode, 0x02, when engaged.
+static uint8_t nightMode = 0x00;
 
 // Noisy output.  This is a filter object that we layer on top of
 // a physical pin output.  This filter disables the port when night
@@ -1122,110 +1213,55 @@ static const float dof_to_gamma_pwm[] = {
     0.925022f, 0.935504f, 0.946062f, 0.956696f, 0.967407f, 0.978194f, 0.989058f, 1.000000f
 };
 
-// MyPwmOut - a slight customization of the base mbed PwmOut class.  The 
-// mbed version of PwmOut.write() resets the PWM cycle counter on every 
-// update.  That's problematic, because the counter reset interrupts the
-// cycle in progress, causing a momentary drop in brightness that's visible
-// to the eye if the output is connected to an LED or other light source.
-// This is especially noticeable when making gradual changes consisting of
-// many updates in a short time, such as a slow fade, because the light 
-// visibly flickers on every step of the transition.  This customized 
-// version removes the cycle reset, which makes for glitch-free updates 
-// and nice smooth fades.
+// Polled-update PWM output list
 //
-// Initially, I thought the counter reset in the mbed code was simply a
-// bug.  According to the KL25Z hardware reference, you update the duty
-// cycle by writing to the "compare values" (CvN) register.  There's no
-// hint that you should reset the cycle counter, and indeed, the hardware
-// goes out of its way to allow updates mid-cycle (as we'll see shortly).
-// They went to lengths specifically so that you *don't* have to reset
-// that counter.  And there's no comment in the mbed code explaining the
-// cycle reset, so it looked to me like something that must have been
-// added by someone who didn't read the manual carefully enough and didn't
-// test the result thoroughly enough to find the glitch it causes.
+// This is a workaround for a KL25Z hardware bug/limitation.  The bug (more
+// about this below) is that we can't write to a PWM output "value" register
+// more than once per PWM cycle; if we do, outputs after the first are lost.
+// The value register controls the duty cycle, so it's what you have to write
+// if you want to update the brightness of an output.
 //
-// After some experimentation, though, I've come to think the code was
-// added intentionally, as a workaround for a rather nasty KL25Z hardware
-// bug.   Whoever wrote the code didn't add any comments explaning why it's
-// there, so we can't know for sure, but it does happen to work around the 
-// bug, so it's a good bet the original programmer found the same hardware
-// problem and came up with the counter reset as an imperfect solution.
+// Our solution is to simply repeat all PWM updates periodically.  If a write
+// is lost on one cycle, it'll eventually be applied on a subseuqent periodic
+// update.  For low overhead, we do these repeat updates periodically during
+// the main loop.
 //
-// We'll get to the KL25Z hardware bug shortly, but first we need to look at
-// how the hardware is *supposed* to work.  The KL25Z is *supposed* to make
-// it super easy for software to do glitch-free updates of the duty cycle of 
-// a PWM channel.  With PWM hardware in general, you have to be careful to
-// update the duty cycle counter between grayscale cycles, beacuse otherwise
-// you might interrupt the cycle in progress and cause a brightness glitch.  
-// The KL25Z TPM simplifies this with a "staging" register for the duty
-// cycle counter.  At the end of each cycle, the TPM moves the value from
-// the staging register into its internal register that actually controls 
-// the duty cycle.  The idea is that the software can write a new value to
-// the staging register at any time, and the hardware will take care of
-// synchronizing the actual internal update with the grayscale cycle.  In
-// principle, this frees the software of any special timing considerations
-// for PWM updates.  
+// The mbed library has its own solution to this bug, but it creates a 
+// separate problem of its own.  The mbed solution is to write the value
+// register immediately, and then also reset the "count" register in the 
+// TPM unit containing the output.  The count reset truncates the current
+// PWM cycle, which avoids the hardware problem with more than one write per
+// cycle.  The problem is that the truncated cycle causes visible flicker if
+// the output is connected to an LED.  This is particularly noticeable during
+// fades, when we're updating the value register repeatedly and rapidly: an
+// attempt to fade from fully on to fully off causes rapid fluttering and 
+// flashing rather than a smooth brightness fade.
 //
-// Now for the bug.  The staging register works as advertised, except for
-// one little detail: it seems to be implemented as a one-element queue
-// that won't accept a new write until the existing value has been read.
-// The read only happens at the start of the new cycle.  So the effect is
-// that we can only write one update per cycle.  Any writes after the first
-// are simply dropped, lost forever.  That causes even worse problems than
-// the original glitch.  For example, if we're doing a fade-out, the last
-// couple of updates in the fade might get lost, leaving the output slightly
-// on at the end, when it's supposed to be completely off.
+// The hardware bug is a case of good intentions gone bad.  The hardware is
+// *supposed* to make it easy for software to avoid glitching during PWM
+// updates, by providing a staging register in front of the real value
+// register.  The software actually writes to the staging register, which
+// holds updates until the end of the cycle, at which point the hardware
+// automatically moves the value from the staging register into the real
+// register.  This ensures that the real register is always updated exactly
+// at a cycle boundary, which in turn ensures that there's no flicker when
+// values are updated.  A great design - except that it doesn't quite work.
+// The problem is that the staging register actually seems to be implemented
+// as a one-element FIFO in "stop when full" mode.  That is, when you write
+// the FIFO, it becomes full.  When the cycle ends and the hardware reads it
+// to move the staged value into the real register, the FIFO becomes empty.
+// But if you try to write the FIFO twice before the hardware reads it and
+// empties it, the second write fails, leaving the first value in the queue.
+// There doesn't seem to be any way to clear the FIFO from software, so you
+// just have to wait for the cycle to end before writing another update.
+// That more or less defeats the purpose of the staging register, whose whole
+// point is to free software from worrying about timing considerations with
+// updates.  It frees us of the need to align our timing on cycle boundaries,
+// but it leaves us with the need to limit writes to once per cycle.
 //
-// The mbed workaround of resetting the cycle counter fixes the lost-update
-// problem, but it causes the constant glitching during fades.  So we need
-// a third way that works around the hardware problem without causing 
-// update glitches.
-//
-// Here's my solution: we basically implement our own staging register,
-// using the same principle as the hardware staging register, but hopefully
-// with an implementation that actually works!  First, when we update a PWM 
-// output, we won't actually write the value to the hardware register.
-// Instead, we'll just stash it internally, effectively in our own staging
-// register (but actually just a member variable of this object).  Then
-// we'll periodically transfer these staged updates to the actual hardware 
-// registers, being careful to do this no more than once per PWM cycle.
-// One way to do this would be to use an interrupt handler that fires at
-// the end of the PWM cycle, but that would be fairly complex because we
-// have many (up to 10) PWM channels.  Instead, we'll just use polling:
-// we'll call a routine periodically in our main loop, and we'll transfer
-// updates for all of the channels that have been updated since the last
-// pass.  We can get away with this simple polling approach because the
-// hardware design *partially* works: it does manage to free us from the
-// need to synchronize updates with the exact end of a PWM cycle.  As long
-// as we do no more than one write per cycle, we're golden.  That's easy
-// to accomplish, too: all we need to do is make sure that our polling
-// interval is slightly longer than the PWM period.  That ensures that
-// we can never have two updates during one PWM cycle.  It does mean that
-// we might have zero updates on some cycles, causing a one-cycle delay
-// before an update is actually put into effect, but that shouldn't ever
-// be noticeable since the cycles are so short.  Specifically, we'll use
-// the mbed default 20ms PWM period, and we'll do our update polling 
-// every 25ms.
-class LessGlitchyPwmOut: public PwmOut
-{
-public:
-    LessGlitchyPwmOut(PinName pin) : PwmOut(pin) { }
-    
-    void write(float value)
-    {
-        // Update the counter without resetting the counter.
-        //
-        // NB: this causes problems if there are multiple writes in one
-        // PWM cycle: the first write will be applied and later writes 
-        // during the same cycle will be lost.  Callers must take care
-        // to limit writes to one per cycle.
-        *_pwm.CnV = uint32_t((*_pwm.MOD + 1) * value);
-    }
-};
-
-
-// Collection of PwmOut objects to update on each polling cycle.  The
-// KL25Z has 10 physical PWM channels, so we need at most 10 polled outputs.
+// So here we have our list of PWM outputs that need to be polled for updates.
+// The KL25Z hardware only has 10 PWM channels, so we only need a fixed set
+// of polled items.
 static int numPolledPwm;
 static class LwPwmOut *polledPwm[10];
 
@@ -1235,44 +1271,38 @@ class LwPwmOut: public LwOut
 public:
     LwPwmOut(PinName pin, uint8_t initVal) : p(pin)
     {
-         // set the cycle time to 20ms
-         p.period_ms(20);
-         
-         // add myself to the list of polled outputs for periodic updates
-         if (numPolledPwm < countof(polledPwm))
+        // add myself to the list of polled outputs for periodic updates
+        if (numPolledPwm < countof(polledPwm))
             polledPwm[numPolledPwm++] = this;
-         
-         // set the initial value, and an explicitly different previous value
-         prv = ~initVal;
-         set(initVal);
+
+        // set the initial value
+        set(initVal);
     }
 
     virtual void set(uint8_t val) 
     {
-        // on set, just save the value for a later 'commit' 
+        // save the new value
         this->val = val;
+        
+        // commit it to the hardware
+        commit();
     }
 
     // handle periodic update polling
     void poll()
     {
-        // if the value has changed, commit it
-        if (val != prv)
-        {
-            prv = val;
-            commit(val);
-        }
+        commit();
     }
 
 protected:
-    virtual void commit(uint8_t v)
+    virtual void commit()
     {
         // write the current value to the PWM controller if it's changed
-        p.write(dof_to_pwm[v]);
+        p.glitchFreeWrite(dof_to_pwm[val]);
     }
     
-    LessGlitchyPwmOut p;
-    uint8_t val, prv;
+    NewPwmOut p;
+    uint8_t val;
 };
 
 // Gamma corrected PWM GPIO output.  This works exactly like the regular
@@ -1287,10 +1317,10 @@ public:
     }
     
 protected:
-    virtual void commit(uint8_t v)
+    virtual void commit()
     {
         // write the current value to the PWM controller if it's changed
-        p.write(dof_to_gamma_pwm[v]);
+        p.glitchFreeWrite(dof_to_gamma_pwm[val]);
     }
 };
 
@@ -1896,6 +1926,454 @@ void pba_pbx(int basePort, const uint8_t *data)
         hc595->update();
 }
 
+// ---------------------------------------------------------------------------
+//
+// IR Remote Control transmitter & receiver
+//
+
+// receiver
+IRReceiver *ir_rx;
+
+// transmitter
+IRTransmitter *ir_tx;
+
+// Mapping from IR commands slots in the configuration to "virtual button"
+// numbers on the IRTransmitter's "virtual remote".  To minimize RAM usage, 
+// we only create virtual buttons on the transmitter object for code slots 
+// that are configured for transmission, which includes slots used for TV
+// ON commands and slots that can be triggered by button presses.  This
+// means that virtual button numbers won't necessarily match the config
+// slot numbers.  This table provides the mapping:
+// IRConfigSlotToVirtualButton[n] = ir_tx virtual button number for 
+// configuration slot n
+uint8_t IRConfigSlotToVirtualButton[MAX_IR_CODES];
+uint8_t IRAdHocSlot;
+
+// IR mode timer.  In normal mode, this is the time since the last
+// command received; we use this to handle commands with timed effects,
+// such as sending a key to the PC.  In learning mode, this is the time
+// since we activated learning mode, which we use to automatically end
+// learning mode if a decodable command isn't received within a reasonable
+// amount of time.
+Timer IRTimer;
+
+// IR Learning Mode.  The PC enters learning mode via special function 65 12.
+// The states are:
+//
+//   0 -> normal operation (not in learning mode)
+//   1 -> learning mode; reading raw codes, no command read yet
+//   2 -> learning mode; command received, awaiting auto-repeat
+//   3 -> learning mode; done, command and repeat mode decoded
+//
+// When we enter learning mode, we reset IRTimer to keep track of how long
+// we've been in the mode.  This allows the mode to time out if no code is
+// received within a reasonable time.
+uint8_t IRLearningMode = 0;
+
+// Learning mode command received.  This stores the first decoded command
+// when in learning mode.  For some protocols, we can't just report the
+// first command we receive, because we need to wait for an auto-repeat to
+// determine what format the remote uses for repeats.  This stores the first
+// command while we await a repeat.  This is necessary for protocols that 
+// have "dittos", since some remotes for such protocols use the dittos and 
+// some don't; the only way to find out is to read a repeat code and see if 
+// it's a ditto or just a repeat of the full code.
+IRCommand learnedIRCode;
+
+// IR comkmand received, as a config slot index, 1..MAX_IR_CODES.
+// When we receive a command that matches one of our programmed commands, 
+// we note the slot here.  We also reset the IR timer so that we know how 
+// long it's been since the command came in.  This lets us handle commands 
+// with timed effects, such as PC key input.  Note that this is a 1-based 
+// index; 0 represents no command.
+uint8_t IRCommandIn = 0;
+
+// "Toggle bit" of last command.  Some IR protocols have a toggle bit
+// that distinguishes an auto-repeating key from a key being pressed
+// several times in a row.  This records the toggle bit of the last
+// command we received.
+uint8_t lastIRToggle = 0;
+
+// Are we in a gap between successive key presses?  When we detect that a 
+// key is being pressed multiple times rather than auto-repeated (which we 
+// can detect via a toggle bit in some protocols), we'll briefly stop sending 
+// the associated key to the PC, so that the PC likewise recognizes the 
+// distinct key press.  
+uint8_t IRKeyGap = false;
+
+// initialize
+void init_IR(Config &cfg, bool &kbKeys)
+{
+    PinName pin;
+    
+    // start the IR timer
+    IRTimer.start();
+    
+    // if there's a transmitter, set it up
+    if ((pin = wirePinName(cfg.IR.emitter)) != NC)
+    {
+        // no virtual buttons yet
+        int nVirtualButtons = 0;
+        memset(IRConfigSlotToVirtualButton, 0xFF, sizeof(IRConfigSlotToVirtualButton));
+        
+        // assign virtual buttons slots for TV ON codes
+        for (int i = 0 ; i < MAX_IR_CODES ; ++i)
+        {
+            if ((cfg.IRCommand[i].flags & IRFlagTVON) != 0)
+                IRConfigSlotToVirtualButton[i] = nVirtualButtons++;
+        }
+            
+        // assign virtual buttons for codes that can be triggered by 
+        // real button inputs
+        for (int i = 0 ; i < MAX_BUTTONS ; ++i)
+        {
+            // get the button
+            ButtonCfg &b = cfg.button[i];
+            
+            // check the unshifted button
+            int c = b.IRCommand - 1;
+            if (c >= 0 && c < MAX_IR_CODES 
+                && IRConfigSlotToVirtualButton[c] == 0xFF)
+                IRConfigSlotToVirtualButton[c] = nVirtualButtons++;
+                
+            // check the shifted button
+            c = b.IRCommand2 - 1;
+            if (c >= 0 && c < MAX_IR_CODES 
+                && IRConfigSlotToVirtualButton[c] == 0xFF)
+                IRConfigSlotToVirtualButton[c] = nVirtualButtons++;
+        }
+        
+        // allocate an additional virtual button for transmitting ad hoc
+        // codes, such as for the "send code" USB API function
+        IRAdHocSlot = nVirtualButtons++;
+            
+        // create the transmitter
+        ir_tx = new IRTransmitter(pin, nVirtualButtons);
+        
+        // program the commands into the virtual button slots
+        for (int i = 0 ; i < MAX_IR_CODES ; ++i)
+        {
+            // if this slot is assigned to a virtual button, program it
+            int vb = IRConfigSlotToVirtualButton[i];
+            if (vb != 0xFF)
+            {
+                IRCommandCfg &cb = cfg.IRCommand[i];
+                uint64_t code = cb.code.lo | (uint64_t(cb.code.hi) << 32);
+                bool dittos = (cb.flags & IRFlagDittos) != 0;
+                ir_tx->programButton(vb, cb.protocol, dittos, code);
+            }
+        }
+    }
+
+    // if there's a receiver, set it up
+    if ((pin = wirePinName(cfg.IR.sensor)) != NC)
+    {
+        // create the receiver
+        ir_rx = new IRReceiver(pin, 32);
+        
+        // connect the transmitter (if any) to the receiver, so that
+        // the receiver can suppress reception of our own transmissions
+        ir_rx->setTransmitter(ir_tx);
+        
+        // enable it
+        ir_rx->enable();
+        
+        // Check the IR command slots to see if any slots are configured
+        // to send a keyboard key on receiving an IR command.  If any are,
+        // tell the caller that we need a USB keyboard interface.
+        for (int i = 0 ; i < MAX_IR_CODES ; ++i)
+        {
+            IRCommandCfg &cb = cfg.IRCommand[i];
+            if (cb.protocol != 0
+                && (cb.keytype == BtnTypeKey || cb.keytype == BtnTypeMedia))
+            {
+                kbKeys = true;
+                break;
+            }
+        }
+    }
+}
+
+// Press or release a button with an assigned IR function.  'cmd'
+// is the command slot number (1..MAX_IR_CODES) assigned to the button.
+void IR_buttonChange(uint8_t cmd, bool pressed)
+{
+    // only proceed if there's an IR transmitter attached
+    if (ir_tx != 0)
+    {
+        // adjust the command slot to a zero-based index
+        int slot = cmd - 1;
+        
+        // press or release the virtual button
+        ir_tx->pushButton(IRConfigSlotToVirtualButton[slot], pressed);
+    }
+}
+
+// Process IR input
+void process_IR(Config &cfg, USBJoystick &js)
+{
+    // if there's no IR receiver attached, there's nothing to do
+    if (ir_rx == 0)
+        return;
+        
+    // Time out any received command
+    if (IRCommandIn != 0)
+    {
+        // Time out inter-key gap mode after 30ms; time out all 
+        // commands after 100ms.
+        uint32_t t = IRTimer.read_us();
+        if (t > 100000)
+            IRCommandIn = 0;
+        else if (t > 30000)
+            IRKeyGap = false;
+    }
+
+    // Check if we're in learning mode
+    if (IRLearningMode != 0)
+    {
+        // Learning mode.  Read raw inputs from the IR sensor and 
+        // forward them to the PC via USB reports, up to the report
+        // limit.
+        const int nmax = USBJoystick::maxRawIR;
+        uint16_t raw[nmax];
+        int n;
+        for (n = 0 ; n < nmax && ir_rx->processOne(raw[n]) ; ++n) ;
+        
+        // if we read any raw samples, report them
+        if (n != 0)
+            js.reportRawIR(n, raw);
+            
+        // check for a command
+        IRCommand c;
+        if (ir_rx->readCommand(c))
+        {
+            // check the current learning state
+            switch (IRLearningMode)
+            {
+            case 1:
+                // Initial state, waiting for the first decoded command.
+                // This is it.
+                learnedIRCode = c;
+                
+                // Check if we need additional information.  If the
+                // protocol supports dittos, we have to wait for a repeat
+                // to see if the remote actually uses the dittos, since
+                // some implementations of such protocols use the dittos
+                // while others just send repeated full codes.  Otherwise,
+                // all we need is the initial code, so we're done.
+                IRLearningMode = (c.hasDittos ? 2 : 3);
+                break;
+                
+            case 2:
+                // Code received, awaiting auto-repeat information.  If
+                // the protocol has dittos, check to see if we got a ditto:
+                //
+                // - If we received a ditto in the same protocol as the
+                //   prior command, the remote uses dittos.
+                //
+                // - If we received a repeat of the prior command (not a
+                //   ditto, but a repeat of the full code), the remote
+                //   doesn't use dittos even though the protocol supports
+                //   them.
+                //
+                // - Otherwise, it's not an auto-repeat at all, so we
+                //   can't decide one way or the other on dittos: start
+                //   over.
+                if (c.proId == learnedIRCode.proId
+                    && c.hasDittos
+                    && c.ditto)
+                {
+                    // success - the remote uses dittos
+                    IRLearningMode = 3;
+                }
+                else if (c.proId == learnedIRCode.proId
+                    && c.hasDittos
+                    && !c.ditto
+                    && c.code == learnedIRCode.code)
+                {
+                    // success - it's a repeat of the last code, so
+                    // the remote doesn't use dittos even though the
+                    // protocol supports them
+                    learnedIRCode.hasDittos = false;
+                    IRLearningMode = 3;
+                }
+                else
+                {
+                    // It's not a ditto and not a full repeat of the
+                    // last code, so it's either a new key, or some kind
+                    // of multi-code key encoding that we don't recognize.
+                    // We can't use this code, so start over.
+                    IRLearningMode = 1;
+                }
+                break;
+            }
+            
+            // If we ended in state 3, we've successfully decoded
+            // the transmission.  Report the decoded data and terminate
+            // learning mode.
+            if (IRLearningMode == 3)
+            {
+                // figure the flags: 
+                //   0x02 -> dittos
+                uint8_t flags = 0;
+                if (learnedIRCode.hasDittos)
+                    flags |= 0x02;
+                    
+                // report the code
+                js.reportIRCode(learnedIRCode.proId, flags, learnedIRCode.code);
+                    
+                // exit learning mode
+                IRLearningMode = 0;
+            }
+        }
+        
+        // time out of IR learning mode if it's been too long
+        if (IRLearningMode != 0 && IRTimer.read_us() > 10000000L)
+        {
+            // report the termination by sending a raw IR report with
+            // zero data elements
+            js.reportRawIR(0, 0);
+            
+            
+            // cancel learning mode
+            IRLearningMode = 0;
+        }
+    }
+    else
+    {
+        // Not in learning mode.  We don't care about the raw signals;
+        // just run them through the protocol decoders.
+        ir_rx->process();
+        
+        // Check for decoded commands.  Keep going until all commands
+        // have been read.
+        IRCommand c;
+        while (ir_rx->readCommand(c))
+        {
+            // We received a decoded command.  Determine if it's a repeat,
+            // and if so, try to determine whether it's an auto-repeat (due
+            // to the remote key being held down) or a distinct new press 
+            // on the same key as last time.  The distinction is significant
+            // because it affects the auto-repeat behavior of the PC key
+            // input.  An auto-repeat represents a key being held down on
+            // the remote, which we want to translate to a (virtual) key 
+            // being held down on the PC keyboard; a distinct key press on
+            // the remote translates to a distinct key press on the PC.
+            //
+            // It can only be a repeat if there's a prior command that
+            // hasn't timed out yet, so start by checking for a previous
+            // command.
+            bool repeat = false, autoRepeat = false;
+            if (IRCommandIn != 0)
+            {
+                // We have a command in progress.  Check to see if the
+                // new command is a repeat of the previous command.  Check
+                // first to see if it's a "ditto", which explicitly represents
+                // an auto-repeat of the last command.
+                IRCommandCfg &cmdcfg = cfg.IRCommand[IRCommandIn - 1];
+                if (c.ditto)
+                {
+                    // We received a ditto.  Dittos are always auto-
+                    // repeats, so it's an auto-repeat as long as the
+                    // ditto is in the same protocol as the last command.
+                    // If the ditto is in a new protocol, the ditto can't
+                    // be for the last command we saw, because a ditto
+                    // never changes protocols from its antecedent.  In
+                    // such a case, we must have missed the antecedent
+                    // command and thus don't know what's being repeated.
+                    repeat = autoRepeat = (c.proId == cmdcfg.protocol);
+                }
+                else
+                {
+                    // It's not a ditto.  The new command is a repeat if
+                    // it matches the protocol and command code of the 
+                    // prior command.
+                    repeat = (c.proId == cmdcfg.protocol 
+                              && uint32_t(c.code) == cmdcfg.code.lo
+                              && uint32_t(c.code >> 32) == cmdcfg.code.hi);
+                              
+                    // If the command is a repeat, try to determine whether
+                    // it's an auto-repeat or a new press on the same key.
+                    // If the protocol uses dittos, it's definitely a new
+                    // key press, because an auto-repeat would have used a
+                    // ditto.  For a protocol that doesn't use dittos, both
+                    // an auto-repeat and a new key press just send the key
+                    // code again, so we can't tell the difference based on
+                    // that alone.  But if the protocol has a toggle bit, we
+                    // can tell by the toggle bit value: a new key press has
+                    // the opposite toggle value as the last key press, while 
+                    // an auto-repeat has the same toggle.  Note that if the
+                    // protocol doesn't use toggle bits, the toggle value
+                    // will always be the same, so we'll simply always treat
+                    // any repeat as an auto-repeat.  Many protocols simply
+                    // provide no way to distinguish the two, so in such
+                    // cases it's consistent with the native implementations
+                    // to treat any repeat as an auto-repeat.
+                    autoRepeat = 
+                        repeat 
+                        && !(cmdcfg.flags & IRFlagDittos)
+                        && c.toggle == lastIRToggle;
+                }
+            }
+            
+            // Check to see if it's a repeat of any kind
+            if (repeat)
+            {
+                // It's a repeat.  If it's not an auto-repeat, it's a
+                // new distinct key press, so we need to send the PC a
+                // momentary gap where we're not sending the same key,
+                // so that the PC also recognizes this as a distinct
+                // key press event.
+                if (!autoRepeat)
+                    IRKeyGap = true;
+                    
+                // restart the key-up timer
+                IRTimer.reset();
+            }
+            else if (c.ditto)
+            {
+                // It's a ditto, but not a repeat of the last command.
+                // But a ditto doesn't contain any information of its own
+                // on the command being repeated, so given that it's not
+                // our last command, we can't infer what command the ditto
+                // is for and thus can't make sense of it.  We have to
+                // simply ignore it and wait for the sender to start with
+                // a full command for a new key press.
+                IRCommandIn = 0;
+            }
+            else
+            {
+                // It's not a repeat, so the last command is no longer
+                // in effect (regardless of whether we find a match for
+                // the new command).
+                IRCommandIn = 0;
+                
+                // Check to see if we recognize the new command, by
+                // searching for a match in our learned code list.
+                for (int i = 0 ; i < MAX_IR_CODES ; ++i)
+                {
+                    // if the protocol and command code from the code
+                    // list both match the input, it's a match
+                    IRCommandCfg &cmdcfg = cfg.IRCommand[i];
+                    if (cmdcfg.protocol == c.proId 
+                        && cmdcfg.code.lo == uint32_t(c.code)
+                        && cmdcfg.code.hi == uint32_t(c.code >> 32))
+                    {
+                        // Found it!  Make this the last command, and 
+                        // remember the starting time.
+                        IRCommandIn = i + 1;
+                        lastIRToggle = c.toggle;
+                        IRTimer.reset();
+                        
+                        // no need to keep searching
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 //
@@ -2089,9 +2567,6 @@ void countButton(uint8_t typ, uint8_t shiftTyp, bool &kbKeys)
 // initialize the button inputs
 void initButtons(Config &cfg, bool &kbKeys)
 {
-    // presume we'll find no keyboard keys
-    kbKeys = false;
-    
     // presume no shift key
     shiftButton.index = -1;
     
@@ -2208,7 +2683,109 @@ static const uint8_t mediaKeyMap[] = {
      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0, // D0-DF
      0,  0,  1,  0,  0,  0,  0,  0,  0,  2,  4,  0,  0,  0,  0,  0, // E0-EF
      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0  // F0-FF
- };
+};
+ 
+// Keyboard key/joystick button state.  processButtons() uses this to 
+// build the set of key presses to report to the PC based on the logical
+// states of the button iputs.
+struct KeyState
+{
+    KeyState()
+    {
+        // zero all members
+        memset(this, 0, sizeof(*this));
+    }
+    
+    // Keyboard media keys currently pressed.  This is a bit vector in
+    // the format used in our USB keyboard reports (see USBJoystick.cpp).
+    uint8_t mediakeys;
+         
+    // Keyboard modifier (shift) keys currently pressed.  This is a bit 
+    // vector in the format used in our USB keyboard reports (see
+    // USBJoystick.cpp).
+    uint8_t modkeys;
+     
+    // Regular keyboard keys currently pressed.  Each element is a USB
+    // key code, or 0 for empty slots.  Note that the USB report format
+    // theoretically allows a flexible size limit, but the Windows KB
+    // drivers have a fixed limit of 6 simultaneous keys (and won't
+    // accept reports with more), so there's no point in making this
+    // flexible; we'll just use the fixed size dictated by Windows.
+    uint8_t keys[7];
+     
+    // number of valid entries in keys[] array
+    int nkeys;
+     
+    // Joystick buttons pressed, as a bit vector.  Bit n (1 << n)
+    // represents joystick button n, n in 0..31, with 0 meaning 
+    // unpressed and 1 meaning pressed.
+    uint32_t js;
+    
+    
+    // Add a key press.  'typ' is the button type code (ButtonTypeXxx),
+    // and 'val' is the value (the meaning of which varies by type code).
+    void addKey(uint8_t typ, uint8_t val)
+    {
+        // add the key according to the type
+        switch (typ)
+        {
+        case BtnTypeJoystick:
+            // joystick button
+            js |= (1 << (val - 1));
+            break;
+            
+        case BtnTypeKey:
+            // Keyboard key.  The USB keyboard report encodes regular
+            // keys and modifier keys separately, so we need to check
+            // which type we have.  Note that past versions mapped the 
+            // Keyboard Volume Up, Keyboard Volume Down, and Keyboard 
+            // Mute keys to the corresponding Media keys.  We no longer
+            // do this; instead, we have the separate BtnTypeMedia for
+            // explicitly using media keys if desired.
+            if (val >= 0xE0 && val <= 0xE7)
+            {
+                // It's a modifier key.  These are represented in the USB 
+                // reports with a bit mask.  We arrange the mask bits in
+                // the same order as the scan codes, so we can figure the
+                // appropriate bit with a simple shift.
+                modkeys |= (1 << (val - 0xE0));
+            }
+            else
+            {
+                // It's a regular key.  Make sure it's not already in the 
+                // list, and that the list isn't full.  If neither of these 
+                // apply, add the key to the key array.
+                if (nkeys < 7)
+                {
+                    bool found = false;
+                    for (int i = 0 ; i < nkeys ; ++i)
+                    {
+                        if (keys[i] == val)
+                        {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found)
+                        keys[nkeys++] = val;
+                }
+            }
+            break;
+
+        case BtnTypeMedia:
+            // Media control key.  The media keys are mapped in the USB
+            // report to bits, whereas the key codes are specified in the
+            // config with their USB usage numbers.  E.g., the config val
+            // for Media Next Track is 0xB5, but we encode this in the USB
+            // report as bit 0x08.  The mediaKeyMap[] table translates
+            // from the USB usage number to the mask bit.  If the key isn't
+            // among the subset we support, the mapped bit will be zero, so
+            // the "|=" will have no effect and the key will be ignored.
+            mediakeys |= mediaKeyMap[val];
+            break;                                
+        }
+    }
+};
 
 
 // Process the button state.  This sets up the joystick, keyboard, and
@@ -2217,16 +2794,8 @@ static const uint8_t mediaKeyMap[] = {
 // mapped to special device functions (e.g., Night Mode).
 void processButtons(Config &cfg)
 {
-    // start with an empty list of USB key codes
-    uint8_t modkeys = 0;
-    uint8_t keys[7] = { 0, 0, 0, 0, 0, 0, 0 };
-    int nkeys = 0;
-    
-    // clear the joystick buttons
-    uint32_t newjs = 0;
-    
-    // start with no media keys pressed
-    uint8_t mediakeys = 0;
+    // key state
+    KeyState ks;
     
     // calculate the time since the last run
     uint32_t dt = buttonTimer.read_us();
@@ -2275,6 +2844,9 @@ void processButtons(Config &cfg)
     ButtonState *bs = buttonState;
     for (int i = 0 ; i < nButtons ; ++i, ++bs)
     {
+        // get the config entry for the button
+        ButtonCfg *bc = &cfg.button[bs->cfgIndex];
+
         // Check the button type:
         //   - shift button
         //   - pulsed button
@@ -2355,45 +2927,78 @@ void processButtons(Config &cfg)
             // not a pulse switch - the logical state is the same as the physical state
             bs->logState = bs->physState;
         }
+        
+        // Determine if we're going to use the shifted version of the
+        // button.  We're using the shifted version if the shift button
+        // is down AND the button has ANY shifted meaning - a key assignment,
+        // a Night Mode toggle assignment, or an IR code.  If the button 
+        // doesn't have any meaning at all in shifted mode, the base version
+        // of the button applies whether or not the shift button is down.
+        //
+        // Note that the test for Night Mode is a bit tricky.  The shifted
+        // version of the button is the Night Mode toggle if the button matches
+        // the Night Mode button index, AND its flags are set with "toggle
+        // mode ON" (bit 0x02 is on) and "switch mode OFF" (bit 0x01 is off).
+        // That means the button flags & 0x03 must equal 0x02.
+        bool useShift = 
+            (shiftButton.state != 0
+             && (bc->typ2 != BtnTypeNone
+                 || bc->IRCommand2 != 0
+                 || (cfg.nightMode.btn == i+1 && (cfg.nightMode.flags & 0x03) == 0x02)));
+                 
+        // If we're using the shift function, and no other button has used
+        // the shift function yet (shift state 1: "shift button is down but
+        // no one has used the shift function yet"), then we've "consumed"
+        // the shift button press (so go to shift state 2: "shift button has
+        // been used by some other button press that has a shifted meaning").
+        if (useShift && shiftButton.state == 1)
+            shiftButton.state = 2;
 
         // carry out any edge effects from buttons changing states
         if (bs->logState != bs->prevLogState)
         {
-            // check for special key transitions
+            // check to see if this is the Night Mode button
             if (cfg.nightMode.btn == i + 1)
             {
-                // Check the switch type in the config flags.  If flag 0x01 is set,
-                // it's a persistent on/off switch, so the night mode state simply
-                // follows the current state of the switch.  Otherwise, it's a 
-                // momentary button, so each button push (i.e., each transition from
-                // logical state OFF to ON) toggles the current night mode state.
+                // Check the switch type in the config flags.  If flag 0x01 is 
+                // set, it's a persistent on/off switch, so the night mode 
+                // state simply tracks the current state of the switch.  
+                // Otherwise, it's a momentary button, so each button push 
+                // (i.e., each transition from logical state OFF to ON) toggles 
+                // the night mode state.
+                //
+                // Note that the "shift" flag (0x02) has no effect in switch
+                // mode.  Shifting only works for toggle mode.
                 if (cfg.nightMode.flags & 0x01)
                 {
-                    // on/off switch - when the button changes state, change
-                    // night mode to match the new state
+                    // It's an on/off switch.  Night mode simply tracks the
+                    // current switch state.
                     setNightMode(bs->logState);
                 }
                 else
                 {
-                    // Momentary switch - toggle the night mode state when the
-                    // physical button is pushed (i.e., when its logical state
-                    // transitions from OFF to ON).  
+                    // It's a momentary toggle switch.  Toggle the night mode 
+                    // state on each distinct press of the button: that is,
+                    // whenever the button's logical state transitions from 
+                    // OFF to ON.
                     //
-                    // In momentary mode, night mode flag 0x02 makes it the
-                    // shifted version of the button.  In this case, only
-                    // proceed if the shift button is pressed.
-                    bool pressed = bs->logState;
+                    // The "shift" flag (0x02) tells us whether night mode is
+                    // assigned to the shifted or unshifted version of the
+                    // button.
+                    bool pressed;
                     if ((cfg.nightMode.flags & 0x02) != 0)
                     {
-                        // if the shift button is pressed but hasn't been used
-                        // as a shift yet, mark it as used, so that it doesn't
-                        // also generate its own key code on release
-                        if (shiftButton.state == 1)
-                            shiftButton.state = 2;
-                            
-                        // if the shift button isn't even pressed
-                        if (shiftButton.state == 0)
-                            pressed = false;
+                        // Shift bit is set - night mode is assigned to the
+                        // shifted version of the button.  This is a Night
+                        // Mode toggle only if the Shift button is pressed.
+                        pressed = (shiftButton.state != 0);
+                    }
+                    else
+                    {
+                        // No shift bit - night mode is assigned to the
+                        // regular unshifted button.  The button press only
+                        // applies if the Shift button is NOT pressed.
+                        pressed = (shiftButton.state == 0);
                     }
                     
                     // if it's pressed (even after considering the shift mode),
@@ -2402,6 +3007,11 @@ void processButtons(Config &cfg)
                         toggleNightMode();
                 }
             }
+            
+            // press or release IR virtual keys on key state changes
+            uint8_t irc = useShift ? bc->IRCommand2 : bc->IRCommand;
+            if (irc != 0)
+                IR_buttonChange(irc, bs->logState);
             
             // remember the new state for comparison on the next run
             bs->prevLogState = bs->logState;
@@ -2413,131 +3023,53 @@ void processButtons(Config &cfg)
         {
             // Get the key type and code.  Start by assuming that we're
             // going to use the normal unshifted meaning.
-            ButtonCfg *bc = &cfg.button[bs->cfgIndex];
-            uint8_t typ = bc->typ;
-            uint8_t val = bc->val;
-            
-            // If the shift button is down, check for a shifted meaning.
-            if (shiftButton.state)
+            uint8_t typ, val;
+            if (useShift)
             {
-                // assume there's no shifted meaning
-                bool useShift = false;
-                
-                // If the button has a shifted meaning, use that.  The
-                // meaning might be a keyboard key or joystick button,
-                // but it could also be as the Night Mode toggle.
-                //
-                // The condition to check if it's the Night Mode toggle
-                // is a little complicated.  First, the easy part: our
-                // button index has to match the Night Mode button index.
-                // Now the hard part: the Night Mode button flags have
-                // to be set to 0x01 OFF and 0x02 ON: toggle mode (not
-                // switch mode, 0x01), and shift mode, 0x02.  So AND the
-                // flags with 0x03 to get these two bits, and check that
-                // the result is 0x02, meaning that only shift mode is on.
-                if (bc->typ2 != BtnTypeNone)
-                {
-                    // there's a shifted key assignment - use it
-                    typ = bc->typ2;
-                    val = bc->val2;
-                    useShift = true;
-                }
-                else if (cfg.nightMode.btn == i+1 
-                         && (cfg.nightMode.flags & 0x03) == 0x02)
-                {
-                    // shift+button = night mode toggle
-                    typ = BtnTypeNone;
-                    val = 0;
-                    useShift = true;
-                }
-                
-                // If there's a shifted meaning, advance the shift
-                // button state from 1 to 2 if applicable.  This signals
-                // that we've "consumed" the shift button press as the
-                // shift button, so it shouldn't generate its own key
-                // code event when released.
-                if (useShift && shiftButton.state == 1)
-                    shiftButton.state = 2;
+                typ = bc->typ2;
+                val = bc->val2;
             }
-            
+            else
+            {
+                typ = bc->typ;
+                val = bc->val;
+            }
+        
             // We've decided on the meaning of the button, so process
             // the keyboard or joystick event.
-            switch (typ)
-            {
-            case BtnTypeJoystick:
-                // joystick button
-                newjs |= (1 << (val - 1));
-                break;
-                
-            case BtnTypeKey:
-                // Keyboard key.  The USB keyboard report encodes regular
-                // keys and modifier keys separately, so we need to check
-                // which type we have.  Note that past versions mapped the 
-                // Keyboard Volume Up, Keyboard Volume Down, and Keyboard 
-                // Mute keys to the corresponding Media keys.  We no longer
-                // do this; instead, we have the separate BtnTypeMedia for
-                // explicitly using media keys if desired.
-                if (val >= 0xE0 && val <= 0xE7)
-                {
-                    // It's a modifier key.  These are represented in the USB 
-                    // reports with a bit mask.  We arrange the mask bits in
-                    // the same order as the scan codes, so we can figure the
-                    // appropriate bit with a simple shift.
-                    modkeys |= (1 << (val - 0xE0));
-                }
-                else
-                {
-                    // It's a regular key.  Make sure it's not already in the 
-                    // list, and that the list isn't full.  If neither of these 
-                    // apply, add the key to the key array.
-                    if (nkeys < 7)
-                    {
-                        bool found = false;
-                        for (int j = 0 ; j < nkeys ; ++j)
-                        {
-                            if (keys[j] == val)
-                            {
-                                found = true;
-                                break;
-                            }
-                        }
-                        if (!found)
-                            keys[nkeys++] = val;
-                    }
-                }
-                break;
-
-            case BtnTypeMedia:
-                // Media control key.  The media keys are mapped in the USB
-                // report to bits, whereas the key codes are specified in the
-                // config with their USB usage numbers.  E.g., the config val
-                // for Media Next Track is 0xB5, but we encode this in the USB
-                // report as bit 0x08.  The mediaKeyMap[] table translates
-                // from the USB usage number to the mask bit.  If the key isn't
-                // among the subset we support, the mapped bit will be zero, so
-                // the "|=" will have no effect and the key will be ignored.
-                mediakeys |= mediaKeyMap[val];
-                break;                                
-            }
+            ks.addKey(typ, val);
         }
     }
-
-    // check for joystick button changes
-    if (jsButtons != newjs)
-        jsButtons = newjs;
     
-    // Check for changes to the keyboard keys
-    if (kbState.data[0] != modkeys
-        || kbState.nkeys != nkeys
-        || memcmp(keys, &kbState.data[2], 6) != 0)
+    // If an IR input command is in effect, add the IR command's
+    // assigned key, if any.  If we're in an IR key gap, don't include
+    // the IR key.
+    if (IRCommandIn != 0 && !IRKeyGap)
+    {
+        IRCommandCfg &irc = cfg.IRCommand[IRCommandIn - 1];
+        ks.addKey(irc.keytype, irc.keycode);
+    }
+    
+    // We're finished building the new key state.  Update the global
+    // key state variables to reflect the new state. 
+    
+    // set the new joystick buttons (no need to check for changes, as we
+    // report these on every joystick report whether they changed or not)
+    jsButtons = ks.js;
+    
+    // check for keyboard key changes (we only send keyboard reports when
+    // something changes)
+    if (kbState.data[0] != ks.modkeys
+        || kbState.nkeys != ks.nkeys
+        || memcmp(ks.keys, &kbState.data[2], 6) != 0)
     {
         // we have changes - set the change flag and store the new key data
         kbState.changed = true;
-        kbState.data[0] = modkeys;
-        if (nkeys <= 6) {
+        kbState.data[0] = ks.modkeys;
+        if (ks.nkeys <= 6) {
             // 6 or fewer simultaneous keys - report the key codes
-            kbState.nkeys = nkeys;
-            memcpy(&kbState.data[2], keys, 6);
+            kbState.nkeys = ks.nkeys;
+            memcpy(&kbState.data[2], ks.keys, 6);
         }
         else {
             // more than 6 simultaneous keys - report rollover (all '1' key codes)
@@ -2546,11 +3078,13 @@ void processButtons(Config &cfg)
         }
     }        
     
-    // Check for changes to media keys
-    if (mediaState.data != mediakeys)
+    // check for media key changes (we only send media key reports when
+    // something changes)
+    if (mediaState.data != ks.mediakeys)
     {
+        // we have changes - set the change flag and store the new key data
         mediaState.changed = true;
-        mediaState.data = mediakeys;
+        mediaState.data = ks.mediakeys;
     }
 }
 
@@ -2811,12 +3345,34 @@ protected:
 // MMA8451Q.  This class encapsulates an interrupt handler and 
 // automatic calibration.
 //
-// We install an interrupt handler on the accelerometer "data ready" 
-// interrupt to ensure that we fetch each sample immediately when it
-// becomes available.  The accelerometer data rate is fairly high
-// (800 Hz), so it's not practical to keep up with it by polling.
-// Using an interrupt handler lets us respond quickly and read
-// every sample.
+// We collect data at the device's maximum rate of 800kHz (one sample 
+// every 1.25ms).  To keep up with the high data rate, we use the 
+// device's internal FIFO, and drain the FIFO by polling on each 
+// iteration of our main application loop.  In the past, we used an
+// interrupt handler to read the device immediately on the arrival of
+// each sample, but this created too much latency for the IR remote
+// receiver, due to the relatively long time it takes to transfer the
+// accelerometer readings via I2C.  The device's on-board FIFO can
+// store up to 32 samples, which gives us up to about 40ms between
+// polling iterations before the buffer overflows.  Our main loop runs
+// in under 2ms, so we can easily keep the FIFO far from overflowing.
+//
+// The MMA8451Q has three range modes, +/- 2G, 4G, and 8G.  The ADC
+// sample is the same bit width (14 bits) in all modes, so the higher
+// dynamic range modes trade physical precision for range.  For our
+// purposes, precision is more important than range, so we use the
+// +/-2G mode.  Further, our joystick range is calibrated for only
+// +/-1G.  This was unintentional on my part; I didn't look at the
+// MMA8451Q library closely enough to realize it was normalizing to
+// actual "G" units, and assumed that it was normalizing to a -1..+1 
+// scale.  In practice, a +/-1G scale seems perfectly adequate for
+// virtual pinball use, so I'm sticking with that range for now.  But
+// there might be some benefit in renormalizing to a +/-2G range, in
+// that it would allow for higher dynamic range for very hard nudges.
+// Everyone would have to tweak their nudge sensitivity in VP if I
+// made that change, though, so I'm keeping it as is for now; it would
+// be best to make it a config option ("accelerometer high dynamic range") 
+// rather than change it across the board.
 //
 // We automatically calibrate the accelerometer so that it's not
 // necessary to get it exactly level when installing it, and so
@@ -2850,43 +3406,46 @@ const int MMA8451_I2C_ADDRESS = (0x1d<<1);
 // accelerometer input history item, for gathering calibration data
 struct AccHist
 {
-    AccHist() { x = y = d = 0.0; xtot = ytot = 0.0; cnt = 0; }
-    void set(float x, float y, AccHist *prv)
+    AccHist() { x = y = dsq = 0; xtot = ytot = 0; cnt = 0; }
+    void set(int x, int y, AccHist *prv)
     {
         // save the raw position
         this->x = x;
         this->y = y;
-        this->d = distance(prv);
+        this->dsq = distanceSquared(prv);
     }
     
     // reading for this entry
-    float x, y;
+    int x, y;
     
-    // distance from previous entry
-    float d;
+    // (distance from previous entry) squared
+    int dsq;
     
     // total and count of samples averaged over this period
-    float xtot, ytot;
+    int xtot, ytot;
     int cnt;
 
-    void clearAvg() { xtot = ytot = 0.0; cnt = 0; }    
-    void addAvg(float x, float y) { xtot += x; ytot += y; ++cnt; }
-    float xAvg() const { return xtot/cnt; }
-    float yAvg() const { return ytot/cnt; }
+    void clearAvg() { xtot = ytot = 0; cnt = 0; }    
+    void addAvg(int x, int y) { xtot += x; ytot += y; ++cnt; }
+    int xAvg() const { return xtot/cnt; }
+    int yAvg() const { return ytot/cnt; }
     
-    float distance(AccHist *p)
-        { return sqrt(square(p->x - x) + square(p->y - y)); }
+    int distanceSquared(AccHist *p)
+        { return square(p->x - x) + square(p->y - y); }
 };
 
 // accelerometer wrapper class
 class Accel
 {
 public:
-    Accel(PinName sda, PinName scl, int i2cAddr, PinName irqPin)
-        : mma_(sda, scl, i2cAddr), intIn_(irqPin)
+    Accel(PinName sda, PinName scl, int i2cAddr, PinName irqPin, int range)
+        : mma_(sda, scl, i2cAddr)        
     {
         // remember the interrupt pin assignment
         irqPin_ = irqPin;
+        
+        // remember the range
+        range_ = range;
 
         // reset and initialize
         reset();
@@ -2895,138 +3454,130 @@ public:
     void reset()
     {
         // clear the center point
-        cx_ = cy_ = 0.0;
+        cx_ = cy_ = 0;
         
-        // start the calibration timer
+        // start the auto-centering timer
         tCenter_.start();
         iAccPrv_ = nAccPrv_ = 0;
         
         // reset and initialize the MMA8451Q
         mma_.init();
-                
-        // set the initial integrated velocity reading to zero
-        vx_ = vy_ = 0;
         
-        // set up our accelerometer interrupt handling
-        intIn_.rise(this, &Accel::isr);
-        mma_.setInterruptMode(irqPin_ == PTA14 ? 1 : 2);
+        // set the range
+        mma_.setRange(
+            range_ == AccelRange4G ? 4 :
+            range_ == AccelRange8G ? 8 :
+            2);
+                
+        // set the average accumulators to zero
+        xSum_ = ySum_ = 0;
+        nSum_ = 0;
         
         // read the current registers to clear the data ready flag
         mma_.getAccXYZ(ax_, ay_, az_);
-
-        // start our timers
-        tGet_.start();
-        tInt_.start();
     }
     
-    void disableInterrupts()
+    void poll()
     {
-        mma_.clearInterruptMode();
+        // read samples until we clear the FIFO
+        while (mma_.getFIFOCount() != 0)
+        {
+            int x, y, z;
+            mma_.getAccXYZ(x, y, z);
+            
+            // add the new reading to the running total for averaging
+            xSum_ += (x - cx_);
+            ySum_ += (y - cy_);
+            ++nSum_;
+            
+            // store the updates
+            ax_ = x;
+            ay_ = y;
+            az_ = z;
+        }
     }
-    
+
     void get(int &x, int &y) 
     {
-         // disable interrupts while manipulating the shared data
-         __disable_irq();
+        // read the shared data and store locally for calculations
+        int ax = ax_, ay = ay_;
+        int xSum = xSum_, ySum = ySum_;
+        int nSum = nSum_;
          
-         // read the shared data and store locally for calculations
-         float ax = ax_, ay = ay_;
-         float vx = vx_, vy = vy_;
-         
-         // reset the velocity sum for the next run
-         vx_ = vy_ = 0;
+        // reset the average accumulators for the next run
+        xSum_ = ySum_ = 0;
+        nSum_ = 0;
 
-         // get the time since the last get() sample
-         int dtus = tGet_.read_us();
-         tGet_.reset();
-         
-         // done manipulating the shared data
-         __enable_irq();
-         
-         // adjust the readings for the integration time
-         float dt = dtus/1000000.0f;
-         vx /= dt;
-         vy /= dt;
-         
-         // add this sample to the current calibration interval's running total
-         AccHist *p = accPrv_ + iAccPrv_;
-         p->addAvg(ax, ay);
+        // add this sample to the current calibration interval's running total
+        AccHist *p = accPrv_ + iAccPrv_;
+        p->addAvg(ax, ay);
 
-         // check for auto-centering every so often
-         if (tCenter_.read_us() > 1000000)
-         {
-             // add the latest raw sample to the history list
-             AccHist *prv = p;
-             iAccPrv_ = (iAccPrv_ + 1) % maxAccPrv;
-             p = accPrv_ + iAccPrv_;
-             p->set(ax, ay, prv);
+        // check for auto-centering every so often
+        if (tCenter_.read_us() > 1000000)
+        {
+            // add the latest raw sample to the history list
+            AccHist *prv = p;
+            iAccPrv_ = (iAccPrv_ + 1);
+            if (iAccPrv_ >= maxAccPrv)
+               iAccPrv_ = 0;
+            p = accPrv_ + iAccPrv_;
+            p->set(ax, ay, prv);
 
-             // if we have a full complement, check for stability
-             if (nAccPrv_ >= maxAccPrv)
-             {
-                 // check if we've been stable for all recent samples
-                 static const float accTol = .01f;
-                 AccHist *p0 = accPrv_;
-                 if (p0[0].d < accTol
-                     && p0[1].d < accTol
-                     && p0[2].d < accTol
-                     && p0[3].d < accTol
-                     && p0[4].d < accTol)
-                 {
-                     // Figure the new calibration point as the average of
-                     // the samples over the rest period
-                     cx_ = (p0[0].xAvg() + p0[1].xAvg() + p0[2].xAvg() + p0[3].xAvg() + p0[4].xAvg())/5.0f;
-                     cy_ = (p0[0].yAvg() + p0[1].yAvg() + p0[2].yAvg() + p0[3].yAvg() + p0[4].yAvg())/5.0f;
-                 }
-             }
-             else
-             {
-                // not enough samples yet; just up the count
-                ++nAccPrv_;
-             }
+            // if we have a full complement, check for stability
+            if (nAccPrv_ >= maxAccPrv)
+            {
+                // check if we've been stable for all recent samples
+                static const int accTol = 164*164;  // 1% of range, squared
+                AccHist *p0 = accPrv_;
+                if (p0[0].dsq < accTol
+                    && p0[1].dsq < accTol
+                    && p0[2].dsq < accTol
+                    && p0[3].dsq < accTol
+                    && p0[4].dsq < accTol)
+                {
+                    // Figure the new calibration point as the average of
+                    // the samples over the rest period
+                    cx_ = (p0[0].xAvg() + p0[1].xAvg() + p0[2].xAvg() + p0[3].xAvg() + p0[4].xAvg())/5;
+                    cy_ = (p0[0].yAvg() + p0[1].yAvg() + p0[2].yAvg() + p0[3].yAvg() + p0[4].yAvg())/5;
+                }
+            }
+            else
+            {
+               // not enough samples yet; just up the count
+               ++nAccPrv_;
+            }
              
-             // clear the new item's running totals
-             p->clearAvg();
+            // clear the new item's running totals
+            p->clearAvg();
             
-             // reset the timer
-             tCenter_.reset();
-             
-             // If we haven't seen an interrupt in a while, do an explicit read to
-             // "unstick" the device.  The device can become stuck - which is to say,
-             // it will stop delivering data-ready interrupts - if we fail to service
-             // one data-ready interrupt before the next one occurs.  Reading a sample
-             // will clear up this overrun condition and allow normal interrupt
-             // generation to continue.
-             //
-             // Note that this stuck condition *shouldn't* ever occur, because if only
-             // happens if we're spending a long period with interrupts disabled (in
-             // a critical section or in another interrupt handler), which will likely
-             // cause other, worse problems beyond the sticky accelerometer.  Even so, 
-             // it's easy to detect and correct, so we'll do so for the sake of making 
-             // the system a little more fault-tolerant.
-             if (tInt_.read_us() > 1000000)
-             {
-                float x, y, z;
-                mma_.getAccXYZ(x, y, z);
-             }
-         }
+            // reset the timer
+            tCenter_.reset();
+        }
          
-         // report our integrated velocity reading in x,y
-         x = rawToReport(vx);
-         y = rawToReport(vy);
+        // report our integrated velocity reading in x,y
+        x = rawToReport(xSum/nSum);
+        y = rawToReport(ySum/nSum);
          
 #ifdef DEBUG_PRINTF
-         if (x != 0 || y != 0)        
-             printf("%f %f %d %d %f\r\n", vx, vy, x, y, dt);
+        if (x != 0 || y != 0)        
+            printf("%f %f %d %d %f\r\n", vx, vy, x, y, dt);
 #endif
-     }    
+    }    
          
 private:
     // adjust a raw acceleration figure to a usb report value
-    int rawToReport(float v)
+    int rawToReport(int v)
     {
-        // scale to the joystick report range and round to integer
-        int i = int(round(v*JOYMAX));
+        // Scale to the joystick report range.  The accelerometer
+        // readings use the native 14-bit signed integer representation,
+        // so their scale is 2^13.
+        //
+        // The 1G range is special: it uses the 2G native hardware range,
+        // but rescales the result to a 1G range for the joystick reports.
+        // So for that mode, we divide by 4096 rather than 8192.  All of
+        // the other modes map use the hardware scaling directly.
+        int i = v*JOYMAX;
+        i = (range_ == AccelRange1G ? i/4096 : i/8192);
         
         // if it's near the center, scale it roughly as 20*(i/20)^2,
         // to suppress noise near the rest position
@@ -3038,56 +3589,32 @@ private:
         return (i > 20 || i < -20 ? i : filter[i+20]);
     }
 
-    // interrupt handler
-    void isr()
-    {
-        // Read the axes.  Note that we have to read all three axes
-        // (even though we only really use x and y) in order to clear
-        // the "data ready" status bit in the accelerometer.  The
-        // interrupt only occurs when the "ready" bit transitions from
-        // off to on, so we have to make sure it's off.
-        float x, y, z;
-        mma_.getAccXYZ(x, y, z);
-        
-        // calculate the time since the last interrupt
-        float dt = tInt_.read();
-        tInt_.reset();
-
-        // integrate the time slice from the previous reading to this reading
-        vx_ += (x + ax_ - 2*cx_)*dt/2;
-        vy_ += (y + ay_ - 2*cy_)*dt/2;
-        
-        // store the updates
-        ax_ = x;
-        ay_ = y;
-        az_ = z;
-    }
-    
     // underlying accelerometer object
     MMA8451Q mma_;
     
-    // last raw acceleration readings
-    float ax_, ay_, az_;
+    // last raw acceleration readings, on the device's signed 14-bit 
+    // scale -8192..+8191
+    int ax_, ay_, az_;
     
-    // integrated velocity reading since last get()
-    float vx_, vy_;
+    // running sum of readings since last get()
+    int xSum_, ySum_;
+    
+    // number of readings since last get()
+    int nSum_;
         
-    // timer for measuring time between get() samples
-    Timer tGet_;
-    
-    // timer for measuring time between interrupts
-    Timer tInt_;
-
     // Calibration reference point for accelerometer.  This is the
     // average reading on the accelerometer when in the neutral position
     // at rest.
-    float cx_, cy_;
+    int cx_, cy_;
+    
+    // range (AccelRangeXxx value, from config.h)
+    uint8_t range_;
 
-    // timer for atuo-centering
+    // atuo-centering timer
     Timer tCenter_;
 
     // Auto-centering history.  This is a separate history list that
-    // records results spaced out sparesely over time, so that we can
+    // records results spaced out sparsely over time, so that we can
     // watch for long-lasting periods of rest.  When we observe nearly
     // no motion for an extended period (on the order of 5 seconds), we
     // take this to mean that the cabinet is at rest in its neutral 
@@ -3104,9 +3631,6 @@ private:
     
     // interurupt pin name
     PinName irqPin_;
-    
-    // interrupt router
-    InterruptIn intIn_;
 };
 
 // ---------------------------------------------------------------------------
@@ -3274,25 +3798,37 @@ private:
 //   so we don't want to push the button on a TV that's already on.
 //   
 
-// Current PSU2 state:
+// Current PSU2 power state:
 //   1 -> default: latch was on at last check, or we haven't checked yet
 //   2 -> latch was off at last check, SET pulsed high
 //   3 -> SET pulsed low, ready to check status
 //   4 -> TV timer countdown in progress
 //   5 -> TV relay on
+//   6 -> sending IR signals designed as TV ON signals
 uint8_t psu2_state = 1;
 
 // TV relay state.  The TV relay can be controlled by the power-on
 // timer and directly from the PC (via USB commands), so keep a
 // separate state for each:
-//
 //   0x01 -> turned on by power-on timer
 //   0x02 -> turned on by USB command
 uint8_t tv_relay_state = 0x00;
 const uint8_t TV_RELAY_POWERON = 0x01;
 const uint8_t TV_RELAY_USB     = 0x02;
 
-// TV ON switch relay control
+// TV ON IR command state.  When the main PSU2 power state reaches
+// the IR phase, we use this sub-state counter to send the TV ON
+// IR signals.  We initialize to state 0 when the main state counter
+// reaches the IR step.  In state 0, we start transmitting the first
+// (lowest numbered) IR command slot marked as containing a TV ON
+// code, and advance to state 1.  In state 1, we check to see if
+// the transmitter is still sending; if so, we do nothing, if so
+// we start transmitting the second TV ON code and advance to state
+// 2.  Continue until we run out of TV ON IR codes, at which point
+// we advance to the next main psu2_state step.
+uint8_t tvon_ir_state = 0;
+
+// TV ON switch relay control output pin
 DigitalOut *tv_relay;
 
 // PSU2 power sensing circuit connections
@@ -3313,12 +3849,27 @@ void tvRelayUpdate(uint8_t bit, bool state)
         tv_relay->write(tv_relay_state != 0);
 }
 
-// Timer interrupt
-Ticker tv_ticker;
-float tv_delay_time;
-void TVTimerInt()
+// PSU2 Status update routine.  The main loop calls this from time 
+// to time to update the power sensing state and carry out TV ON 
+// functions.
+Timer powerStatusTimer;
+uint32_t tv_delay_time_us;
+void powerStatusUpdate(Config &cfg)
 {
-    // time since last state change
+    // Only update every 1/4 second or so.  Note that if the PSU2
+    // circuit isn't configured, the initialization routine won't 
+    // start the timer, so it'll always read zero and we'll always 
+    // skip this whole routine.
+    if (powerStatusTimer.read_us() < 250000)
+        return;
+        
+    // reset the update timer for next time
+    powerStatusTimer.reset();
+    
+    // TV ON timer.  We start this timer when we detect a change
+    // in the PSU2 status from OFF to ON.  When the timer reaches
+    // the configured TV ON delay time, and the PSU2 power is still
+    // on, we'll trigger the TV ON relay and send the TV ON IR codes.
     static Timer tv_timer;
 
     // Check our internal state
@@ -3338,6 +3889,7 @@ void TVTimerInt()
             // try setting the latch
             psu2_status_set->write(1);
         }
+        powerTimerDiagState = 0;
         break;
         
     case 2:
@@ -3345,6 +3897,7 @@ void TVTimerInt()
         // the latch.  Drop the SET signal and go to CHECK state.
         psu2_status_set->write(0);
         psu2_state = 3;
+        powerTimerDiagState = 0;
         break;
         
     case 3:
@@ -3362,7 +3915,6 @@ void TVTimerInt()
             
             // start the power timer diagnostic flashes
             powerTimerDiagState = 2;
-            diagLED();
         }
         else
         {
@@ -3375,53 +3927,136 @@ void TVTimerInt()
         break;
         
     case 4:
-        // TV timer countdown in progress.  If we've reached the
-        // delay time, pulse the relay.
-        if (tv_timer.read() >= tv_delay_time)
+        // TV timer countdown in progress.  The latch has to stay on during
+        // the countdown; if the latch turns off, PSU2 power must have gone
+        // off again before the countdown finished.
+        if (!psu2_status_sense->read())
+        {
+            // power is off - start a new check cycle
+            psu2_status_set->write(1);
+            psu2_state = 2;
+            break;
+        }
+        
+        // Flash the power time diagnostic every two cycles
+        powerTimerDiagState = (powerTimerDiagState + 1) & 0x03;
+        
+        // if we've reached the delay time, pulse the relay
+        if (tv_timer.read_us() >= tv_delay_time_us)
         {
             // turn on the relay for one timer interval
             tvRelayUpdate(TV_RELAY_POWERON, true);
             psu2_state = 5;
+            
+            // show solid blue on the diagnostic LED while the relay is on
+            powerTimerDiagState = 2;
         }
-        
-        // flash the power time diagnostic every two interrupts
-        powerTimerDiagState = (powerTimerDiagState + 1) & 0x03;
-        diagLED();
         break;
         
     case 5:
         // TV timer relay on.  We pulse this for one interval, so
-        // it's now time to turn it off and return to the default state.
+        // it's now time to turn it off.
         tvRelayUpdate(TV_RELAY_POWERON, false);
-        psu2_state = 1;
         
-        // done with the diagnostic flashes
+        // Proceed to sending any TV ON IR commands
+        psu2_state = 6;
+        tvon_ir_state = 0;
+    
+        // diagnostic LEDs off for now
         powerTimerDiagState = 0;
-        diagLED();
+        break;
+        
+    case 6:        
+        // Sending TV ON IR signals.  Start with the assumption that
+        // we have no IR work to do, in which case we're done with the
+        // whole TV ON sequence.  So by default return to state 1.
+        psu2_state = 1;
+        powerTimerDiagState = 0;
+        
+        // If we have an IR emitter, check for TV ON IR commands
+        if (ir_tx != 0)
+        {
+            // check to see if the last transmission is still in progress
+            if (ir_tx->isSending())
+            {
+                // We're still sending the last transmission.  Stay in
+                // state 6.
+                psu2_state = 6;
+                powerTimerDiagState = 4;
+                break;
+            }
+                
+            // The last transmission is done, so check for a new one.
+            // Look for the Nth TV ON IR slot, where N is our state
+            // number.
+            for (int i = 0, n = 0 ; i < MAX_IR_CODES ; ++i)
+            {
+                // is this a TV ON command?
+                if ((cfg.IRCommand[i].flags & IRFlagTVON) != 0)
+                {
+                    // It's a TV ON command - check if it's the one we're
+                    // looking for.
+                    if (n == tvon_ir_state)
+                    {
+                        // It's the one.  Start transmitting it by
+                        // pushing its virtual button.
+                        int vb = IRConfigSlotToVirtualButton[i];
+                        ir_tx->pushButton(vb, true);
+                        
+                        // Pushing the button starts transmission, and once
+                        // started, the transmission will run to completion
+                        // even if the button is no longer pushed.  So we
+                        // can immediately un-push the button, since we only
+                        // need to send the code once.
+                        ir_tx->pushButton(vb, false);
+                        
+                        // Advance to the next TV ON IR state, where we'll
+                        // await the end of this transmission and move on to
+                        // the next one.
+                        psu2_state = 6;
+                        tvon_ir_state++;
+                        break;
+                    }
+                    
+                    // it's not ours - count it and keep looking
+                    ++n;
+                }
+            }
+        }
         break;
     }
+    
+    // update the diagnostic LEDs
+    diagLED();
 }
 
-// Start the TV ON checker.  If the status sense circuit is enabled in
-// the configuration, we'll set up the pin connections and start the
-// interrupt handler that periodically checks the status.  Does nothing
-// if any of the pins are configured as NC.
-void startTVTimer(Config &cfg)
+// Start the power status timer.  If the status sense circuit is enabled 
+// in the configuration, we'll set up the pin connections and start the
+// timer for our periodic status checks.  Does nothing if any of the pins 
+// are configured as NC.
+void startPowerStatusTimer(Config &cfg)
 {
     // only start the timer if the pins are configured and the delay
     // time is nonzero
-    if (cfg.TVON.delayTime != 0
-        && cfg.TVON.statusPin != 0xFF 
-        && cfg.TVON.latchPin != 0xFF 
-        && cfg.TVON.relayPin != 0xFF)
+    powerStatusTimer.reset();
+    if (cfg.TVON.statusPin != 0xFF 
+        && cfg.TVON.latchPin != 0xFF)
     {
+        // set up the power sensing circuit connections
         psu2_status_sense = new DigitalIn(wirePinName(cfg.TVON.statusPin));
         psu2_status_set = new DigitalOut(wirePinName(cfg.TVON.latchPin));
-        tv_relay = new DigitalOut(wirePinName(cfg.TVON.relayPin));
-        tv_delay_time = cfg.TVON.delayTime/100.0f;
+        
+        // if there's a TV ON relay, set up its control pin
+        if (cfg.TVON.relayPin != 0xFF)
+            tv_relay = new DigitalOut(wirePinName(cfg.TVON.relayPin));
+            
+        // Set the TV ON delay time.  We store the time internally in
+        // microseconds, but the configuration stores it in units of
+        // 1/100 second = 10ms = 10000us.
+        tv_delay_time_us = cfg.TVON.delayTime * 10000;;
     
-        // Set up our time routine to run every 1/4 second.  
-        tv_ticker.attach(&TVTimerInt, 0.25);
+        // Start the TV timer
+        powerStatusTimer.start();
     }
 }
 
@@ -3482,6 +4117,18 @@ void TVRelay(int mode)
 //
 NVM nvm;
 
+// Flag: configuration save requested.  The USB command message handler
+// sets this flag when a command is sent requesting the save.  We don't
+// do the save inline in the command handler, but handle it on the next 
+// main loop iteration.
+const uint8_t SAVE_CONFIG_ONLY = 1;
+const uint8_t SAVE_CONFIG_AND_REBOOT = 2;
+uint8_t saveConfigPending = 0;
+
+// If saveConfigPending == SAVE_CONFIG_AND_REBOOT, this specifies the
+// delay time in seconds before rebooting.
+uint8_t saveConfigRebootTime;
+
 // For convenience, a macro for the Config part of the NVM structure
 #define cfg (nvm.d.c)
 
@@ -3499,26 +4146,10 @@ static const union
 }
 flash_nvm_memory __attribute__ ((aligned(SECTOR_SIZE))) = { };
 
-// figure the flash address as a pointer along with the number of sectors
-// required to store the structure
-NVM *configFlashAddr(int &addr, int &numSectors)
-{
-    // figure how many flash sectors we span, rounding up to whole sectors
-    numSectors = (sizeof(NVM) + SECTOR_SIZE - 1)/SECTOR_SIZE;
-
-    // figure the address - this is the highest flash address where the
-    // structure will fit with the start aligned on a sector boundary
-    addr = (int)&flash_nvm_memory;
-    
-    // return the address as a pointer
-    return (NVM *)addr;
-}
-
 // figure the flash address as a pointer
 NVM *configFlashAddr()
 {
-    int addr, numSectors;
-    return configFlashAddr(addr, numSectors);
+    return (NVM *)&flash_nvm_memory;
 }
 
 // Load the config from flash.  Returns true if a valid non-default
@@ -3570,8 +4201,7 @@ void saveConfigToFlash()
     waitPlungerIdle();
     
     // get the config block location in the flash memory
-    int addr, sectors;
-    configFlashAddr(addr, sectors);
+    uint32_t addr = uint32_t(configFlashAddr());
     
     // loop until we save it successfully
     for (int i = 0 ; i < 5 ; ++i)
@@ -3588,10 +4218,10 @@ void saveConfigToFlash()
         // verify the data
         if (nvm.verify(addr))
         {
-            // show a diagnostic success flash
-            for (int j = 0 ; j < 3 ; ++j)
+            // show a diagnostic success flash (rapid green)
+            for (int j = 0 ; j < 4 ; ++j)
             {
-                diagLED(0, 1, 1);
+                diagLED(0, 1, 0);
                 wait_us(50000);
                 diagLED(0, 0, 0);
                 wait_us(50000);
@@ -3704,8 +4334,10 @@ uint8_t reportPlungerStatTime;  // extra exposure time for plunger pixel report
 // Turn night mode on or off
 static void setNightMode(bool on)
 {
-    // set the new night mode flag in the noisy output class
-    nightMode = on;
+    // Set the new night mode flag in the noisy output class.  Note
+    // that we use the status report bit flag value 0x02 when on, so
+    // that we can just '|' this into the overall status bits.
+    nightMode = on ? 0x02 : 0x00;
     
     // update the special output pin that shows the night mode state
     int port = int(cfg.nightMode.port) - 1;
@@ -4890,6 +5522,7 @@ int calBtnLit = false;
 #define if_msg_valid(test)  if (test)
 #define v_byte(var, ofs)    cfg.var = data[ofs]
 #define v_ui16(var, ofs)    cfg.var = wireUI16(data+(ofs))
+#define v_ui32(var, ofs)    cfg.var = wireUI32(data+(ofs))
 #define v_pin(var, ofs)     cfg.var = wirePinName(data[ofs])
 #define v_byte_ro(val, ofs) // ignore read-only variables on SET
 #define v_ui32_ro(val, ofs) // ignore read-only variables on SET
@@ -4901,6 +5534,7 @@ int calBtnLit = false;
 #undef if_msg_valid
 #undef v_byte
 #undef v_ui16
+#undef v_ui32
 #undef v_pin
 #undef v_byte_ro
 #undef v_ui32_ro
@@ -4911,6 +5545,7 @@ int calBtnLit = false;
 #define if_msg_valid(test)
 #define v_byte(var, ofs)    data[ofs] = cfg.var
 #define v_ui16(var, ofs)    ui16Wire(data+(ofs), cfg.var)
+#define v_ui32(var, ofs)    ui32Wire(data+(ofs), cfg.var)
 #define v_pin(var, ofs)     pinNameWire(data+(ofs), cfg.var)
 #define v_byte_ro(val, ofs) data[ofs] = (val)
 #define v_ui32_ro(val, ofs) ui32Wire(data+(ofs), val);
@@ -4986,12 +5621,9 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
                 cfg.psUnitNo = newUnitNo;
                 cfg.plunger.enabled = data[3] & 0x01;
                 
-                // save the configuration
-                saveConfigToFlash();
-                
-                // reboot if necessary
-                if (needReset)
-                    reboot(js);
+                // set the flag to do the save
+                saveConfigPending = needReset ? SAVE_CONFIG_AND_REBOOT : SAVE_CONFIG_ONLY;
+                saveConfigRebootTime = 0;
             }
             break;
             
@@ -5035,13 +5667,10 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             break;
             
         case 6:
-            // 6 = Save configuration to flash.
-            saveConfigToFlash();
-            
-            // before disconnecting, pause for the delay time specified in
-            // the parameter byte (in seconds)
-            rebootTime_us = data[2] * 1000000L;
-            rebootTimer.start();
+            // 6 = Save configuration to flash.  Reboot after the delay
+            // time in seconds given in data[2].
+            saveConfigPending = SAVE_CONFIG_AND_REBOOT;
+            saveConfigRebootTime = data[2];
             break;
             
         case 7:
@@ -5091,7 +5720,20 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
             break;
             
         case 12:
-            // Unused
+            // 12 = Learn IR code.  This enters IR learning mode.  While
+            // in learning mode, we report raw IR signals and the first IR
+            // command decoded through the special IR report format.  IR
+            // learning mode automatically ends after a timeout expires if
+            // no command can be decoded within the time limit.
+            
+            // enter IR learning mode
+            IRLearningMode = 1;
+            
+            // cancel any regular IR input in progress
+            IRCommandIn = 0;
+            
+            // reset and start the learning mode timeout timer
+            IRTimer.reset();
             break;
             
         case 13:
@@ -5245,7 +5887,8 @@ int main(void)
 {
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
-
+    
+    
     // debugging: print memory config info
     //    -> no longer very useful, since we use our own custom malloc/new allocator (see xmalloc() above)
     // {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);} 
@@ -5313,12 +5956,20 @@ int main(void)
     // start the TLC5940 refresh cycle clock
     if (tlc5940 != 0)
         tlc5940->start();
-        
-    // start the TV timer, if applicable
-    startTVTimer(cfg);
+
+    // Assume that nothing uses keyboard keys.  We'll check for keyboard
+    // usage when initializing the various subsystems that can send keys
+    // (buttons, IR).  If we find anything that does, we'll create the
+    // USB keyboard interface.
+    bool kbKeys = false;
+
+    // set up the IR remote control emitter & receiver, if present
+    init_IR(cfg, kbKeys);
+
+    // start the power status time, if applicable
+    startPowerStatusTimer(cfg);
 
     // initialize the button input ports
-    bool kbKeys = false;
     initButtons(cfg, kbKeys);
     
     // Create the joystick USB client.  Note that the USB vendor/product ID
@@ -5349,9 +6000,16 @@ int main(void)
             connFlashTimer.reset();
         }
 
+        // If we've been disconnected for more than the reboot timeout,
+        // reboot.  Some PCs won't reconnect if we were left plugged in
+        // during a power cycle on the PC, but fortunately a reboot on
+        // the KL25Z will make the host notice us and trigger a reconnect.
         if (cfg.disconnectRebootTimeout != 0 
             && connTimeoutTimer.read() > cfg.disconnectRebootTimeout)
             reboot(js, false, 0);
+            
+        // update the PSU2 power sensing status
+        powerStatusUpdate(cfg);
     }
     
     // we're now connected to the host
@@ -5418,7 +6076,8 @@ int main(void)
     acTimer.start();
     
     // create the accelerometer object
-    Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, MMA8451_INT_PIN);
+    Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, 
+        MMA8451_INT_PIN, cfg.accelRange);
        
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
@@ -5442,6 +6101,9 @@ int main(void)
     // start the PWM update polling timer
     polledPwmTimer.start();
     
+    // Timer for configuration change reboots
+    ExtTimer saveConfigRebootTimer;
+    
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
     for (;;)
@@ -5456,7 +6118,7 @@ int main(void)
         LedWizMsg lwm;
         Timer lwt;
         lwt.start();
-        IF_DIAG(int msgCount = 0;)
+        IF_DIAG(int msgCount = 0;) 
         while (js.readLedWizMsg(lwm) && lwt.read_us() < 5000)
         {
             handleInputMsg(lwm, js);
@@ -5472,11 +6134,20 @@ int main(void)
             }
         )
         
+        // process IR input
+        process_IR(cfg, js);
+    
+        // update the PSU2 power sensing status
+        powerStatusUpdate(cfg);
+
         // update flashing LedWiz outputs periodically
         wizPulse();
         
         // update PWM outputs
         pollPwmUpdates();
+        
+        // poll the accelerometer
+        accel.poll();
             
         // collect diagnostic statistics, checkpoint 0
         IF_DIAG(mainLoopIterCheckpt[0] += mainLoopTimer.read_us();)
@@ -5487,7 +6158,7 @@ int main(void)
        
         // collect diagnostic statistics, checkpoint 1
         IF_DIAG(mainLoopIterCheckpt[1] += mainLoopTimer.read_us();)
-
+        
         // check for plunger calibration
         if (calBtn != 0 && !calBtn->read())
         {
@@ -5537,8 +6208,10 @@ int main(void)
             // Otherwise, return to the base state without saving anything.
             // If the button is released before we make it to calibration
             // mode, it simply cancels the attempt.
+            diagLED(1,1,1);
             if (calBtnState == 3 && calBtnTimer.read_us() > 15000000)
             {
+                diagLED(0,0,0);
                 // exit calibration mode
                 calBtnState = 0;
                 plungerReader.setCalMode(false);
@@ -5549,6 +6222,7 @@ int main(void)
             }
             else if (calBtnState != 3)
             {
+                diagLED(0,1,1);
                 // didn't make it to calibration mode - cancel the operation
                 calBtnState = 0;
             }
@@ -5635,10 +6309,12 @@ int main(void)
         bool jsOK = false;
         
         // figure the current status flags for joystick reports
-        uint16_t statusFlags =
-            (cfg.plunger.enabled ? 0x01 : 0x00)
-            | (nightMode ? 0x02 : 0x00)
-            | ((psu2_state & 0x07) << 2);
+        uint16_t statusFlags = 
+            cfg.plunger.enabled             // 0x01
+            | nightMode                     // 0x02
+            | ((psu2_state & 0x07) << 2);   // 0x04 0x08 0x10
+        if (IRLearningMode != 0)
+            statusFlags |= 0x20;
 
         // If it's been long enough since our last USB status report, send
         // the new report.  VP only polls for input in 10ms intervals, so
@@ -5692,7 +6368,7 @@ int main(void)
         
         // If joystick reports are turned off, send a generic status report
         // periodically for the sake of the Windows config tool.
-        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 5000)
+        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 10000UL)
         {
             jsOK = js.updateStatus(statusFlags);
             jsReportTimer.reset();
@@ -5758,8 +6434,23 @@ int main(void)
         }
         
         // if we have a reboot timer pending, check for completion
-        if (rebootTimer.isRunning() && rebootTimer.read_us() > rebootTime_us)
+        if (saveConfigRebootTimer.isRunning() 
+            && saveConfigRebootTimer.read() > saveConfigRebootTime)
             reboot(js);
+            
+        // if a config save is pending, do it now
+        if (saveConfigPending != 0)
+        {
+            // save the configuration
+            saveConfigToFlash();
+            
+            // if desired, reboot after the specified delay
+            if (saveConfigPending == SAVE_CONFIG_AND_REBOOT)
+                saveConfigRebootTimer.start();
+                
+            // the save is no longer pending
+            saveConfigPending = 0;
+        }
         
         // if we're disconnected, initiate a new connection
         if (!connected)
@@ -5809,10 +6500,19 @@ int main(void)
                     diagTimer.reset();
                 }
                 
-                // if the disconnect reboot timeout has expired, reboot
+                // If the disconnect reboot timeout has expired, reboot.
+                // Some PC hosts won't reconnect to a device that's left
+                // plugged in through various events on the PC side, such as 
+                // rebooting Windows, cycling power on the PC, or just a lost
+                // USB connection.  Rebooting the KL25Z seems to be the most
+                // reliable way to get Windows to notice us again after one
+                // of these events and make it reconnect.
                 if (cfg.disconnectRebootTimeout != 0 
                     && reconnTimeoutTimer.read() > cfg.disconnectRebootTimeout)
                     reboot(js, false, 0);
+
+                // update the PSU2 power sensing status
+                powerStatusUpdate(cfg);
             }
             
             // resume the main loop timer

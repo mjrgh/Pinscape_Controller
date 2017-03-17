@@ -59,6 +59,8 @@
 //                         3 -> latch off, SET pin low, ready to check status
 //                         4 -> TV timer countdown in progress
 //                         5 -> TV relay is on
+//                         6 -> sending IR signals designated as TV ON signals
+//              0x20 -> IR learning mode in progress
 //    00     2nd byte of status (reserved)
 //    00     3rd byte of status (reserved)
 //    00     always zero for joystick reports
@@ -241,7 +243,8 @@
 // In response, the device sends one report using this format:
 //
 //   bytes 0:1 = 0xA000.  This has bit pattern 10100 in the high 5 bits
-//               to distinguish it from other report types.
+//               (and 10100000 in the high 8 bits) to distinguish it from 
+//               other report types.
 //   bytes 2:5 = Build date.  This is returned as a 32-bit integer,
 //               little-endian as usual, encoding a decimal value
 //               in the format YYYYMMDD giving the date of the build.
@@ -254,8 +257,9 @@
 // This is requested by sending custom protocol message 65 13 (see below).
 // In response, the device sends one report using this format:
 //
-//   bytes 0:1 = 0xA1.  This has bit pattern 10101 in the high 5 bits
-//               to distinguish it from other report types.
+//   bytes 0:1 = 0xA1.  This has bit pattern 10100 in the high 5 bits (and
+//               10100001 in the high 8 bits) to distinguish it from other 
+//               report types.
 //   byte 2    = number of button reports
 //   byte 3    = Physical status of buttons 1-8, 1 bit each.  The low-order
 //               bit (0x01) is button 1.  Each bit is 0 if the button is off,
@@ -270,8 +274,62 @@
 //   byte 7    = buttons 33-40
 //   byte 8    = buttons 41-48
 //
+// 2G. IR sensor data report.
+// This is requested by sending custom protocol message 65 12 (see below).
+// That command puts controller in IR learning mode for a short time, during
+// which it monitors the IR sensor and send these special reports to relay the
+// readings.  The reports contain the raw data, plus the decoded command code
+// and protocol information if the controller is able to recognize and decode
+// the command.
 //
-// WHY WE USE THIS HACKY APPROACH TO DIFFERENT REPORT TYPES
+//   bytes 0:1 = 0xA2.  This has bit pattern 10100 in the high 5 bits (and
+//               10100010 in the high 8 bits to distinguish it from other 
+//               report types.
+//   byte 2    = number of raw reports that follow
+//   bytes 3:4 = first raw report, as a little-endian 16-bit int.  The
+//               value represents the time of an IR "space" or "mark" in
+//               2us units.  The low bit is 0 for a space and 1 for a mark.
+//               To recover the time in microseconds, mask our the low bit
+//               and multiply the result by 2.  Received codes always
+//               alternate between spaces and marks.  A space is an interval
+//               where the IR is off, and a mark is an interval with IR on.
+//               If the value is 0xFFFE (after masking out the low bit), it
+//               represents a timeout, that is, a time greater than or equal
+//               to the maximum that can be represented in this format,
+//               which is 131068us.  None of the IR codes we can parse have
+//               any internal signal component this long, so a timeout value 
+//               is generally seen only during a gap between codes where 
+//               nothing is being transmitted.
+//   bytes 4:5 = second raw report
+//   (etc for remaining reports)
+//
+//   If byte 2 is 0x00, it indicates that learning mode has expired without
+//   a code being received, so it's the last report sent for the learning
+//   session.
+//
+//   If byte 2 is 0xFF, it indicates that a code has been successfully 
+//   learned.  The rest of the report contains the learned code instead
+//   of the raw data:
+//
+//   byte 3 = protocol ID, which is an integer giving an internal code
+//            identifying the IR protocol that was recognized for the 
+//            received data.  See IRProtocolID.h for a list of the IDs.
+//   byte 4 = bit flags:
+//            0x02 -> the protocol uses "dittos"
+//   bytes 5:6:7:8:9:10:11:12 = a little-endian 64-bit int containing
+//            the code received.  The code is essentially the data payload 
+//            of the IR packet, after removing bits that are purely
+//            structural, such as toggle bits and error correction bits.
+//            The mapping between the IR bit stream and our 64-bit is 
+//            essentially arbitrary and varies by protocol, but it always
+//            has round-trip fidelity: using the 64-bit code value +
+//            protocol ID + flags to send an IR command will result in
+//            the same IR bit sequence being sent, modulo structural bits 
+//            that need to be updates in the reconstruction (such as toggle
+//            bits or sequencing codes).
+//
+//
+// WHY WE USE A HACKY APPROACH TO DIFFERENT REPORT TYPES
 //
 // The HID report system was specifically designed to provide a clean,
 // structured way for devices to describe the data they send to the host.
@@ -279,30 +337,26 @@
 // make about the contents of our report via the HID Report Descriptor
 // and stuffs our own different data format into the same structure.
 //
-// We use this hacky approach only because we can't use the official 
-// mechanism, due to the constraint that we want to emulate the LedWiz.
-// The right way to send different report types is to declare different
-// report types via extra HID Report Descriptors, then send each report
-// using one of the types we declared.  If it weren't for the LedWiz
-// constraint, we'd simply define the pixel dump and config query reports
-// as their own separate HID Report types, each consisting of opaque
-// blocks of bytes.  But we can't do this.  The snag is that some versions
-// of the LedWiz Windows host software parse the USB HID descriptors as part
-// of identifying a device as a valid LedWiz unit, and will only recognize
-// the device if it matches certain particulars about the descriptor
-// structure of a real LedWiz.  One of the features that's important to
-// some versions of the software is the descriptor link structure, which
-// is affected by the layout of HID Report Descriptor entries.  In order
-// to match the expected layout, we can only define a single kind of output
-// report.  Since we have to use Joystick reports for the sake of VP and
-// other pinball software, and we're only allowed the one report type, we
-// have to make that one report type the Joystick type.  That's why we
-// overload the joystick reports with other meanings.  It's a hack, but
-// at least it's a fairly reliable and isolated hack, iun that our special 
-// reports are only generated when clients specifically ask for them.
-// Plus, even if a client who doesn't ask for a special report somehow 
-// gets one, the worst that happens is that they get a momentary spurious
-// reading from the accelerometer and plunger.
+// We use this hacky approach only because we can't use the standard USB
+// HID mechanism for varying report types, which is to provide multiple
+// report descriptors and tag each report with a type byte that indicates 
+// which descriptor applies.  We can't use that standard approach because
+// we want to be 100% LedWiz compatible.  The snag is that some Windows
+// LedWiz clients parse the USB HID descriptors as part of identifying a
+// USB HID device as a valid LedWiz unit, and will only recognize the device
+// if certain properties of the HID descriptors match those of a real LedWiz.
+// One of the features that's important to some clients is the descriptor 
+// link structure, which is affected by the layout of HID Report Descriptor 
+// entries.  In order to match the expected layout, we can only define a 
+// single kind of output report.  Since we have to use Joystick reports for 
+// the sake of VP and other pinball software, and we're only allowed the 
+// one report type, we have to make that one report type the Joystick type.  
+// That's why we overload the joystick reports with other meanings.  It's a
+// hack, but at least it's a fairly reliable and isolated hack, in that our 
+// special reports are only generated when clients specifically ask for 
+// them.  Plus, even if a client who doesn't ask for a special report 
+// somehow gets one, the worst that happens is that they get a momentary 
+// spurious reading from the accelerometer and plunger.
 
 
 
@@ -473,8 +527,24 @@
 //                 1 = turn relay on
 //                 2 = pulse the relay as though the power-on delay timer fired
 //
-//       12 -> Unused
-//
+//       12 -> Learn IR code.  The device enters "IR learning mode".  While in 
+//             learning mode, the device reports the raw signals read through 
+//             the IR sensor to the PC through the special IR learning report 
+//             (see "2G" above).  If a signal can be decoded through a known 
+//             protocol, the device sends a final "2G" report with the decoded 
+//             command, then terminates learning mode.  If no signal can be 
+//             decoded within a timeout period, the mode automatically ends,
+//             and the device sends a final IR learning report with zero raw 
+//             signals to indicate termination.  After initiating IR learning 
+//             mode, the user should point the remote control with the key to 
+//             be learned at the IR sensor on the KL25Z, and press and hold the 
+//             key on the remote for a few seconds.  Holding the key for a few
+//             moments is important because it lets the decoder sense the type
+//             of auto-repeat coding the remote uses.  The learned code can be
+//             written to an IR config variable slot to program the controller
+//             to send the learned command on events like TV ON or a button
+//             press.
+//             
 //       13 -> Get button status report.  The device sends one button status report
 //             in response (see section "2F" above).
 //
@@ -600,6 +670,8 @@
 // Any bytes at the end of the message not otherwise specified are reserved
 // for future use and should always be set to 0 in the message data.
 //
+// Variable IDs:
+//
 // 0  -> QUERY ONLY: Describe the configuration variables.  The device
 //       sends a config variable query report with the following fields:
 //         
@@ -659,13 +731,18 @@
 //       (including virtual buttons, such as the ZB Launch Ball feature) are assigned 
 //       to generate keyboard key input.
 //
-// 4  -> Accelerometer orientation.
+// 4  -> Accelerometer settings
 //
 //        byte 3 -> orientation:
 //           0 = ports at front (USB ports pointing towards front of cabinet)
 //           1 = ports at left
 //           2 = ports at right
 //           3 = ports at rear
+//        byte 4 -> dynamic range
+//           0 = +/- 1G (2G hardware mode, but rescales joystick reports to 1G range)
+//           1 = +/- 2G (2G hardware mode)
+//           2 = +/- 4G (4G hardware mode)
+//           3 = +/- 8G (8G hardware mode)
 //
 // 5  -> Plunger sensor type.
 //
@@ -737,6 +814,11 @@
 //
 //       Set the delay time to 0 to disable the feature.  The pin assignments will
 //       be ignored if the feature is disabled.
+//
+//       If an IR remote control transmitter is installed (see variable 17), we'll
+//       also transmit any IR codes designated as TV ON codes when the startup timer
+//       finishes.  This allows TVs to be turned on via IR remotes codes rather than
+//       hard-wiring them through the relay.  The relay can be omitted in this case.
 //
 // 10 -> TLC5940NT setup.  This chip is an external PWM controller, with 32 outputs
 //       per chip and a serial data interface that allows the chips to be daisy-
@@ -874,6 +956,19 @@
 //
 //       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none.
 //
+// 17 -> IR Remote Control physical device setup.  We support IR remotes for
+//       both sending and receiving.  On the receive side, we can read from a 
+//       sensor such as a TSOP384xx.  The sensor requires one GPIO pin with 
+//       interrupt support, so any PTAxx or PTDxx pin will work.  On the send 
+//       side, we can transmit through any IR LED.  This requires one PWM 
+//       output pin.  To enable send and/or receive, specify a valid pin; to
+//       disable, set the pin NC (not connected).  Send and receive can be
+//       enabled and disabled independently; it's not necessary to enable
+//       the transmit function to use the receive function, or vice versa.
+//
+//       byte 3 = receiver input GPIO pin ID.  Must be interrupt-capable.
+//       byte 4 = transmitter pin.  Must be PWM-capable.
+//
 //
 // SPECIAL DIAGNOSTICS VARIABLES:  These work like the array variables below,
 // the only difference being that we don't report these in the number of array
@@ -924,15 +1019,75 @@
 // variable with index 0, with the first (and only) byte after that indicating
 // the maximum array index.
 //
+// 250 -> IR remote control commands - code part 2.  This stores the high-order
+//        32 bits of the remote control for each slot.  These are combined with
+//        the low-order 32 bits from variable 251 below to form a 64-bit code.
+//        
+//          byte 3 = Command slot number (1..MAX_IR_CODES)
+//          byte 4 = bits 32..39 of remote control command code
+//          byte 5 = bits 40..47
+//          byte 6 = bits 48..55
+//          byte 7 = bits 56..63
+//
+// 251 -> IR remote control commands - code part 1.  This stores the protocol
+//        identifier and low-order 32 bits of the remote control code for each
+//        remote control command slot.  The code represents a key press on a
+//        remote, and is usually determined by reading it from the device's
+//        actual remote via the IR sensor input feature.  These codes combine
+//        with variable 250 above to form a 64-bit code for each slot.
+//        See IRRemote/IRProtocolID.h for the protocol ID codes.
+//
+//          byte 3 = Command slot number (1..MAX_IR_CODES)
+//          byte 4 = protocol ID
+//          byte 5 = bits 0..7 of remote control command code
+//          byte 6 = bits 8..15
+//          byte 7 = bits 16..23
+//          byte 8 = bits 24..31
+//
+// 252 -> IR remote control commands - control information.  This stores
+//        descriptive information for each remote control command slot.
+//        The IR code for each slot is stored in the corresponding array
+//        entry in variables 251 & 250 above; the information is split over
+//        several variables like this because of the 8-byte command message 
+//        size in our USB protocol (which we use for LedWiz compatibility).
+//
+//          byte 3 = Command slot number (1..MAX_IR_CODES)
+//          byte 4 = bit flags:
+//                     0x01 -> send this code as a TV ON signal at system start
+//                     0x02 -> use "ditto" codes when sending the command
+//          byte 5 = key type; same as the key type in an input button variable
+//          byte 6 = key code; same as the key code in an input button variable
+//
+//        Each IR command slot can serve three purposes:
+//
+//        - First, it can be used as part of the TV ON sequence when the 
+//          system powers up, to turn on cabinet TVs that don't power up by 
+//          themselves.  To use this feature, set the TV ON bit in the flags.  
+//
+//        - Second, when the IR sensor receives a command in a given slot, we 
+//          can translate it into a keyboard key or joystick button press sent
+//          to the PC.  This lets you use any IR remote to send commands to the
+//          PC, allowing access to additional control inputs without any extra
+//          buttons on the cabinet.  To use this feature, assign the key to
+//          send in the key type and key code bytes.
+//
+//        - Third, we can send a given IR command when a physical cabinet
+//          button is pressed.  This lets you use cabinet buttons to send IR 
+//          commands to other devices in your system.  For example, you could 
+//          assign cabinet buttons to control the volume on a cab TV.  To use
+//          this feature, assign an IR slot as a button function in the button
+//          setup.
+//
 // 253 -> Extended input button setup.  This adds on to the information set by 
 //        variable 254 below, accessing additional fields.  The "shifted" key
 //        type and code fields assign a secondary meaning to the button that's
 //        used when the local Shift button is being held down.  See variable 16 
 //        above for more details on the Shift button.
 //
-//          byte 3 = Button number 91..MAX_BUTTONS
+//          byte 3 = Button number (1..MAX_BUTTONS)
 //          byte 4 = shifted key type (same codes as "key type" in var 254)
-//          byte 5 = shifted key code (same meaning as "key code" in var 254)
+//          byte 5 = shifted key code (same codes as "key code" in var 254)
+//          byte 6 = shifted IR command (see "IR command" in var 254)
 //
 // 254 -> Input button setup.  This sets up one button; it can be repeated for each
 //        button to be configured.  There are MAX_EXT_BUTTONS button slots (see
@@ -955,6 +1110,9 @@
 //                           state.  This is useful for the VPinMAME Coin Door button,
 //                           which requires the End key to be pressed each time the
 //                           door changes state.
+//          byte 8 = IR command to transmit when unshifted button is pressed.  This
+//                   contains an IR slot number (1..MAX_IR_CODES), or 0 if no code
+//                   is associated with the button.
 //
 // 255 -> LedWiz output port setup.  This sets up one output port; it can be repeated
 //        for each port to be configured.  There are 128 possible slots for output ports, 

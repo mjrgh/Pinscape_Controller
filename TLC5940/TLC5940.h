@@ -8,7 +8,7 @@
 #ifndef TLC5940_H
 #define TLC5940_H
 
-#include "FastPWM.h"
+#include "NewPwm.h"
 
 // --------------------------------------------------------------------------
 // Data Transmission Mode.
@@ -259,7 +259,7 @@ public:
         memset(spibuf, 0x00, spilen);
         
         // Configure the GSCLK output's frequency
-        gsclk.period(1.0/GSCLK_SPEED);
+        gsclk.getUnit()->period(1.0f/GSCLK_SPEED);
         
         // we're not yet ready to send new data to the chips
         cts = false;
@@ -293,7 +293,8 @@ public:
             __disable_irq();
         
             // turn off the GS clock and assert BLANK to turn off all outputs
-            gsclk.write(0);
+            gsclk.glitchFreeWrite(0);
+            wait_us(3);
             blank = 1;
 
             // done messing with shared data
@@ -462,7 +463,7 @@ private:
     
     // use a PWM out for the grayscale clock - this provides a stable
     // square wave signal without consuming CPU
-    FastPWM gsclk;
+    NewPwmOut gsclk;
 
     // Digital out pins used for the TLC5940
     DigitalOut blank;
@@ -584,10 +585,16 @@ private:
 
     void startBlank()
     {
-        // turn off the grayscale clock, and assert BLANK to end the grayscale cycle
-        gsclk.write(0);
+        // turn off the grayscale clock
+        gsclk.glitchFreeWrite(0);
+        
+        // make sure the gsclk cycle actually ends before we proceed - each
+        // cycle is 1/GSCLK_SPEED long, so we need about 3us
+        wait_us(3);
+        
+        // and assert BLANK to end the grayscale cycle
         blank = (enabled ? 1 : 0);  // for the slight delay (20ns) required after GSCLK goes low
-        blank = 1;        
+        blank = 1;
     }
             
     void endBlank()

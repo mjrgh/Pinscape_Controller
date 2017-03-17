@@ -24,12 +24,8 @@
 
 
 
-// Length of our joystick reports.  Important: This must be kept in sync 
-// with the actual joystick report format sent in update().
-const int reportLen = 14;
-
 // Maximum report sizes
-const int MAX_REPORT_JS_TX = reportLen;
+const int MAX_REPORT_JS_TX = USBJoystick::reportLen;
 const int MAX_REPORT_JS_RX = 8;
 const int MAX_REPORT_KB_TX = 8;
 const int MAX_REPORT_KB_RX = 4;
@@ -56,6 +52,7 @@ bool USBJoystick::update()
 #define putbe(idx, val) (report.data[(idx)+1] = (val) & 0xff, report.data[idx] = ((val) >> 8) & 0xff)
 #define putl(idx, val) (put(idx, val), put((idx)+2, (val) >> 16))
 #define putlbe(idx, val) (putbe((idx)+2, val), putbe(idx, (val) >> 16))
+#define put64(idx, val) (putl(idx, val), putl((idx)+4, (val) >> 32))
    put(0, _status);
    put(2, 0);  // second word of status - zero in high bit identifies as normal joystick report
    put(4, _buttonsLo);
@@ -308,25 +305,25 @@ bool USBJoystick::reportConfig(
     
     // write the free heap space
     put(12, freeHeapBytes);
-    
+
     // send the report
     report.length = reportLen;
     return sendTO(&report, 100);
 }
 
+// report physical button status
 bool USBJoystick::reportButtonStatus(int numButtons, const uint8_t *state)
 {
-    HID_REPORT report;
-
     // initially fill the report with zeros
+    HID_REPORT report;
     memset(report.data, 0, sizeof(report.data));
     
-    // Set the special status bits to indicate that it's a config report.
+    // set the special status bits to indicate that it's a buton report
     uint16_t s = 0xA100;
     put(0, s);
     
     // write the number of buttons
-    report.data[2] = (uint8_t)numButtons;
+    report.data[2] = uint8_t(numButtons);
     
     // Write the buttons - these are packed into ceil(numButtons/8) bytes.
     size_t btnBytes = (numButtons+7)/8;
@@ -338,6 +335,56 @@ bool USBJoystick::reportButtonStatus(int numButtons, const uint8_t *state)
     return sendTO(&report, 100);
 }
 
+// report raw IR timing codes (for learning mode)
+bool USBJoystick::reportRawIR(int n, const uint16_t *data)
+{
+    // initially fill the report with zeros
+    HID_REPORT report;
+    memset(report.data, 0, sizeof(report.data));
+    
+    // set the special status bits to indicate that it's an IR report
+    uint16_t s = 0xA200;
+    put(0, s);
+    
+    // limit the number of items reported to the available space
+    if (n > maxRawIR)
+        n = maxRawIR;
+    
+    // write the number of codes
+    report.data[2] = uint8_t(n);
+    
+    // write the codes
+    for (int i = 0, ofs = 3 ; i < n ; ++i, ofs += 2)
+        put(ofs, data[i]);
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+// report a decoded IR command
+bool USBJoystick::reportIRCode(uint8_t pro, uint8_t flags, uint64_t code)
+{
+    // initially fill the report with zeros
+    HID_REPORT report;
+    memset(report.data, 0, sizeof(report.data));
+    
+    // set the special status bits to indicate that it's an IR report
+    uint16_t s = 0xA200;
+    put(0, s);
+    
+    // set the raw count to 0xFF to flag that it's a decoded command
+    report.data[2] = 0xFF;
+    
+    // write the data
+    report.data[3] = pro;
+    report.data[4] = flags;
+    put64(5, code);
+        
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
 
 bool USBJoystick::move(int16_t x, int16_t y) 
 {
@@ -364,7 +411,6 @@ bool USBJoystick::updateStatus(uint32_t status)
    HID_REPORT report;
 
    // Fill the report according to the Joystick Descriptor
-#define put(idx, val) (report.data[idx] = (val) & 0xff, report.data[(idx)+1] = ((val) >> 8) & 0xff)
    memset(report.data, 0, reportLen);
    put(0, status);
    report.length = reportLen;
@@ -515,7 +561,7 @@ static const uint8_t reportDescriptorLW[] =
         LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
         LOGICAL_MAXIMUM(1), 0xFF,
         REPORT_SIZE(1), 0x08,       // 8 bits per report
-        REPORT_COUNT(1), reportLen, // standard report length (same as if we were in joystick mode)
+        REPORT_COUNT(1), USBJoystick::reportLen, // standard report length (same as if we were in joystick mode)
         INPUT(1), 0x02,             // Data, Variable, Absolute
 
         // output report (host to device)

@@ -51,7 +51,7 @@ public:
     inline int read() { return (*pdir >> shift) & 0x00000001; }
     inline operator int() { return read(); }
     
-private:
+protected:
     volatile uint32_t *pdir;    // pointer to GPIO register for this port 
     uint8_t shift;              // number of bits to shift register value to get our port bit
     
