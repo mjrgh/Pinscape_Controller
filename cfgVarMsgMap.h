@@ -72,9 +72,10 @@ void v_func
         break;
         
     case 4:
-        // Accelerometer orientation and range
-        v_byte(orientation, 2);
-        v_byte(accelRange, 3);
+        // Accelerometer options
+        v_byte(accel.orientation, 2);
+        v_byte(accel.range, 3);
+        v_byte(accel.autoCenterTime, 4);
         break;
 
     case 5:
@@ -163,7 +164,8 @@ void v_func
         
     case 16:
         // shift button configuration
-        v_byte(shiftButton, 2);
+        v_byte(shiftButton.idx, 2);
+        v_byte(shiftButton.mode, 3);
         break;
         
     case 17:

@@ -327,14 +327,10 @@ const char *getBuildID()
 // once we set things up, we never delete anything.  This means that we can 
 // allocate memory in bare blocks without any bookkeeping overhead.
 //
-// In addition, we can make a much larger overall pool of memory available
-// in a custom allocator.  The mbed library malloc() seems to have a pool
-// of about 3K to work with, even though there's really about 9K of RAM
-// left over after counting the static writable data and reserving space
-// for a reasonable stack.  I haven't looked at the mbed malloc to see why 
-// they're so stingy, but it appears from empirical testing that we can 
-// create a static array up to about 8K before things get crashy.
-
+// In addition, we can make a larger overall pool of memory available in
+// a custom allocator.  The RTL malloc() seems to have a pool of about 3K 
+// to work with, even though there really seems to be at least 8K left after 
+// reserving a reasonable amount of space for the stack.
 
 // halt with a diagnostic display if we run out of memory
 void HaltOutOfMem()
@@ -350,68 +346,6 @@ void HaltOutOfMem()
     }
 }
 
-#if 0//$$$
-// Memory pool.  We allocate two blocks at fixed addresses: one for
-// the malloc heap, and one for the native stack.  
-//
-// We allocate the stack block at the very top of memory.  This is what 
-// the mbed startup code does anyway, so we don't actually ever move the 
-// stack pointer into this area ourselves.  The point of this block is
-// to reserve space with the linker, so that it won't put any other static
-// data here in this region.
-//
-// The heap block goes just below the stack block.  This is a contiguous 
-// block of bytes from which we allocate blocks for malloc() and 'operator 
-// new' requests.
-//
-// WARNING!  When adding static data, be sure to check the build statistics
-// to ensure that static data fits in the available RAM.  The linker doesn't
-// seem to make such a check on its own, so you might not see an error if
-// added data pushes us past the 16K limit.
-
-// KL25Z address of top of RAM (one byte past end of RAM)
-const uint32_t TOP_OF_RAM = 0x20003000UL;
-
-// malloc pool size
-const size_t XMALLOC_POOL_SIZE = 8*1024;
-
-// stack size
-const size_t XMALLOC_STACK_SIZE = 2*1024;
-
-// figure the fixed locations of the malloc pool and stack: the stack goes
-// at the very top of RAM, and the malloc pool goes just below the stack
-const uint32_t XMALLOC_STACK_BASE = TOP_OF_RAM - XMALLOC_STACK_SIZE;
-const uint32_t XMALLOC_POOL_BASE = XMALLOC_STACK_BASE - XMALLOC_POOL_SIZE;
-
-// allocate the pools - use __attribute__((at)) to give them fixed addresses
-static char xmalloc_stack[XMALLOC_STACK_SIZE] __attribute__((at(XMALLOC_STACK_BASE)));
-static char xmalloc_pool[XMALLOC_POOL_SIZE] __attribute__((at(XMALLOC_POOL_BASE)));
-
-// malloc pool free pointer and space remaining
-static char *xmalloc_nxt = xmalloc_pool;
-static size_t xmalloc_rem = XMALLOC_POOL_SIZE;
-    
-// allocate from our pool
-void *xmalloc(size_t siz)
-{
-    // align to a 4-byte increment
-    siz = (siz + 3) & ~3;
-    
-    // if we're out of memory, halt with a diagnostic display
-    if (siz > xmalloc_rem)
-        HaltOutOfMem();
-
-    // get the next free location from the pool to return   
-    char *ret = xmalloc_nxt;
-    
-    // advance the pool pointer and decrement the remaining size counter
-    xmalloc_nxt += siz;
-    xmalloc_rem -= siz;
-    
-    // return the allocated block
-    return ret;
-};
-#elif 1//$$$
 // For our custom malloc, we take advantage of the known layout of the
 // mbed library memory management.  The mbed library puts all of the
 // static read/write data at the low end of RAM; this includes the
@@ -467,33 +401,6 @@ void *xmalloc(size_t siz)
     
     return ret;
 }
-#else //$$$
-extern char Image$$RW_IRAM1$$ZI$$Limit[]; // linker marker for top of ZI region
-static char *xmalloc_nxt = Image$$RW_IRAM1$$ZI$$Limit;
-const uint32_t xmallocMinStack = 2*1024;
-char *const TopOfRAM = (char *)0x20003000UL;
-uint16_t xmalloc_rem = uint16_t(TopOfRAM - Image$$RW_IRAM1$$ZI$$Limit - xmallocMinStack);
-void *xmalloc(size_t siz)
-{
-    // align to a 4-byte increment
-    siz = (siz + 3) & ~3;
-    
-    // check to ensure we're leaving enough stack free
-    if (xmalloc_nxt + siz > TopOfRAM - xmallocMinStack)
-        HaltOutOfMem();
-        
-    // get the next free location from the pool to return
-    char *ret = xmalloc_nxt;
-    
-    // advance past the allocated memory
-    xmalloc_nxt += siz;
-    xmalloc_rem -= siz;
-    
-    // return the allocated block
-    printf("malloc(%d) -> %lx\r\n", siz, ret);
-    return ret;
-}
-#endif//$$$
 
 // Overload operator new to call our custom malloc.  This ensures that
 // all 'new' allocations throughout the program (including library code)
@@ -1947,7 +1854,23 @@ IRTransmitter *ir_tx;
 // IRConfigSlotToVirtualButton[n] = ir_tx virtual button number for 
 // configuration slot n
 uint8_t IRConfigSlotToVirtualButton[MAX_IR_CODES];
-uint8_t IRAdHocSlot;
+
+// IR transmitter virtual button number for ad hoc IR command.  We allocate 
+// one virtual button for sending ad hoc IR codes, such as through the USB
+// protocol.
+uint8_t IRAdHocBtn;
+
+// Staging area for ad hoc IR commands.  It takes multiple messages
+// to fill out an IR command, so we store the partial command here
+// while waiting for the rest.
+static struct
+{
+    uint8_t protocol;       // protocol ID
+    uint64_t code;          // code
+    uint8_t dittos : 1;     // using dittos?
+    uint8_t ready : 1;      // do we have a code ready to transmit?    
+} IRAdHocCmd;
+    
 
 // IR mode timer.  In normal mode, this is the time since the last
 // command received; we use this to handle commands with timed effects,
@@ -1980,7 +1903,7 @@ uint8_t IRLearningMode = 0;
 // it's a ditto or just a repeat of the full code.
 IRCommand learnedIRCode;
 
-// IR comkmand received, as a config slot index, 1..MAX_IR_CODES.
+// IR command received, as a config slot index, 1..MAX_IR_CODES.
 // When we receive a command that matches one of our programmed commands, 
 // we note the slot here.  We also reset the IR timer so that we know how 
 // long it's been since the command came in.  This lets us handle commands 
@@ -2000,6 +1923,7 @@ uint8_t lastIRToggle = 0;
 // the associated key to the PC, so that the PC likewise recognizes the 
 // distinct key press.  
 uint8_t IRKeyGap = false;
+
 
 // initialize
 void init_IR(Config &cfg, bool &kbKeys)
@@ -2045,7 +1969,7 @@ void init_IR(Config &cfg, bool &kbKeys)
         
         // allocate an additional virtual button for transmitting ad hoc
         // codes, such as for the "send code" USB API function
-        IRAdHocSlot = nVirtualButtons++;
+        IRAdHocBtn = nVirtualButtons++;
             
         // create the transmitter
         ir_tx = new IRTransmitter(pin, nVirtualButtons);
@@ -2109,264 +2033,285 @@ void IR_buttonChange(uint8_t cmd, bool pressed)
     }
 }
 
-// Process IR input
+// Process IR input and output
 void process_IR(Config &cfg, USBJoystick &js)
 {
-    // if there's no IR receiver attached, there's nothing to do
-    if (ir_rx == 0)
-        return;
-        
-    // Time out any received command
-    if (IRCommandIn != 0)
+    // check for transmitter tasks, if there's a transmitter
+    if (ir_tx != 0)
     {
-        // Time out inter-key gap mode after 30ms; time out all 
-        // commands after 100ms.
-        uint32_t t = IRTimer.read_us();
-        if (t > 100000)
-            IRCommandIn = 0;
-        else if (t > 30000)
-            IRKeyGap = false;
-    }
-
-    // Check if we're in learning mode
-    if (IRLearningMode != 0)
-    {
-        // Learning mode.  Read raw inputs from the IR sensor and 
-        // forward them to the PC via USB reports, up to the report
-        // limit.
-        const int nmax = USBJoystick::maxRawIR;
-        uint16_t raw[nmax];
-        int n;
-        for (n = 0 ; n < nmax && ir_rx->processOne(raw[n]) ; ++n) ;
-        
-        // if we read any raw samples, report them
-        if (n != 0)
-            js.reportRawIR(n, raw);
-            
-        // check for a command
-        IRCommand c;
-        if (ir_rx->readCommand(c))
+        // If we're not currently sending, and an ad hoc IR command
+        // is ready to send, send it.
+        if (!ir_tx->isSending() && IRAdHocCmd.ready)
         {
-            // check the current learning state
-            switch (IRLearningMode)
+            // program the command into the transmitter virtual button
+            // that we reserved for ad hoc commands
+            ir_tx->programButton(IRAdHocBtn, IRAdHocCmd.protocol,
+                IRAdHocCmd.dittos, IRAdHocCmd.code);
+                
+            // send the command - just pulse the button to send it once
+            ir_tx->pushButton(IRAdHocBtn, true);
+            ir_tx->pushButton(IRAdHocBtn, false);
+            
+            // we've sent the command, so clear the 'ready' flag
+            IRAdHocCmd.ready = false;
+        }
+    }
+    
+    // check for receiver tasks, if there's a receiver
+    if (ir_rx != 0)
+    {
+        // Time out any received command
+        if (IRCommandIn != 0)
+        {
+            // Time out inter-key gap mode after 30ms; time out all 
+            // commands after 100ms.
+            uint32_t t = IRTimer.read_us();
+            if (t > 100000)
+                IRCommandIn = 0;
+            else if (t > 30000)
+                IRKeyGap = false;
+        }
+    
+        // Check if we're in learning mode
+        if (IRLearningMode != 0)
+        {
+            // Learning mode.  Read raw inputs from the IR sensor and 
+            // forward them to the PC via USB reports, up to the report
+            // limit.
+            const int nmax = USBJoystick::maxRawIR;
+            uint16_t raw[nmax];
+            int n;
+            for (n = 0 ; n < nmax && ir_rx->processOne(raw[n]) ; ++n) ;
+            
+            // if we read any raw samples, report them
+            if (n != 0)
+                js.reportRawIR(n, raw);
+                
+            // check for a command
+            IRCommand c;
+            if (ir_rx->readCommand(c))
             {
-            case 1:
-                // Initial state, waiting for the first decoded command.
-                // This is it.
-                learnedIRCode = c;
+                // check the current learning state
+                switch (IRLearningMode)
+                {
+                case 1:
+                    // Initial state, waiting for the first decoded command.
+                    // This is it.
+                    learnedIRCode = c;
+                    
+                    // Check if we need additional information.  If the
+                    // protocol supports dittos, we have to wait for a repeat
+                    // to see if the remote actually uses the dittos, since
+                    // some implementations of such protocols use the dittos
+                    // while others just send repeated full codes.  Otherwise,
+                    // all we need is the initial code, so we're done.
+                    IRLearningMode = (c.hasDittos ? 2 : 3);
+                    break;
+                    
+                case 2:
+                    // Code received, awaiting auto-repeat information.  If
+                    // the protocol has dittos, check to see if we got a ditto:
+                    //
+                    // - If we received a ditto in the same protocol as the
+                    //   prior command, the remote uses dittos.
+                    //
+                    // - If we received a repeat of the prior command (not a
+                    //   ditto, but a repeat of the full code), the remote
+                    //   doesn't use dittos even though the protocol supports
+                    //   them.
+                    //
+                    // - Otherwise, it's not an auto-repeat at all, so we
+                    //   can't decide one way or the other on dittos: start
+                    //   over.
+                    if (c.proId == learnedIRCode.proId
+                        && c.hasDittos
+                        && c.ditto)
+                    {
+                        // success - the remote uses dittos
+                        IRLearningMode = 3;
+                    }
+                    else if (c.proId == learnedIRCode.proId
+                        && c.hasDittos
+                        && !c.ditto
+                        && c.code == learnedIRCode.code)
+                    {
+                        // success - it's a repeat of the last code, so
+                        // the remote doesn't use dittos even though the
+                        // protocol supports them
+                        learnedIRCode.hasDittos = false;
+                        IRLearningMode = 3;
+                    }
+                    else
+                    {
+                        // It's not a ditto and not a full repeat of the
+                        // last code, so it's either a new key, or some kind
+                        // of multi-code key encoding that we don't recognize.
+                        // We can't use this code, so start over.
+                        IRLearningMode = 1;
+                    }
+                    break;
+                }
                 
-                // Check if we need additional information.  If the
-                // protocol supports dittos, we have to wait for a repeat
-                // to see if the remote actually uses the dittos, since
-                // some implementations of such protocols use the dittos
-                // while others just send repeated full codes.  Otherwise,
-                // all we need is the initial code, so we're done.
-                IRLearningMode = (c.hasDittos ? 2 : 3);
-                break;
-                
-            case 2:
-                // Code received, awaiting auto-repeat information.  If
-                // the protocol has dittos, check to see if we got a ditto:
-                //
-                // - If we received a ditto in the same protocol as the
-                //   prior command, the remote uses dittos.
-                //
-                // - If we received a repeat of the prior command (not a
-                //   ditto, but a repeat of the full code), the remote
-                //   doesn't use dittos even though the protocol supports
-                //   them.
-                //
-                // - Otherwise, it's not an auto-repeat at all, so we
-                //   can't decide one way or the other on dittos: start
-                //   over.
-                if (c.proId == learnedIRCode.proId
-                    && c.hasDittos
-                    && c.ditto)
+                // If we ended in state 3, we've successfully decoded
+                // the transmission.  Report the decoded data and terminate
+                // learning mode.
+                if (IRLearningMode == 3)
                 {
-                    // success - the remote uses dittos
-                    IRLearningMode = 3;
+                    // figure the flags: 
+                    //   0x02 -> dittos
+                    uint8_t flags = 0;
+                    if (learnedIRCode.hasDittos)
+                        flags |= 0x02;
+                        
+                    // report the code
+                    js.reportIRCode(learnedIRCode.proId, flags, learnedIRCode.code);
+                        
+                    // exit learning mode
+                    IRLearningMode = 0;
                 }
-                else if (c.proId == learnedIRCode.proId
-                    && c.hasDittos
-                    && !c.ditto
-                    && c.code == learnedIRCode.code)
-                {
-                    // success - it's a repeat of the last code, so
-                    // the remote doesn't use dittos even though the
-                    // protocol supports them
-                    learnedIRCode.hasDittos = false;
-                    IRLearningMode = 3;
-                }
-                else
-                {
-                    // It's not a ditto and not a full repeat of the
-                    // last code, so it's either a new key, or some kind
-                    // of multi-code key encoding that we don't recognize.
-                    // We can't use this code, so start over.
-                    IRLearningMode = 1;
-                }
-                break;
             }
             
-            // If we ended in state 3, we've successfully decoded
-            // the transmission.  Report the decoded data and terminate
-            // learning mode.
-            if (IRLearningMode == 3)
+            // time out of IR learning mode if it's been too long
+            if (IRLearningMode != 0 && IRTimer.read_us() > 10000000L)
             {
-                // figure the flags: 
-                //   0x02 -> dittos
-                uint8_t flags = 0;
-                if (learnedIRCode.hasDittos)
-                    flags |= 0x02;
-                    
-                // report the code
-                js.reportIRCode(learnedIRCode.proId, flags, learnedIRCode.code);
-                    
-                // exit learning mode
+                // report the termination by sending a raw IR report with
+                // zero data elements
+                js.reportRawIR(0, 0);
+                
+                
+                // cancel learning mode
                 IRLearningMode = 0;
             }
         }
-        
-        // time out of IR learning mode if it's been too long
-        if (IRLearningMode != 0 && IRTimer.read_us() > 10000000L)
+        else
         {
-            // report the termination by sending a raw IR report with
-            // zero data elements
-            js.reportRawIR(0, 0);
+            // Not in learning mode.  We don't care about the raw signals;
+            // just run them through the protocol decoders.
+            ir_rx->process();
             
-            
-            // cancel learning mode
-            IRLearningMode = 0;
-        }
-    }
-    else
-    {
-        // Not in learning mode.  We don't care about the raw signals;
-        // just run them through the protocol decoders.
-        ir_rx->process();
-        
-        // Check for decoded commands.  Keep going until all commands
-        // have been read.
-        IRCommand c;
-        while (ir_rx->readCommand(c))
-        {
-            // We received a decoded command.  Determine if it's a repeat,
-            // and if so, try to determine whether it's an auto-repeat (due
-            // to the remote key being held down) or a distinct new press 
-            // on the same key as last time.  The distinction is significant
-            // because it affects the auto-repeat behavior of the PC key
-            // input.  An auto-repeat represents a key being held down on
-            // the remote, which we want to translate to a (virtual) key 
-            // being held down on the PC keyboard; a distinct key press on
-            // the remote translates to a distinct key press on the PC.
-            //
-            // It can only be a repeat if there's a prior command that
-            // hasn't timed out yet, so start by checking for a previous
-            // command.
-            bool repeat = false, autoRepeat = false;
-            if (IRCommandIn != 0)
+            // Check for decoded commands.  Keep going until all commands
+            // have been read.
+            IRCommand c;
+            while (ir_rx->readCommand(c))
             {
-                // We have a command in progress.  Check to see if the
-                // new command is a repeat of the previous command.  Check
-                // first to see if it's a "ditto", which explicitly represents
-                // an auto-repeat of the last command.
-                IRCommandCfg &cmdcfg = cfg.IRCommand[IRCommandIn - 1];
-                if (c.ditto)
+                // We received a decoded command.  Determine if it's a repeat,
+                // and if so, try to determine whether it's an auto-repeat (due
+                // to the remote key being held down) or a distinct new press 
+                // on the same key as last time.  The distinction is significant
+                // because it affects the auto-repeat behavior of the PC key
+                // input.  An auto-repeat represents a key being held down on
+                // the remote, which we want to translate to a (virtual) key 
+                // being held down on the PC keyboard; a distinct key press on
+                // the remote translates to a distinct key press on the PC.
+                //
+                // It can only be a repeat if there's a prior command that
+                // hasn't timed out yet, so start by checking for a previous
+                // command.
+                bool repeat = false, autoRepeat = false;
+                if (IRCommandIn != 0)
                 {
-                    // We received a ditto.  Dittos are always auto-
-                    // repeats, so it's an auto-repeat as long as the
-                    // ditto is in the same protocol as the last command.
-                    // If the ditto is in a new protocol, the ditto can't
-                    // be for the last command we saw, because a ditto
-                    // never changes protocols from its antecedent.  In
-                    // such a case, we must have missed the antecedent
-                    // command and thus don't know what's being repeated.
-                    repeat = autoRepeat = (c.proId == cmdcfg.protocol);
+                    // We have a command in progress.  Check to see if the
+                    // new command is a repeat of the previous command.  Check
+                    // first to see if it's a "ditto", which explicitly represents
+                    // an auto-repeat of the last command.
+                    IRCommandCfg &cmdcfg = cfg.IRCommand[IRCommandIn - 1];
+                    if (c.ditto)
+                    {
+                        // We received a ditto.  Dittos are always auto-
+                        // repeats, so it's an auto-repeat as long as the
+                        // ditto is in the same protocol as the last command.
+                        // If the ditto is in a new protocol, the ditto can't
+                        // be for the last command we saw, because a ditto
+                        // never changes protocols from its antecedent.  In
+                        // such a case, we must have missed the antecedent
+                        // command and thus don't know what's being repeated.
+                        repeat = autoRepeat = (c.proId == cmdcfg.protocol);
+                    }
+                    else
+                    {
+                        // It's not a ditto.  The new command is a repeat if
+                        // it matches the protocol and command code of the 
+                        // prior command.
+                        repeat = (c.proId == cmdcfg.protocol 
+                                  && uint32_t(c.code) == cmdcfg.code.lo
+                                  && uint32_t(c.code >> 32) == cmdcfg.code.hi);
+                                  
+                        // If the command is a repeat, try to determine whether
+                        // it's an auto-repeat or a new press on the same key.
+                        // If the protocol uses dittos, it's definitely a new
+                        // key press, because an auto-repeat would have used a
+                        // ditto.  For a protocol that doesn't use dittos, both
+                        // an auto-repeat and a new key press just send the key
+                        // code again, so we can't tell the difference based on
+                        // that alone.  But if the protocol has a toggle bit, we
+                        // can tell by the toggle bit value: a new key press has
+                        // the opposite toggle value as the last key press, while 
+                        // an auto-repeat has the same toggle.  Note that if the
+                        // protocol doesn't use toggle bits, the toggle value
+                        // will always be the same, so we'll simply always treat
+                        // any repeat as an auto-repeat.  Many protocols simply
+                        // provide no way to distinguish the two, so in such
+                        // cases it's consistent with the native implementations
+                        // to treat any repeat as an auto-repeat.
+                        autoRepeat = 
+                            repeat 
+                            && !(cmdcfg.flags & IRFlagDittos)
+                            && c.toggle == lastIRToggle;
+                    }
+                }
+                
+                // Check to see if it's a repeat of any kind
+                if (repeat)
+                {
+                    // It's a repeat.  If it's not an auto-repeat, it's a
+                    // new distinct key press, so we need to send the PC a
+                    // momentary gap where we're not sending the same key,
+                    // so that the PC also recognizes this as a distinct
+                    // key press event.
+                    if (!autoRepeat)
+                        IRKeyGap = true;
+                        
+                    // restart the key-up timer
+                    IRTimer.reset();
+                }
+                else if (c.ditto)
+                {
+                    // It's a ditto, but not a repeat of the last command.
+                    // But a ditto doesn't contain any information of its own
+                    // on the command being repeated, so given that it's not
+                    // our last command, we can't infer what command the ditto
+                    // is for and thus can't make sense of it.  We have to
+                    // simply ignore it and wait for the sender to start with
+                    // a full command for a new key press.
+                    IRCommandIn = 0;
                 }
                 else
                 {
-                    // It's not a ditto.  The new command is a repeat if
-                    // it matches the protocol and command code of the 
-                    // prior command.
-                    repeat = (c.proId == cmdcfg.protocol 
-                              && uint32_t(c.code) == cmdcfg.code.lo
-                              && uint32_t(c.code >> 32) == cmdcfg.code.hi);
-                              
-                    // If the command is a repeat, try to determine whether
-                    // it's an auto-repeat or a new press on the same key.
-                    // If the protocol uses dittos, it's definitely a new
-                    // key press, because an auto-repeat would have used a
-                    // ditto.  For a protocol that doesn't use dittos, both
-                    // an auto-repeat and a new key press just send the key
-                    // code again, so we can't tell the difference based on
-                    // that alone.  But if the protocol has a toggle bit, we
-                    // can tell by the toggle bit value: a new key press has
-                    // the opposite toggle value as the last key press, while 
-                    // an auto-repeat has the same toggle.  Note that if the
-                    // protocol doesn't use toggle bits, the toggle value
-                    // will always be the same, so we'll simply always treat
-                    // any repeat as an auto-repeat.  Many protocols simply
-                    // provide no way to distinguish the two, so in such
-                    // cases it's consistent with the native implementations
-                    // to treat any repeat as an auto-repeat.
-                    autoRepeat = 
-                        repeat 
-                        && !(cmdcfg.flags & IRFlagDittos)
-                        && c.toggle == lastIRToggle;
-                }
-            }
-            
-            // Check to see if it's a repeat of any kind
-            if (repeat)
-            {
-                // It's a repeat.  If it's not an auto-repeat, it's a
-                // new distinct key press, so we need to send the PC a
-                // momentary gap where we're not sending the same key,
-                // so that the PC also recognizes this as a distinct
-                // key press event.
-                if (!autoRepeat)
-                    IRKeyGap = true;
+                    // It's not a repeat, so the last command is no longer
+                    // in effect (regardless of whether we find a match for
+                    // the new command).
+                    IRCommandIn = 0;
                     
-                // restart the key-up timer
-                IRTimer.reset();
-            }
-            else if (c.ditto)
-            {
-                // It's a ditto, but not a repeat of the last command.
-                // But a ditto doesn't contain any information of its own
-                // on the command being repeated, so given that it's not
-                // our last command, we can't infer what command the ditto
-                // is for and thus can't make sense of it.  We have to
-                // simply ignore it and wait for the sender to start with
-                // a full command for a new key press.
-                IRCommandIn = 0;
-            }
-            else
-            {
-                // It's not a repeat, so the last command is no longer
-                // in effect (regardless of whether we find a match for
-                // the new command).
-                IRCommandIn = 0;
-                
-                // Check to see if we recognize the new command, by
-                // searching for a match in our learned code list.
-                for (int i = 0 ; i < MAX_IR_CODES ; ++i)
-                {
-                    // if the protocol and command code from the code
-                    // list both match the input, it's a match
-                    IRCommandCfg &cmdcfg = cfg.IRCommand[i];
-                    if (cmdcfg.protocol == c.proId 
-                        && cmdcfg.code.lo == uint32_t(c.code)
-                        && cmdcfg.code.hi == uint32_t(c.code >> 32))
+                    // Check to see if we recognize the new command, by
+                    // searching for a match in our learned code list.
+                    for (int i = 0 ; i < MAX_IR_CODES ; ++i)
                     {
-                        // Found it!  Make this the last command, and 
-                        // remember the starting time.
-                        IRCommandIn = i + 1;
-                        lastIRToggle = c.toggle;
-                        IRTimer.reset();
-                        
-                        // no need to keep searching
-                        break;
+                        // if the protocol and command code from the code
+                        // list both match the input, it's a match
+                        IRCommandCfg &cmdcfg = cfg.IRCommand[i];
+                        if (cmdcfg.protocol == c.proId 
+                            && cmdcfg.code.lo == uint32_t(c.code)
+                            && cmdcfg.code.hi == uint32_t(c.code >> 32))
+                        {
+                            // Found it!  Make this the last command, and 
+                            // remember the starting time.
+                            IRCommandIn = i + 1;
+                            lastIRToggle = c.toggle;
+                            IRTimer.reset();
+                            
+                            // no need to keep searching
+                            break;
+                        }
                     }
                 }
             }
@@ -2490,12 +2435,12 @@ int8_t zblButtonIndex = -1;     // index of ZB Launch button slot; -1 if unused
 struct
 {
     int8_t index;               // buttonState[] index of shift button; -1 if none
-    uint8_t state : 2;          // current shift state:
+    uint8_t state;              // current state, for "Key OR Shift" mode:
                                 //   0 = not shifted
                                 //   1 = shift button down, no key pressed yet
                                 //   2 = shift button down, key pressed
-    uint8_t pulse : 1;          // sending pulsed keystroke on release
-    uint32_t pulseTime;         // time of start of pulsed keystroke
+                                //   3 = released, sending pulsed keystroke
+    uint32_t pulseTime;         // time remaining in pulsed keystroke (state 3)
 }
 __attribute__((packed)) shiftButton;
 
@@ -2616,7 +2561,7 @@ void initButtons(Config &cfg, bool &kbKeys)
             // We have to figure the buttonState[] index separately from
             // the config index, because the indices can differ if some
             // config slots are left unused.
-            if (cfg.shiftButton == i+1)
+            if (cfg.shiftButton.idx == i+1)
                 shiftButton.index = bs - buttonState;
                 
             // advance to the next button
@@ -2804,38 +2749,67 @@ void processButtons(Config &cfg)
     // check the shift button state
     if (shiftButton.index != -1)
     {
+        // get the shift button's physical state object
         ButtonState *sbs = &buttonState[shiftButton.index];
-        switch (shiftButton.state)
+        
+        // figure what to do based on the shift button mode in the config
+        switch (cfg.shiftButton.mode)
         {
         case 0:
-            // Not shifted.  Check if the button is now down: if so,
-            // switch to state 1 (shift button down, no key pressed yet).
-            if (sbs->physState)
-                shiftButton.state = 1;
-            break;
-            
-        case 1:
-            // Shift button down, no key pressed yet.  If the button is
-            // now up, it counts as an ordinary button press instead of
-            // a shift button press, since the shift function was never
-            // used.  Return to unshifted state and start a timed key 
-            // pulse event.
-            if (!sbs->physState)
+        default:
+            // "Shift OR Key" mode.  The shift button doesn't send its key
+            // immediately when pressed.  Instead, we wait to see what 
+            // happens while it's down.  Check the current cycle state.
+            switch (shiftButton.state)
             {
-                shiftButton.state = 0;
-                shiftButton.pulse = 1;
-                shiftButton.pulseTime = 50000+dt;  // 50 ms left on the key pulse
+            case 0:
+                // Not shifted.  Check if the button is now down: if so,
+                // switch to state 1 (shift button down, no key pressed yet).
+                if (sbs->physState)
+                    shiftButton.state = 1;
+                break;
+                
+            case 1:
+                // Shift button down, no key pressed yet.  If the button is
+                // now up, it counts as an ordinary button press instead of
+                // a shift button press, since the shift function was never
+                // used.  Return to unshifted state and start a timed key 
+                // pulse event.
+                if (!sbs->physState)
+                {
+                    shiftButton.state = 3;
+                    shiftButton.pulseTime = 50000+dt;  // 50 ms left on the key pulse
+                }
+                break;
+                
+            case 2:
+                // Shift button down, other key was pressed.  If the button is
+                // now up, simply clear the shift state without sending a key
+                // press for the shift button itself to the PC.  The shift
+                // function was used, so its ordinary key press function is
+                // suppressed.
+                if (!sbs->physState)
+                    shiftButton.state = 0;
+                break;
+                
+            case 3:
+                // Sending pulsed keystroke.  Deduct the current time interval
+                // from the remaining pulse timer.  End the pulse if the time
+                // has expired.
+                if (shiftButton.pulseTime > dt)
+                    shiftButton.pulseTime -= dt;
+                else
+                    shiftButton.state = 0;
+                break;
             }
             break;
             
-        case 2:
-            // Shift button down, other key was pressed.  If the button is
-            // now up, simply clear the shift state without sending a key
-            // press for the shift button itself to the PC.  The shift
-            // function was used, so its ordinary key press function is
-            // suppressed.
-            if (!sbs->physState)
-                shiftButton.state = 0;
+        case 1:
+            // "Shift AND Key" mode.  In this mode, the shift button acts
+            // like any other button and sends its mapped key immediately.
+            // The state cycle in this case simply matches the physical
+            // state: ON -> cycle state 1, OFF -> cycle state 0.
+            shiftButton.state = (sbs->physState ? 1 : 0);
             break;
         }
     }
@@ -2853,22 +2827,24 @@ void processButtons(Config &cfg)
         //   - regular button
         if (shiftButton.index == i)
         {
-            // This is the shift button.  Its logical state for key
-            // reporting purposes is controlled by the shift buttton
-            // pulse timer.  If we're in a pulse, its logical state
-            // is pressed.
-            if (shiftButton.pulse)
+            // This is the shift button.  The logical state handling
+            // depends on the mode.
+            switch (cfg.shiftButton.mode)
             {
-                // deduct the current interval from the pulse time, ending
-                // the pulse if the time has expired
-                if (shiftButton.pulseTime > dt)
-                    shiftButton.pulseTime -= dt;
-                else
-                    shiftButton.pulse = 0;
+            case 0:
+            default:
+                // "Shift OR Key" mode.  The logical state is ON only
+                // during the timed pulse when the key is released, which
+                // is signified by shift button state 3.
+                bs->logState = (shiftButton.state == 3);
+                break;
+                
+            case 1:
+                // "Shif AND Key" mode.  The shift button acts like any
+                // other button, so it's logically on when physically on.
+                bs->logState = bs->physState;
+                break;
             }
-            
-            // the button is logically pressed if we're in a pulse
-            bs->logState = shiftButton.pulse;
         }        
         else if (bs->pulseState != 0)
         {
@@ -2929,19 +2905,24 @@ void processButtons(Config &cfg)
         }
         
         // Determine if we're going to use the shifted version of the
-        // button.  We're using the shifted version if the shift button
-        // is down AND the button has ANY shifted meaning - a key assignment,
-        // a Night Mode toggle assignment, or an IR code.  If the button 
-        // doesn't have any meaning at all in shifted mode, the base version
-        // of the button applies whether or not the shift button is down.
+        // button.  We're using the shifted version if...
+        // 
+        //  - the shift button is down, AND
+        //  - this button isn't itself the shift button, AND
+        //  - this button has some kind of shifted meaning
         //
-        // Note that the test for Night Mode is a bit tricky.  The shifted
-        // version of the button is the Night Mode toggle if the button matches
-        // the Night Mode button index, AND its flags are set with "toggle
-        // mode ON" (bit 0x02 is on) and "switch mode OFF" (bit 0x01 is off).
-        // That means the button flags & 0x03 must equal 0x02.
+        // A "shifted meaning" means that we have any of the following 
+        // assigned to the shifted version of the button: a key assignment, 
+        // (in typ2,key2), an IR command (in IRCommand2), or Night mode.
+        //
+        // The test for Night Mode is a bit tricky.  The shifted version of 
+        // the button is the Night Mode toggle if the button matches the 
+        // Night Mode button index, AND its flags are set with "toggle mode
+        // ON" (bit 0x02 is on) and "switch mode OFF" (bit 0x01 is off).
+        // So (button flags) & 0x03 must equal 0x02.
         bool useShift = 
             (shiftButton.state != 0
+             && shiftButton.index != i
              && (bc->typ2 != BtnTypeNone
                  || bc->IRCommand2 != 0
                  || (cfg.nightMode.btn == i+1 && (cfg.nightMode.flags & 0x03) == 0x02)));
@@ -2951,7 +2932,7 @@ void processButtons(Config &cfg)
         // no one has used the shift function yet"), then we've "consumed"
         // the shift button press (so go to shift state 2: "shift button has
         // been used by some other button press that has a shifted meaning").
-        if (useShift && shiftButton.state == 1)
+        if (useShift && shiftButton.state == 1 && bs->logState)
             shiftButton.state = 2;
 
         // carry out any edge effects from buttons changing states
@@ -3438,7 +3419,8 @@ struct AccHist
 class Accel
 {
 public:
-    Accel(PinName sda, PinName scl, int i2cAddr, PinName irqPin, int range)
+    Accel(PinName sda, PinName scl, int i2cAddr, PinName irqPin, 
+        int range, int autoCenterMode)
         : mma_(sda, scl, i2cAddr)        
     {
         // remember the interrupt pin assignment
@@ -3446,9 +3428,51 @@ public:
         
         // remember the range
         range_ = range;
+        
+        // set the auto-centering mode
+        setAutoCenterMode(autoCenterMode);
+        
+        // no manual centering request has been received
+        manualCenterRequest_ = false;
 
         // reset and initialize
         reset();
+    }
+    
+    // Request manual centering.  This applies the trailing average
+    // of recent measurements and applies it as the new center point
+    // as soon as we have enough data.
+    void manualCenterRequest() { manualCenterRequest_ = true; }
+    
+    // set the auto-centering mode
+    void setAutoCenterMode(int mode)
+    {
+        // remember the mode
+        autoCenterMode_ = mode;
+        
+        // Set the time between checks.  We check 5 times over the course
+        // of the centering time, so the check interval is 1/5 of the total.
+        if (mode == 0)
+        {
+            // mode 0 is the old default of 5 seconds, so check every 1s
+            autoCenterCheckTime_ = 1000000;
+        }
+        else if (mode <= 60)
+        {
+            // mode 1-60 means reset after 'mode' seconds; the check
+            // interval is 1/5 of this
+            autoCenterCheckTime_ = mode*200000;
+        }
+        else
+        {
+            // Auto-centering is off, but still gather statistics to apply
+            // when we get a manual centering request.  The check interval
+            // in this case is 1/5 of the total time for the trailing average
+            // we apply for the manual centering.  We want this to be long
+            // enough to smooth out the data, but short enough that it only
+            // includes recent data.
+            autoCenterCheckTime_ = 500000;
+        }
     }
     
     void reset()
@@ -3512,8 +3536,11 @@ public:
         AccHist *p = accPrv_ + iAccPrv_;
         p->addAvg(ax, ay);
 
-        // check for auto-centering every so often
-        if (tCenter_.read_us() > 1000000)
+        // If we're in auto-centering mode, check for auto-centering
+        // at intervals of 1/5 of the overall time.  If we're not in
+        // auto-centering mode, check anyway at one-second intervals
+        // so that we gather averages for manual centering requests.
+        if (tCenter_.read_us() > autoCenterCheckTime_)
         {
             // add the latest raw sample to the history list
             AccHist *prv = p;
@@ -3523,22 +3550,33 @@ public:
             p = accPrv_ + iAccPrv_;
             p->set(ax, ay, prv);
 
-            // if we have a full complement, check for stability
+            // if we have a full complement, check for auto-centering
             if (nAccPrv_ >= maxAccPrv)
             {
-                // check if we've been stable for all recent samples
+                // Center if:
+                //
+                // - Auto-centering is on, and we've been stable over the
+                //   whole sample period at our spot-check points
+                //
+                // - A manual centering request is pending
+                //
                 static const int accTol = 164*164;  // 1% of range, squared
                 AccHist *p0 = accPrv_;
-                if (p0[0].dsq < accTol
-                    && p0[1].dsq < accTol
-                    && p0[2].dsq < accTol
-                    && p0[3].dsq < accTol
-                    && p0[4].dsq < accTol)
+                if (manualCenterRequest_
+                    || (autoCenterMode_ <= 60
+                        && p0[0].dsq < accTol
+                        && p0[1].dsq < accTol
+                        && p0[2].dsq < accTol
+                        && p0[3].dsq < accTol
+                        && p0[4].dsq < accTol))
                 {
                     // Figure the new calibration point as the average of
                     // the samples over the rest period
                     cx_ = (p0[0].xAvg() + p0[1].xAvg() + p0[2].xAvg() + p0[3].xAvg() + p0[4].xAvg())/5;
                     cy_ = (p0[0].yAvg() + p0[1].yAvg() + p0[2].yAvg() + p0[3].yAvg() + p0[4].yAvg())/5;
+                    
+                    // clear any pending manual centering request
+                    manualCenterRequest_ = false;
                 }
             }
             else
@@ -3609,7 +3647,19 @@ private:
     
     // range (AccelRangeXxx value, from config.h)
     uint8_t range_;
+    
+    // auto-center mode: 
+    //   0 = default of 5-second auto-centering
+    //   1-60 = auto-center after this many seconds
+    //   255 = auto-centering off (manual centering only)
+    uint8_t autoCenterMode_;
+    
+    // flag: a manual centering request is pending
+    bool manualCenterRequest_;
 
+    // time in us between auto-centering incremental checks
+    uint32_t autoCenterCheckTime_;
+    
     // atuo-centering timer
     Timer tCenter_;
 
@@ -3625,8 +3675,8 @@ private:
     // cabinet's orientation (e.g., if it gets moved slightly by an
     // especially strong nudge) as well as any systematic drift in the
     // accelerometer measurement bias (e.g., from temperature changes).
-    int iAccPrv_, nAccPrv_;
-    static const int maxAccPrv = 5;
+    uint8_t iAccPrv_, nAccPrv_;
+    static const uint8_t maxAccPrv = 5;
     AccHist accPrv_[maxAccPrv];
     
     // interurupt pin name
@@ -5473,7 +5523,7 @@ void reboot(USBJoystick &js, bool disconnect = true, long pause_us = 2000000L)
 void accelRotate(int &x, int &y)
 {
     int tmp;
-    switch (cfg.orientation)
+    switch (cfg.accel.orientation)
     {
     case OrientationFront:
         tmp = x;
@@ -5559,7 +5609,7 @@ int calBtnLit = false;
 // Handle an input report from the USB host.  Input reports use our extended
 // LedWiz protocol.
 //
-void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
+void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
 {
     // LedWiz commands come in two varieties:  SBA and PBA.  An
     // SBA is marked by the first byte having value 64 (0x40).  In
@@ -5658,6 +5708,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
                 cfg.plunger.cal.zero, cfg.plunger.cal.max, cfg.plunger.cal.tRelease,
                 nvm.valid(),        // a config is loaded if the config memory block is valid
                 true,               // we support sbx/pbx extensions
+                true,               // we support the new accelerometer settings
                 xmalloc_rem);       // remaining memory size
             break;
             
@@ -5739,6 +5790,29 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js)
         case 13:
             // 13 = Send button status report
             reportButtonStatus(js);
+            break;
+            
+        case 14:
+            // 14 = manually center the accelerometer
+            accel.manualCenterRequest();
+            break;
+            
+        case 15:
+            // 15 = set up ad hoc IR command, part 1.  Mark the command
+            // as not ready, and save the partial data from the message.
+            IRAdHocCmd.ready = 0;
+            IRAdHocCmd.protocol = data[2];
+            IRAdHocCmd.dittos = (data[3] & IRFlagDittos) != 0;
+            IRAdHocCmd.code = wireUI32(&data[4]);
+            break;
+            
+        case 16:
+            // 16 = send ad hoc IR command, part 2.  Fill in the rest
+            // of the data from the message and mark the command as
+            // ready.  The IR polling routine will send this as soon
+            // as the IR transmitter is free.
+            IRAdHocCmd.code |= (uint64_t(wireUI32(&data[2])) << 32);
+            IRAdHocCmd.ready = 1;
             break;
         }
     }
@@ -6077,7 +6151,7 @@ int main(void)
     
     // create the accelerometer object
     Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, 
-        MMA8451_INT_PIN, cfg.accelRange);
+        MMA8451_INT_PIN, cfg.accel.range, cfg.accel.autoCenterTime);
        
     // last accelerometer report, in joystick units (we report the nudge
     // acceleration via the joystick x & y axes, per the VP convention)
@@ -6121,7 +6195,7 @@ int main(void)
         IF_DIAG(int msgCount = 0;) 
         while (js.readLedWizMsg(lwm) && lwt.read_us() < 5000)
         {
-            handleInputMsg(lwm, js);
+            handleInputMsg(lwm, js, accel);
             IF_DIAG(++msgCount;)
         }
         
@@ -6208,10 +6282,8 @@ int main(void)
             // Otherwise, return to the base state without saving anything.
             // If the button is released before we make it to calibration
             // mode, it simply cancels the attempt.
-            diagLED(1,1,1);
             if (calBtnState == 3 && calBtnTimer.read_us() > 15000000)
             {
-                diagLED(0,0,0);
                 // exit calibration mode
                 calBtnState = 0;
                 plungerReader.setCalMode(false);
@@ -6222,7 +6294,6 @@ int main(void)
             }
             else if (calBtnState != 3)
             {
-                diagLED(0,1,1);
                 // didn't make it to calibration mode - cancel the operation
                 calBtnState = 0;
             }

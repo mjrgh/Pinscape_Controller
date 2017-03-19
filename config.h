@@ -228,7 +228,13 @@ struct Config
         joystickEnabled = true;
         
         // assume standard orientation, with USB ports toward front of cabinet
-        orientation = OrientationFront;
+        accel.orientation = OrientationFront;
+        
+        // default dynamic range +/-1G
+        accel.range = AccelRange1G;
+        
+        // default auto-centering time
+        accel.autoCenterTime = 0;
 
         // assume a basic setup with no expansion boards
         expan.typ = 0;
@@ -345,7 +351,8 @@ struct Config
         outPort[0].typ = PortTypeDisabled;
         
         // initially configure with no shift key
-        shiftButton = 0;
+        shiftButton.idx = 0;
+        shiftButton.mode = 0;
             
         // initially configure with no input buttons
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
@@ -537,12 +544,21 @@ struct Config
     uint8_t disconnectRebootTimeout;
     
     // --- ACCELEROMETER ---
+    struct
+    {
+        // accelerometer orientation (OrientationXxx value)
+        uint8_t orientation;
     
-    // accelerometer orientation (OrientationXxx value)
-    uint8_t orientation;
+        // dynamic range (AccelRangeXxx value)
+        uint8_t range;
     
-    // dynamic range (AccelRangeXxx value)
-    uint8_t accelRange;
+        // Auto-centering mode:
+        //   0 = auto-centering on, 5-second timer
+        //   1-60 = auto-centering on with the given timer in seconds
+        //   255 = auto-centering off
+        uint8_t autoCenterTime;
+    
+    } accel;
     
     
     // --- EXPANSION BOARDS ---
@@ -766,34 +782,36 @@ struct Config
     // --- Button Input Setup ---
     ButtonCfg button[MAX_BUTTONS + VIRTUAL_BUTTONS] __attribute__((packed));
     
-    // Shift button index.  If this is zero, there's no shift button.  If this
-    // is nonzero, it's the 1-based index of the shift button in the button[]
-    // list.  
-    //
-    // The shift button can also be used as a regular input key.  If it is,
-    // we DON'T send the input key to the PC as usual when the button is 
-    // pressed.  Instead, we wait to see if the shift function is used:
-    //
-    // - If another button is pressed while the shift button is held down,
-    // and the other button is programmed with a valid key for the shifted/
-    // secondary meaning (i.e., typ2 is not BtnTypeNone), the shift function
-    // is considered to have been used.  We send the secondary meaning of
-    // the other button to the PC.  The shift key itself generates no PC
-    // input in this case, since it has now performed its shift function.
-    // Other shifted keys can also be pressed as long as the shift button 
-    // is held down, and they'll be sent to the PC with their shifted values
-    // as well.
-    //
-    // - If the shift button is released before any other button with a
-    // shifted key value is pressed, then the shift button press is taken to
-    // be an ordinary key press instead of the shift function.  In this case,
-    // we report the shift button's key code to the PC when the button is
-    // released.  We can't report the key code to the PC until then because
-    // we don't know until then that another key won't be pressed first.
-    // The key press on release is a single timed pulse that's long enough
-    // to register as a single key press on the PC, but not long enough to
-    // trigger auto-repeat on the PC.
-    uint8_t shiftButton;
+    // Shift button.  This can be used to give each physical button a
+    // second meaning.
+    struct
+    {
+        // Shift button index, 1..MAX_BUTTONS.  If this is zero, there's
+        // no shift button.
+        uint8_t idx;
+        
+        // Shift button mode.  If the shift button has a key mapping or
+        // IR command assigned, this determines what happens when the 
+        // shift button is pressed in combination with another key.
+        //
+        // 0 = Shift OR Key mode.  In this mode, when you initially press
+        // the shift button, nothing happens.  Instead, we wait to see if
+        // any other buttons are pressed.  If so, we use the shifted meaning
+        // of the other button, and we DON'T send the shift button's key or
+        // IR command at all.  
+        //
+        // 1 = Shift AND Key mode.  In this mode, the shift button acts like
+        // any other button: its assigned key is sent to the PC as soon as
+        // you press it.  If you also press another button while the shift
+        // button is down, the shifted meaning of the other button is used.
+        //
+        // Mode 0, the "OR" mode, is the default.  This allows a button with
+        // a key assignment to do double duty as the shift button without
+        // creating any confusing situations where the shift button's own
+        // key is also sent to the PC during shift usage.  
+        uint8_t mode;
+    
+    } shiftButton;
 
     // --- LedWiz Output Port Setup ---
     LedWizPortCfg outPort[MAX_OUT_PORTS] __attribute__ ((packed));  // LedWiz & extended output ports 

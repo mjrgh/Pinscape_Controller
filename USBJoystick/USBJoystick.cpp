@@ -272,8 +272,7 @@ bool USBJoystick::reportConfigVar(const uint8_t *data)
 bool USBJoystick::reportConfig(
     int numOutputs, int unitNo, 
     int plungerZero, int plungerMax, int plungerRlsTime,
-    bool configured,
-    bool sbxpbx,
+    bool configured, bool sbxpbx, bool newAccelFeatures,
     size_t freeHeapBytes)
 {
     HID_REPORT report;
@@ -301,7 +300,8 @@ bool USBJoystick::reportConfig(
     //  0x02  -> SBX/PBX protocol extensions supported
     report.data[11] = 
         (configured ? 0x01 : 0x00)
-        | (sbxpbx ? 0x02 : 0x00);
+        | (sbxpbx ? 0x02 : 0x00)
+        | (newAccelFeatures ? 0x04 : 0x00);
     
     // write the free heap space
     put(12, freeHeapBytes);

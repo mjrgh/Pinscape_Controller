@@ -142,8 +142,10 @@ Lw0
 ;---------------------------------------------------------------------------
 ;
 ; The iapExecAndWait function MUST NOT BE IN FLASH, since we can't have
-; any fetches occur while an erase or write operation is executing.  Force
-; this portion to be in RAM by making it read-write.
+; any flash reads occur while an erase or write operation is executing.  If
+; the code were in flash, the CPU might have to fetch an instruction from
+; flash in the course of the loop, which could freeze the CPU.  Force the
+; linker to put this section in RAM by making it read-write.
 
     AREA iap_ram_asm_code, CODE, READWRITE
 
@@ -167,11 +169,7 @@ Lw0
 ; interrupts disabled for long periods, so the safest approach seems
 ; to be to disable the interrupts only for the actual command execution.
 
-NVIC_ISER  DCD 0xE000E100
-NVIC_ICER  DCD 0xE000E180
-
     EXPORT iapExecAndWait
-    EXPORT iapExecAndWaitEnd
 iapExecAndWait
     ; save registers
     STMFD   R13!, {R1,R2,R3,R4,LR}
@@ -180,12 +178,13 @@ iapExecAndWait
     LDR     R3, =NVIC_ICER ; R3 <- NVIC_ICER
     LDR     R4, [R3]     ; R4 <- current interrupt status
     MOVS    R2, #0       ; R2 <- 0
-    SUBS    R2,R2,#1     ; R2 <= 0 - 1 = 0xFFFFFFFF
+    SUBS    R2,R2,#1     ; R2 <- 0 - 1 = 0xFFFFFFFF
     STR     R2, [R3]     ; [NVIC_ICER] <- 0xFFFFFFFF (disable all interrupts)
 
     ; disable CPU interrupts
     CPSID I              ; interrupts off
     DMB                  ; data memory barrier
+    DSB                  ; data synchronization barrier
     ISB                  ; instruction synchronization barrier
 
     ; Launch the command by writing the CCIF bit to FTFA_FSTAT    
@@ -210,5 +209,9 @@ Lew0
     
     ; pop registers and return
     LDMFD   R13!, {R1,R2,R3,R4,PC}
+
+    ALIGN
+NVIC_ISER  DCD 0xE000E100
+NVIC_ICER  DCD 0xE000E180
 
     END

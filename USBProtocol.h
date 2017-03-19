@@ -197,6 +197,9 @@
 //                         has been sent from the host
 //                 0x02 -> SBX/PBX extension features: 1 in this bit means
 //                         that these features are present in this version.
+//                 0x04 -> new accelerometer features supported (adjustable
+//                         dynamic range, auto-centering on/off, adjustable
+//                         auto-centering time)
 //    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
 //                of unused heap (malloc'able) memory.  The firmware generally
 //                allocates all of the dynamic memory it needs during startup,
@@ -545,8 +548,29 @@
 //             to send the learned command on events like TV ON or a button
 //             press.
 //             
-//       13 -> Get button status report.  The device sends one button status report
-//             in response (see section "2F" above).
+//       13 -> Get button status report.  The device sends one button status 
+//             report in response (see section "2F" above).
+//
+//       14 -> Manually center the accelerometer.  This sets the accelerometer
+//             zero point to the running average of readings over the past few
+//             seconds.
+//
+//       15 -> Set up ad hoc IR command, part 1.  This sets up the first part 
+//             of an IR command to transmit.  The device stores the data in an
+//             internal register for later use in message 65 16.  Send the
+//             remainder of the command data with 65 16.
+//
+//               byte 3 = IR protocol ID
+//               byte 4 = flags (IRFlagXxx bit flags)
+//               byte 5-8 = low-order 32 bits of command code, little-endian
+//
+//       16 -> Finish and send an ad hoc IR command.  Use message 65 15 first
+//             to set up the start of the command data, then send this message 
+//             to fill in the rest of the data and transmit the command.  Upon
+//             receiving this message, the device performs the transmission.
+//
+//               byte 3-6 = high-order 32 bits of command code, little-endian
+//               
 //
 // 66  -> Set configuration variable.  The second byte of the message is the config
 //        variable number, and the remaining bytes give the new value for the variable.
@@ -739,10 +763,17 @@
 //           2 = ports at right
 //           3 = ports at rear
 //        byte 4 -> dynamic range
-//           0 = +/- 1G (2G hardware mode, but rescales joystick reports to 1G range)
+//           0 = +/- 1G (2G hardware mode, but rescales joystick reports to 1G 
+//                   range; compatible with older versions)
 //           1 = +/- 2G (2G hardware mode)
 //           2 = +/- 4G (4G hardware mode)
 //           3 = +/- 8G (8G hardware mode)
+//        byte 5 -> Auto-centering mode
+//           0      = auto-centering on, 5 second timer (default, compatible 
+//                    with older versions)
+//           1-60   = auto-centering on with the given time in seconds
+//           61-245 = reserved
+//           255    = auto-centering off; manual centering only
 //
 // 5  -> Plunger sensor type.
 //
@@ -930,7 +961,7 @@
 //
 // 16 -> Shift Button setup.  One button can be designated as a "Local Shift
 //       Button" that can be pressed to select a secondary meaning for other
-//       buttons.  This isn't to be confused with the PC Shift keys; those can
+//       buttons.  This isn't the same as the PC keyboard Shift keys; those can
 //       be programmed using the USB key codes for Left Shift and Right Shift.
 //       Rather, this applies a LOCAL shift feature in the cabinet button that
 //       lets you select a secondary meaning.  For example, you could assign
@@ -939,22 +970,23 @@
 //       button is pressed.  This provides access to more control functions
 //       without adding more physical buttons.
 //
-//       The shift button itself can also have a regular key assignment.  If
-//       it does, the key is only sent to the PC when you RELEASE the shift 
-//       button, and then only if no other key with a shifted key code assigned
-//       was pressed while the shift button was being held down.  If another 
-//       key was pressed, and it has a shifted meaning assigned, we assume that
-//       the shift button was only pressed in the first place for its shifting
-//       function rather than for its normal keystroke.  This dual usage lets
-//       you make the shifting function even more unobtrusive by assigning it
-//       to an ordinary button that has its own purpose when not used as a
-//       shift button.  For example, you could assign the shift function to the
-//       rarely used Extra Ball button.  In those cases where you actually want 
-//       to use the Extra Ball feature, it's there, but you also get more
-//       mileage out of the button by using it to select secondary mappings for
-//       other buttons.
+//       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none
+//       byte 4 = mode (default is 0):
 //
-//       byte 3 = button number - 1..MAX_BUTTONS, or 0 for none.
+//          0 -> Shift OR Key mode.  In this mode, the Shift button doesn't
+//               send its assigned key or IR command when initially pressed.
+//               Instead, we wait to see if another button is pressed while
+//               the Shift button is held down.  If so, this Shift button 
+//               press ONLY counts as the Shift function, and its own assigned
+//               key is NOT sent to the PC.  On the other hand, if you press
+//               the Shift button and then release it without having pressed
+//               any other key in the meantime, this press counts as a regular
+//               key press, so we send the assigned key to the PC.
+//
+//          1 -> Shift AND Key mode.  In this mode, the Shift button sends its
+//               assigned key when pressed, just like a normal button.  If you
+//               press another button while the Shift key is pressed, the
+//               shifted meaning of the other key is used.
 //
 // 17 -> IR Remote Control physical device setup.  We support IR remotes for
 //       both sending and receiving.  On the receive side, we can read from a 

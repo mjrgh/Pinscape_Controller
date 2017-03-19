@@ -182,11 +182,15 @@ public:
      * @param plungerRlsTime measured plunger release time, in milliseconds
      * @param configured true if a configuration has been saved to flash from the host
      * @param sbxpbx true if this firmware version supports SBX/PBX protocol extensions
+     * @param newAccelFeatures true if this firmware version supports the new accelerometer
+     *        features (adjustable dynamic range, adjustable auto-centering mode time,
+     *        auto-centering mode on/off)
      * @param freeHeapBytes number of free bytes in the malloc heap
      */
     bool reportConfig(int numOutputs, int unitNo, 
         int plungerZero, int plungerMax, int plunterRlsTime, 
-        bool configured, bool sbxpbx, size_t freeHeapBytes);
+        bool configured, bool sbxpbx, bool newAccelFeatures,
+        size_t freeHeapBytes);
         
     /**
      * Write a configuration variable query report.
