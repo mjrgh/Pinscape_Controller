@@ -588,12 +588,15 @@ private:
         // turn off the grayscale clock
         gsclk.glitchFreeWrite(0);
         
-        // make sure the gsclk cycle actually ends before we proceed - each
-        // cycle is 1/GSCLK_SPEED long, so we need about 3us
-        wait_us(3);
+        // Make sure the gsclk cycle ends, since the TLC5940 data sheet
+        // says we can't take BLANK high until GSCLK has been low for 20ns.
+        // (We don't have to add any padding for the 20ns, since it'll take
+        // at least one CPU cycle of 60ns to return from waitEndCycle().
+        // That routine won't return until GSCLK is low, so it will have
+        // low for at least 60ns by the time we get back from this call.)
+        gsclk.waitEndCycle();
         
-        // and assert BLANK to end the grayscale cycle
-        blank = (enabled ? 1 : 0);  // for the slight delay (20ns) required after GSCLK goes low
+        // assert BLANK to end the grayscale cycle
         blank = 1;
     }
             

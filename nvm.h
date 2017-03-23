@@ -42,8 +42,9 @@ public:
                 && checksum == CRC32(&d, sizeof(d)));
     }
     
-    // save to non-volatile memory
-    void save(FreescaleIAP &iap, int addr)
+    // Save to non-volatile memory.  Returns true on success, false
+    // if an error code is returned from the flash programmer.
+    bool save(FreescaleIAP &iap, int addr)
     {
         // update the checksum and structure size
         d.sig = SIGNATURE;
@@ -52,13 +53,7 @@ public:
         checksum = CRC32(&d, sizeof(d));
         
         // save the data to flash
-        iap.program_flash(addr, this, sizeof(*this));
-    }
-    
-    // verify that the NVM matches the in-memory configuration
-    bool verify(int addr)
-    {
-        return memcmp((NVM *)addr, this, sizeof(*this)) == 0;
+        return iap.programFlash(addr, this, sizeof(*this)) == FreescaleIAP::Success;
     }
     
     // stored data (excluding the checksum)

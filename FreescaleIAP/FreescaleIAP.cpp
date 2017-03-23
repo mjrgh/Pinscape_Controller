@@ -1,67 +1,55 @@
-// FreescaleIAP, private version
+// FreescaleIAP - custom version
 //
-// This is a heavily modified version of Erik Olieman's FreescaleIAP, a
-// flash memory writer for Freescale boards.  This version is adapted to
-// the special needs of the KL25Z.
+// This is a simplified version of Erik Olieman's FreescaleIAP, a flash 
+// memory writer for Freescale boards.  This version combines erase, write,
+// and verify into a single API call.  The caller only has to give us a
+// buffer (of any length) to write, and the address to write it to, and
+// we'll do the whole thing - essentially a memcpy() to flash.
 //
-// Simplifications:
+// This version uses an assembler implementation of the core code that
+// launches an FTFA command and waits for completion, to minimize the
+// size of the code and to ensure that it's placed in RAM.  The KL25Z
+// flash controller prohibits any flash reads while an FTFA command is
+// executing.  This includes instruction fetches; any instruction fetch
+// from flash while an FTFA command is running will fail, which will 
+// freeze the CPU.  Placing the execute/wait code in RAM ensures that
+// the wait loop itself won't trigger a fetch.  It's also vital to disable
+// interrupts while the execute/wait code is running, to ensure that we
+// don't jump to an ISR in flash during the wait.
 //
-// Unlike EO's original version, this version combines erase and write
-// into a single opreation, so the caller can simply give us a buffer
-// and a location, and we'll write it, including the erase prep.  We
-// don't need to be able to separate the operations, so the combined
-// interface is simpler at the API level and also lets us do all of the
-// interrupt masking in one place (see below).
-//
-// Stability improvements:
-//
-// The KL25Z has an important restriction on flash writing that makes it
-// very delicate.  Specifically, the flash controller (FTFA) doesn't allow 
-// any read operations while a sector erase is in progress.  This complicates
-// things for a KL25Z app because all program code is stored in flash by 
-// default.  This means that every instruction fetch is a flash read.  The
-// FTFA's response to a read while an erase is in progress is to fail the
-// read.  When the read is actually an instruction fetch, this results in
-// CPU lockup.  Making this even more complicated, the erase operation can
-// only operate on a whole sector at a time, which takes on the order of 
-// milliseconds, which is a very long time for the CPU to go without any
-// instruction fetches.  Even if the code that initiates the erase is 
-// located in RAM and is very careful to loop within the RAM code block,
-// any interrupt could take us out of the RAM loop and trigger a fetch
-// on a flash location.
-//
-// We use two strategies to avoid flash fetches while we're working.
-// First, the code that performs all of the FTFA operations is written
-// in assembly, in a module AREA marked READWRITE.  This forces the
-// linker to put the code in RAM.  The code could otherwise just have
-// well been written in C++, but as far as I know there's no way to tell
-// the mbed C++ compiler to put code in RAM.  Since the FTFA code is all
-// in RAM, it doesn't by itself trigger any flash fetches as it executes,
-// so we're left with interrupts as the only concern.  Second, we explicitly 
-// disable all of the peripheral interrupts that we use anywhere in the 
-// program (USB, all the timers, GPIO ports, etc) via the NVIC.  From
-// testing, it's clear that disabling interrupts at the CPU level via
-// __disable_irq() (or the equivalent assembly instruction CPSID I) isn't
-// enough.  We have to turn interrupts off at the peripheral (NVIC) level.
-// I'm really not sure why this is required, since you'd think the CPSID I
-// masking would be enough, but experimentally it's clearly not.  This is
-// a detail of ARM hardware architecture that I need to look into more,
-// since it leaves me uneasy that there might be even more subtleties 
-// left to uncover.   But at least things seem very stable after blocking
-// interrupts at the NVIC level.
+// Despite the dire warnings in the hardware reference manual about putting
+// the FTFA execute/wait code in RAM, it doesn't actually appear to be
+// necessary, as long as the wait loop is very small (in terms of machine
+// code instruction count).  In testing, Erik has found that a flash-resident
+// version of the code is stable, and further found (by testing combinations
+// of cache control settings via the platform control register, MCM_PLACR)
+// that the stability comes from the loop fitting into CPU cache, which
+// allows the loop to execute without any fetches taking place.  Even so,
+// I'm keeping the RAM version, out of an abundance of caution: just in
+// case there are any rare or oddball conditions (interrupt timing, say) 
+// where the cache trick breaks.  Putting the code in RAM seems pretty
+// much guaranteed to work, whereas the cache trick seems somewhat to be
+// relying on a happy accident, and I personally don't know the M0+ 
+// architecture well enough to be able to convince myself that it really
+// will work under all conditions.  There doesn't seem to be any benefit
+// to not using the assembler, either, as it's very simple code and takes
+// up little RAM (about 40 bytes).
+
 
 #include "FreescaleIAP.h"
- 
+
 //#define IAPDEBUG
 
 // assembly interface
 extern "C" {
-    void iapEraseSector(FTFA_Type *ftfa, uint32_t address);
-    void iapProgramBlock(FTFA_Type *ftfa, uint32_t address, const void *src, uint32_t length);
+    // Execute the current FTFA command and wait for completion.
+    // This is an assembler implementation that runs entirely in RAM,
+    // to ensure strict compliance with the prohibition on reading
+    // flash (for instruction fetches or any other reason) during FTFA 
+    // execution.
+    void iapExecAndWait();
 }
 
-
- 
 enum FCMD {
     Read1s = 0x01,
     ProgramCheck = 0x02,
@@ -75,116 +63,47 @@ enum FCMD {
     VerifyBackdoor = 0x45
 };
 
-
-/* Check if an error occured 
-   Returns error code or Success*/
-static IAPCode check_error(void) 
-{
-    if (FTFA->FSTAT & FTFA_FSTAT_FPVIOL_MASK) {
-        #ifdef IAPDEBUG
-        printf("IAP: Protection violation\r\n");
-        #endif
-        return ProtectionError;
-    }
-    if (FTFA->FSTAT & FTFA_FSTAT_ACCERR_MASK) {
-        #ifdef IAPDEBUG
-        printf("IAP: Flash access error\r\n");
-        #endif
-        return AccessError;
-    }
-    if (FTFA->FSTAT & FTFA_FSTAT_RDCOLERR_MASK) {
-        #ifdef IAPDEBUG
-        printf("IAP: Collision error\r\n");
-        #endif
-        return CollisionError;
-    }
-    if (FTFA->FSTAT & FTFA_FSTAT_MGSTAT0_MASK) {
-        #ifdef IAPDEBUG
-        printf("IAP: Runtime error\r\n");
-        #endif
-        return RuntimeError;
-    }
-    #ifdef IAPDEBUG
-    printf("IAP: No error reported\r\n");
-    #endif
-    return Success;
-}
- 
-IAPCode FreescaleIAP::program_flash(int address, const void *src, unsigned int length) 
-{    
-    #ifdef IAPDEBUG
-    printf("IAP: Programming flash at %x with length %d\r\n", address, length);
-    #endif
-                
-    // presume success
-    IAPCode status = Success;
-
-    // I'm not 100% convinced this is 100% reliable yet.  So let's show
-    // some diagnostic lights while we're working.  If anyone sees any
-    // freezes, the lights that are left on at the freeze will tell us
-    // which step is crashing.
-    extern void diagLED(int,int,int);
-    
-    // Erase the sector(s) covered by the write.  Before writing, we must
-    // erase each sector that we're going to touch on the write.
-    for (uint32_t ofs = 0 ; ofs < length ; ofs += SECTOR_SIZE)
-    {
-        // Show RED on the first sector, GREEN on second, BLUE on third.  Each
-        // sector is 1K, so I don't think we'll need more than 3 for the 
-        // foreseeable future.  (RAM on the KL25Z is so tight that it will
-        // probably stop us from adding enough features to require more
-        // configuration variables than 3K worth.)
-        diagLED(ofs/SECTOR_SIZE == 0, ofs/SECTOR_SIZE == 1, ofs/SECTOR_SIZE == 2);
-        
-        // erase the sector
-        iapEraseSector(FTFA, address + ofs);
-    }
-        
-    // If the erase was successful, write the data.
-    if ((status = check_error()) == Success)
-    {
-        // show cyan while the write is in progress
-        diagLED(0, 1, 1);
-
-        // do the write
-        iapProgramBlock(FTFA, address, src, length);
-        
-        // purple when done
-        diagLED(1, 0, 1);
-        
-        // check again for errors
-        status = check_error();
-    }
-    
-    // return the result
-    return status;
-}
- 
-uint32_t FreescaleIAP::flash_size(void) 
+// Get the size of the flash memory on the device
+uint32_t FreescaleIAP::flashSize(void) 
 {
     uint32_t retval = (SIM->FCFG2 & 0x7F000000u) >> (24-13);
     if (SIM->FCFG2 & (1<<23))           // Possible second flash bank
         retval += (SIM->FCFG2 & 0x007F0000u) >> (16-13);
     return retval;
 }
- 
-/* Check if no flash boundary is violated
-   Returns true on violation */
-bool check_boundary(int address, unsigned int length) 
+
+// Check if an error occurred
+static FreescaleIAP::IAPCode checkError(void) 
 {
-    int temp = (address+length - 1) / SECTOR_SIZE;
-    address /= SECTOR_SIZE;
-    bool retval = (address != temp);
-    #ifdef IAPDEBUG
-    if (retval)
-        printf("IAP: Boundary violation\r\n");
-    #endif
-    return retval;
+    if (FTFA->FSTAT & FTFA_FSTAT_FPVIOL_MASK) {
+        #ifdef IAPDEBUG
+        printf("IAP: Protection violation\r\n");
+        #endif
+        return FreescaleIAP::ProtectionError;
+    }
+    if (FTFA->FSTAT & FTFA_FSTAT_ACCERR_MASK) {
+        #ifdef IAPDEBUG
+        printf("IAP: Flash access error\r\n");
+        #endif
+        return FreescaleIAP::AccessError;
+    }
+    if (FTFA->FSTAT & FTFA_FSTAT_RDCOLERR_MASK) {
+        #ifdef IAPDEBUG
+        printf("IAP: Collision error\r\n");
+        #endif
+        return FreescaleIAP::CollisionError;
+    }
+    if (FTFA->FSTAT & FTFA_FSTAT_MGSTAT0_MASK) {
+        #ifdef IAPDEBUG
+        printf("IAP: Runtime error\r\n");
+        #endif
+        return FreescaleIAP::RuntimeError;
+    }
+    return FreescaleIAP::Success;
 }
- 
-/* Check if address is correctly aligned
-   Returns true on violation */
-bool check_align(int address) 
+
+// check for proper address alignment
+static bool checkAlign(int address) 
 {
     bool retval = address & 0x03;
     #ifdef IAPDEBUG
@@ -193,4 +112,190 @@ bool check_align(int address)
     #endif
     return retval;
 }
- 
+
+// clear errors in the FTFA
+static void clearErrors()
+{
+    // wait for any previous command to complete    
+    while (!(FTFA->FSTAT & FTFA_FSTAT_CCIF_MASK)) ;
+
+    // clear the error bits
+    if (FTFA->FSTAT & (FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_FPVIOL_MASK))
+        FTFA->FSTAT |= FTFA_FSTAT_ACCERR_MASK | FTFA_FSTAT_FPVIOL_MASK;
+}
+
+static FreescaleIAP::IAPCode eraseSector(int address) 
+{
+    #ifdef IAPDEBUG
+    printf("IAP: Erasing sector at %x\r\n", address);
+    #endif
+
+    // ensure proper alignment
+    if (checkAlign(address))
+        return FreescaleIAP::AlignError;
+    
+    // clear errors
+    clearErrors();
+    
+    // Set up the command
+    FTFA->FCCOB0 = EraseSector;
+    FTFA->FCCOB1 = (address >> 16) & 0xFF;
+    FTFA->FCCOB2 = (address >> 8) & 0xFF;
+    FTFA->FCCOB3 = address & 0xFF;
+    
+    // execute
+    iapExecAndWait();
+    
+    // check the result
+    return checkError();
+}
+
+static FreescaleIAP::IAPCode verifySectorErased(int address)
+{
+    // Always verify in whole sectors.  The
+    const unsigned int count = SECTOR_SIZE/4;
+
+    #ifdef IAPDEBUG
+    printf("IAP: Verify erased at %x, %d longwords (%d bytes)\r\n", address, count, count*4);
+    #endif
+    
+    if (checkAlign(address))
+        return FreescaleIAP::AlignError;
+
+    // clear errors
+    clearErrors();
+    
+    // Set up command
+    FTFA->FCCOB0 = Read1s;
+    FTFA->FCCOB1 = (address >> 16) & 0xFF;
+    FTFA->FCCOB2 = (address >> 8) & 0xFF;
+    FTFA->FCCOB3 = address & 0xFF;
+    FTFA->FCCOB4 = (count >> 8) & 0xFF;
+    FTFA->FCCOB5 = count & 0xFF;
+    FTFA->FCCOB6 = 0;
+
+    // execute    
+    iapExecAndWait();
+    
+    // check the result
+    FreescaleIAP::IAPCode retval = checkError();
+    if (retval == FreescaleIAP::RuntimeError) {
+        #ifdef IAPDEBUG
+        printf("IAP: Flash was not erased\r\n");
+        #endif
+        return FreescaleIAP::EraseError;
+    }
+    return retval;       
+}
+
+// Write one sector.  This always writes a full sector, even if the
+// requested length is greater or less than the sector size:
+//
+// - if len > SECTOR_SIZE, we write the first SECTOR_SIZE bytes of the data
+//
+// - if len < SECTOR_SIZE, we write the data, then fill in the rest of the
+//   sector with 0xFF bytes ('1' bits)
+//
+
+static FreescaleIAP::IAPCode writeSector(int address, const uint8_t *p, int len)
+{    
+    #ifdef IAPDEBUG
+    printf("IAP: Writing sector at %x with length %d\r\n", address, len);
+    #endif
+
+    // program the sector, one longword (32 bits) at a time
+    for (int ofs = 0 ; ofs < SECTOR_SIZE ; ofs += 4, address += 4, p += 4, len -= 4)
+    {
+        // clear errors
+        clearErrors();
+        
+        // Set up the command
+        FTFA->FCCOB0 = ProgramLongword;
+        FTFA->FCCOB1 = (address >> 16) & 0xFF;
+        FTFA->FCCOB2 = (address >> 8) & 0xFF;
+        FTFA->FCCOB3 = address & 0xFF;
+        
+        // Load the longword to write.  If we're past the end of the source
+        // data, write all '1' bits to the balance of the sector.
+        FTFA->FCCOB4 = len > 3 ? p[3] : 0xFF;
+        FTFA->FCCOB5 = len > 2 ? p[2] : 0xFF;
+        FTFA->FCCOB6 = len > 1 ? p[1] : 0xFF;
+        FTFA->FCCOB7 = len > 0 ? p[0] : 0xFF;
+        
+        // execute
+        iapExecAndWait();
+        
+        // check errors
+        FreescaleIAP::IAPCode status = checkError();
+        if (status != FreescaleIAP::Success)
+            return status;
+    }
+    
+    // no problems
+    return FreescaleIAP::Success;
+}
+
+// Program a block of memory into flash. 
+FreescaleIAP::IAPCode FreescaleIAP::programFlash(
+    int address, const void *src, unsigned int length) 
+{    
+    #ifdef IAPDEBUG
+    printf("IAP: Programming flash at %x with length %d\r\n", address, length);
+    #endif
+    
+    // presume success
+    FreescaleIAP::IAPCode status = FreescaleIAP::Success;
+    
+    // Show diagnostic LED colors while writing.  I'm finally convinced this
+    // is well and truly 100% reliable now, but I've been wrong before, so
+    // we'll keep this for now.  The idea is that if we freeze up, we'll at
+    // least know which stage we're at from the last color displayed.
+    extern void diagLED(int,int,int);
+    
+    // try a few times if we fail to verify
+    for (int tries = 0 ; tries < 5 ; ++tries)
+    {
+        // Do the write one sector at a time
+        int curaddr = address;
+        const uint8_t *p = (const uint8_t *)src;
+        int rem = (int)length;
+        for ( ; rem > 0 ; curaddr += SECTOR_SIZE, p += SECTOR_SIZE, rem -= SECTOR_SIZE)
+        {
+            // erase the sector (red LED)
+            diagLED(1, 0, 0);
+            if ((status = eraseSector(curaddr)) != FreescaleIAP::Success)
+                break;
+            
+            // verify that the sector is erased (yellow LED)
+            diagLED(1, 1, 0);
+            if ((status = verifySectorErased(curaddr)) != FreescaleIAP::Success)
+                break;
+            
+            // write the data (white LED)
+            diagLED(1, 1, 1);
+            if ((status = writeSector(curaddr, p, rem)) != FreescaleIAP::Success)
+                break;
+                
+            // back from write (purple LED)
+            diagLED(1, 0, 1);
+        }
+        
+        // if we didn't encounter an FTFA error, verify the write
+        if (status == FreescaleIAP::Success)
+        {
+            // Verify the write.  If it was successful, we're done.
+            if (memcmp((void *)address, src, length) == 0)
+                break;
+                
+            // We have a mismatch between the flash data and the source.
+            // Flag the error and go back for another attempt.
+            status = FreescaleIAP::VerifyError;
+        }
+    }
+    
+    __enable_irq();
+        
+    // return the result
+    return status;
+}
+

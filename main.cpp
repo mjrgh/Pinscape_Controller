@@ -216,6 +216,7 @@
 #include "math.h"
 #include "diags.h"
 #include "pinscape.h"
+#include "NewMalloc.h"
 #include "USBJoystick.h"
 #include "MMA8451Q.h"
 #include "tsl1410r.h"
@@ -311,108 +312,6 @@ const char *getBuildID()
   uint64_t mainLoopMsgTime, mainLoopMsgCount;
   Timer mainLoopTimer;
 #endif
-
-
-// --------------------------------------------------------------------------
-//
-// Custom memory allocator.  We use our own version of malloc() for more
-// efficient memory usage, and to provide diagnostics if we run out of heap.
-//
-// We can implement a more efficient malloc than the library can because we
-// can make an assumption that the library can't: allocations are permanent.
-// The normal malloc has to assume that allocations can be freed, so it has
-// to track blocks individually.  For the purposes of this program, though,
-// we don't have to do this because virtually all of our allocations are 
-// de facto permanent.  We only allocate dyanmic memory during setup, and 
-// once we set things up, we never delete anything.  This means that we can 
-// allocate memory in bare blocks without any bookkeeping overhead.
-//
-// In addition, we can make a larger overall pool of memory available in
-// a custom allocator.  The RTL malloc() seems to have a pool of about 3K 
-// to work with, even though there really seems to be at least 8K left after 
-// reserving a reasonable amount of space for the stack.
-
-// halt with a diagnostic display if we run out of memory
-void HaltOutOfMem()
-{
-    printf("\r\nOut Of Memory\r\n");
-    // halt with the diagnostic display (by looping forever)
-    for (;;)
-    {
-        diagLED(1, 0, 0);
-        wait_us(200000);
-        diagLED(1, 0, 1);
-        wait_us(200000);
-    }
-}
-
-// For our custom malloc, we take advantage of the known layout of the
-// mbed library memory management.  The mbed library puts all of the
-// static read/write data at the low end of RAM; this includes the
-// initialized statics and the "ZI" (zero-initialized) statics.  The
-// malloc heap starts just after the last static, growing upwards as
-// memory is allocated.  The stack starts at the top of RAM and grows
-// downwards.  
-//
-// To figure out where the free memory starts, we simply call the system
-// malloc() to make a dummy allocation the first time we're called, and 
-// use the address it returns as the start of our free memory pool.  The
-// first malloc() call presumably returns the lowest byte of the pool in
-// the compiler RTL's way of thinking, and from what we know about the
-// mbed heap layout, we know everything above this point should be free,
-// at least until we reach the lowest address used by the stack.
-//
-// The ultimate size of the stack is of course dynamic and unpredictable.
-// In testing, it appears that we currently need a little over 1K.  To be
-// conservative, we'll reserve 2K for the stack, by taking it out of the
-// space at top of memory we consider fair game for malloc.
-//
-// Note that we could do this a little more low-level-ly if we wanted.
-// The ARM linker provides a pre-defined extern char[] variable named 
-// Image$$RW_IRAM1$$ZI$$Limit, which is always placed just after the
-// last static data variable.  In principle, this tells us the start
-// of the available malloc pool.  However, in testing, it doesn't seem
-// safe to use this as the start of our malloc pool.  I'm not sure why,
-// but probably something in the startup code (either in the C RTL or 
-// the mbed library) is allocating from the pool before we get control. 
-// So we won't use that approach.  Besides, that would tie us even more
-// closely to the ARM compiler.  With our malloc() probe approach, we're
-// at least portable to any compiler that uses the same basic memory
-// layout, with the heap above the statics and the stack at top of 
-// memory; this isn't universal, but it's very typical.
-
-static char *xmalloc_nxt = 0;
-size_t xmalloc_rem = 0;
-void *xmalloc(size_t siz)
-{
-    if (xmalloc_nxt == 0)
-    {
-        xmalloc_nxt = (char *)malloc(4);
-        xmalloc_rem = 0x20003000UL - 2*1024 - uint32_t(xmalloc_nxt);
-    }
-    
-    siz = (siz + 3) & ~3;
-    if (siz > xmalloc_rem)
-        HaltOutOfMem();
-        
-    char *ret = xmalloc_nxt;
-    xmalloc_nxt += siz;
-    xmalloc_rem -= siz;
-    
-    return ret;
-}
-
-// Overload operator new to call our custom malloc.  This ensures that
-// all 'new' allocations throughout the program (including library code)
-// go through our private allocator.
-void *operator new(size_t siz) { return xmalloc(siz); }
-void *operator new[](size_t siz) { return xmalloc(siz); }
-
-// Since we don't do bookkeeping to track released memory, 'delete' does
-// nothing.  In actual testing, this routine appears to never be called.
-// If it *is* ever called, it will simply leave the block in place, which
-// will make it unavailable for re-use but will otherwise be harmless.
-void operator delete(void *ptr) { }
 
 
 // ---------------------------------------------------------------------------
@@ -2397,8 +2296,10 @@ struct ButtonState
     // current LOGICAL on/off state as reported to the host.
     uint8_t logState : 1;
 
-    // previous logical on/off state, when keys were last processed for USB 
-    // reports and local effects
+    // Previous logical on/off state, when keys were last processed for USB 
+    // reports and local effects.  This lets us detect edges (transitions)
+    // in the logical state, for effects that are triggered when the state
+    // changes rather than merely by the button being on or off.
     uint8_t prevLogState : 1;
     
     // Pulse state
@@ -2414,7 +2315,7 @@ struct ButtonState
     // door is open and off when the door is closed (or vice versa, but in either 
     // case, the switch state corresponds to the current state of the door at any
     // given time, rather than pulsing on state changes).  The "pulse mode"
-    // option brdiges this gap by generating a toggle key event each time
+    // option bridges this gap by generating a toggle key event each time
     // there's a change to the physical switch's state.
     //
     // Pulse state:
@@ -2465,13 +2366,16 @@ struct
     uint8_t data;       // key state byte for USB reports
 } mediaState = { false, 0 };
 
-// button scan interrupt ticker
-Ticker buttonTicker;
+// button scan interrupt timer
+Timeout scanButtonsTimeout;
 
 // Button scan interrupt handler.  We call this periodically via
 // a timer interrupt to scan the physical button states.  
 void scanButtons()
 {
+    // schedule the next interrupt
+    scanButtonsTimeout.attach_us(&scanButtons, 1000);
+    
     // scan all button input pins
     ButtonState *bs = buttonState, *last = bs + nButtons;
     for ( ; bs < last ; ++bs)
@@ -2591,7 +2495,7 @@ void initButtons(Config &cfg, bool &kbKeys)
     }
     
     // start the button scan thread
-    buttonTicker.attach_us(scanButtons, 1000);
+    scanButtonsTimeout.attach_us(scanButtons, 1000);
 
     // start the button state transition timer
     buttonTimer.start();
@@ -3866,6 +3770,9 @@ uint8_t tv_relay_state = 0x00;
 const uint8_t TV_RELAY_POWERON = 0x01;
 const uint8_t TV_RELAY_USB     = 0x02;
 
+// pulse timer for manual TV relay pulses
+Timer tvRelayManualTimer;
+
 // TV ON IR command state.  When the main PSU2 power state reaches
 // the IR phase, we use this sub-state counter to send the TV ON
 // IR signals.  We initialize to state 0 when the main state counter
@@ -3906,6 +3813,17 @@ Timer powerStatusTimer;
 uint32_t tv_delay_time_us;
 void powerStatusUpdate(Config &cfg)
 {
+    // If the manual relay pulse timer is past the pulse time, end the
+    // manual pulse.  The timer only runs when a pulse is active, so
+    // it'll never read as past the time limit if a pulse isn't on.
+    if (tvRelayManualTimer.read_us() > 250000)
+    {
+        // turn off the relay and disable the timer
+        tvRelayUpdate(TV_RELAY_USB, false);
+        tvRelayManualTimer.stop();
+        tvRelayManualTimer.reset();
+    }
+
     // Only update every 1/4 second or so.  Note that if the PSU2
     // circuit isn't configured, the initialization routine won't 
     // start the timer, so it'll always read zero and we'll always 
@@ -4110,15 +4028,6 @@ void startPowerStatusTimer(Config &cfg)
     }
 }
 
-// TV relay manual control timer.  This lets us pulse the TV relay
-// under manual control, separately from the TV ON timer.
-Ticker tv_manualTicker;
-void TVManualInt()
-{
-    tv_manualTicker.detach();
-    tvRelayUpdate(TV_RELAY_USB, false);
-}
-
 // Operate the TV ON relay.  This allows manual control of the relay
 // from the PC.  See protocol message 65 submessage 11.
 //
@@ -4145,9 +4054,10 @@ void TVRelay(int mode)
         break;
         
     case 2:
-        // Pulse the relay.  Turn it on, then set our timer for 250ms.
+        // Turn the relay on and reset the manual TV pulse timer
         tvRelayUpdate(TV_RELAY_USB, true);
-        tv_manualTicker.attach(&TVManualInt, 0.25);
+        tvRelayManualTimer.reset();
+        tvRelayManualTimer.start();
         break;
     }
 }
@@ -4179,27 +4089,29 @@ uint8_t saveConfigPending = 0;
 // delay time in seconds before rebooting.
 uint8_t saveConfigRebootTime;
 
+// status flag for successful config save - set to 0x40 on success
+uint8_t saveConfigSucceededFlag;
+
 // For convenience, a macro for the Config part of the NVM structure
 #define cfg (nvm.d.c)
 
 // flash memory controller interface
 FreescaleIAP iap;
 
-// NVM structure in memory.  This has to be aliend on a sector boundary,
-// since we have to be able to erase its page(s) in order to write it.
-// Further, we have to ensure that nothing else occupies any space within
-// the same pages, since we'll erase that entire space whenever we write.
-static const union
+// figure the flash address for the config data
+const NVM *configFlashAddr()
 {
-    NVM nvm;      // the NVM structure
-    char guard[((sizeof(NVM) + SECTOR_SIZE - 1)/SECTOR_SIZE)*SECTOR_SIZE];
-}
-flash_nvm_memory __attribute__ ((aligned(SECTOR_SIZE))) = { };
-
-// figure the flash address as a pointer
-NVM *configFlashAddr()
-{
-    return (NVM *)&flash_nvm_memory;
+    // figure the number of sectors we need, rounding up
+    int nSectors = (sizeof(NVM) + SECTOR_SIZE - 1)/SECTOR_SIZE;
+    
+    // figure the total size required from the number of sectors
+    int reservedSize = nSectors * SECTOR_SIZE;
+    
+    // locate it at the top of memory
+    uint32_t addr = iap.flashSize() - reservedSize;
+    
+    // return it as a read-only NVM pointer
+    return (const NVM *)addr;
 }
 
 // Load the config from flash.  Returns true if a valid non-default
@@ -4226,7 +4138,7 @@ bool loadConfigFromFlash()
     // the free space, it won't collide with the linker area.
     
     // Figure how many sectors we need for our structure
-    NVM *flash = configFlashAddr();
+    const NVM *flash = configFlashAddr();
     
     // if the flash is valid, load it; otherwise initialize to defaults
     bool nvm_valid = flash->valid();
@@ -4245,55 +4157,17 @@ bool loadConfigFromFlash()
     return nvm_valid;
 }
 
-void saveConfigToFlash()
+// save the config - returns true on success, false on failure
+bool saveConfigToFlash()
 {
     // make sure the plunger sensor isn't busy
     waitPlungerIdle();
     
     // get the config block location in the flash memory
     uint32_t addr = uint32_t(configFlashAddr());
-    
-    // loop until we save it successfully
-    for (int i = 0 ; i < 5 ; ++i)
-    {
-        // show cyan while writing
-        diagLED(0, 1, 1);
-        
-        // save the data
-        nvm.save(iap, addr);
-    
-        // diagnostic lights off
-        diagLED(0, 0, 0);
-        
-        // verify the data
-        if (nvm.verify(addr))
-        {
-            // show a diagnostic success flash (rapid green)
-            for (int j = 0 ; j < 4 ; ++j)
-            {
-                diagLED(0, 1, 0);
-                wait_us(50000);
-                diagLED(0, 0, 0);
-                wait_us(50000);
-            }
-            
-            // success - no need to write again
-            break;
-        }
-        else
-        {            
-            // Write failed.  For diagnostic purposes, flash red a few times.
-            // Then go back through the loop to make another attempt at the
-            // write.
-            for (int j = 0 ; j < 5 ; ++j)
-            {
-                diagLED(1, 0, 0);
-                wait_us(50000);
-                diagLED(0, 0, 0);
-                wait_us(50000);
-            }
-        }
-    }
+
+    // save the data    
+    return nvm.save(iap, addr);
 }
 
 // ---------------------------------------------------------------------------
@@ -5709,7 +5583,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 nvm.valid(),        // a config is loaded if the config memory block is valid
                 true,               // we support sbx/pbx extensions
                 true,               // we support the new accelerometer settings
-                xmalloc_rem);       // remaining memory size
+                mallocBytesFree()); // remaining memory size
             break;
             
         case 5:
@@ -5961,11 +5835,6 @@ int main(void)
 {
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
-    
-    
-    // debugging: print memory config info
-    //    -> no longer very useful, since we use our own custom malloc/new allocator (see xmalloc() above)
-    // {int *a = new int; printf("Stack=%lx, heap=%lx, free=%ld\r\n", (long)&a, (long)a, (long)&a - (long)a);} 
     
     // clear the I2C connection
     clear_i2c();
@@ -6383,7 +6252,8 @@ int main(void)
         uint16_t statusFlags = 
             cfg.plunger.enabled             // 0x01
             | nightMode                     // 0x02
-            | ((psu2_state & 0x07) << 2);   // 0x04 0x08 0x10
+            | ((psu2_state & 0x07) << 2)    // 0x04 0x08 0x10
+            | saveConfigSucceededFlag;      // 0x40
         if (IRLearningMode != 0)
             statusFlags |= 0x20;
 
@@ -6513,7 +6383,8 @@ int main(void)
         if (saveConfigPending != 0)
         {
             // save the configuration
-            saveConfigToFlash();
+            if (saveConfigToFlash())
+                saveConfigSucceededFlag = 0x40;
             
             // if desired, reboot after the specified delay
             if (saveConfigPending == SAVE_CONFIG_AND_REBOOT)

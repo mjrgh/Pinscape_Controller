@@ -43,21 +43,22 @@
 //      higher noise tolerance tends to result in reduced resolution.
 //
 //  2 = Maximum dL/ds (highest first derivative of luminance change per
-//      distance, or put another way, the steepest rate of change in
-//      brightness).  This scans the whole image and looks for the 
-//      position with the highest dL/ds value.  We average over a window
-//      of several pixels, to smooth out pixel noise; this should avoid
-//      treating a single spiky pixel as having a steep slope adjacent 
-//      to it.  The advantage I see in this approach is that it looks for
-//      the *strongest* edge, which should make it less likely to be fooled
-//      by noise that creates a false edge.  Algorithms 1 and 2 have
-//      basically fixed thresholds for what constitutes an edge, but this
-//      approach is more dynamic in that it evaluates each edge-like region
-//      and picks the one with the highest contrast.  The one fixed feature
-//      of this algorithm is the width of the edge, since that's limited
-//      by the pixel window; but we only deal with one type of image, so
-//      it should be possible to adjust the light source and sensor position
-//      to always yield an image with a narrow enough edge region.
+//      distance, or put another way, the steepest brightness slope).
+//      This scans the whole image and looks for the position with the 
+//      highest dL/ds value.  We average over a window of several pixels, 
+//      to smooth out pixel noise; this should avoid treating a single 
+//      spiky pixel as having a steep slope adjacent to it.  The advantage
+//      in this approach is that it looks for the strongest edge after
+//      considering all edges across the whole image, which should make 
+//      it less likely to be fooled by isolated noise that creates a 
+//      single false edge.  Algorithms 1 and 2 have basically fixed 
+//      thresholds for what constitutes an edge, but this approach is 
+//      more dynamic in that it evaluates each edge-like region and picks 
+//      the best one.  The width of the edge is still fixed, since that's 
+//      determined by the pixel window.  But that should be okay since we 
+//      only deal with one type of image.  It should be possible to adjust 
+//      the light source and sensor position to always yield an image with 
+//      a narrow enough edge region.
 //
 //      The max dL/ds method is the most compute-intensive method, because
 //      of the pixel window averaging.  An assembly language implemementation
@@ -98,11 +99,18 @@ public:
         // Figure the scaling factor for converting native pixel readings
         // to our normalized 0..65535 range.  The effective calculation we
         // need to perform is (reading*65535)/(npix-1).  Division is slow
-        // on the M0+, so recast this as a multiply, in 64K-scaled fixed
-        // point ints.  To apply this, multiply by this inverse value and
-        // shift right 16 bits.
+        // on the M0+, and floating point is dreadfully slow, so recast the
+        // per-reading calculation as a multiply (which, unlike DIV, is fast
+        // on KL25Z - the device has a single-cycle 32-bit hardware multiply).
+        // How do we turn a divide into a multiply?  By calculating the
+        // inverse!  How do we calculate a meaningful inverse of a large
+        // integer using integers?  By doing our calculations in fixed-point
+        // integers, which is to say, using hardware integers but treating
+        // all values as multiplied by a scaling factor.  We'll use 64K as
+        // the scaling factor, since we can divide the scaling factor back
+        // out by using an arithmetic shift (also fast on M0+).  
         native_npix = nativePix;
-        scaling_factor = (65535U*65536U) / nativePix;
+        scaling_factor = (65535U*65536U) / (nativePix - 1);
         
         // set the midpoint history arbitrarily to the absolute halfway point
         memset(midpt, 127, sizeof(midpt));
@@ -140,7 +148,9 @@ public:
             // a fixed-point number with 64K scale, so multiplying the
             // pixel reading by this will give us the result with 64K
             // scale: so shift right 16 bits to get the final answer.
-            r.pos = uint16_t((scaling_factor * uint32_t(pixpos)) >> 16);
+            // (The +32768 is added for rounding: it's equal to 0.5 
+            // at our 64K scale.)
+            r.pos = uint16_t((scaling_factor*uint32_t(pixpos) + 32768) >> 16);
             r.t = tpix;
             
             // success

@@ -238,6 +238,16 @@ public:
         tpm->SC = TPM_SC_CMOD(1) | TPM_SC_PS(ps);
     }
     
+    // wait for the end of the current cycle
+    void waitEndCycle()
+    {
+        // clear the overflow flag
+        tpm->SC |= TPM_SC_TOF_MASK;
+        
+        // The flag will be set at the next overflow
+        while (!(tpm->SC & TPM_SC_TOF_MASK)) ;
+    }
+    
     // hardware register base
     TPM_Type *tpm;
     
@@ -327,6 +337,9 @@ public:
         TPM_Type *tpm = getUnit()->tpm;
         tpm->CONTROLS[ch_n].CnV = (uint32_t)((float)(tpm->MOD + 1) * val);
     }
+    
+    // Wait for the end of a cycle
+    void waitEndCycle() { getUnit()->waitEndCycle(); }
     
     // Get my TPM unit object.  This can be used to change the period.
     inline NewPwmUnit *getUnit() { return &NewPwmUnit::unit[tpm_n]; }

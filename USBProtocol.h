@@ -61,6 +61,7 @@
 //                         5 -> TV relay is on
 //                         6 -> sending IR signals designated as TV ON signals
 //              0x20 -> IR learning mode in progress
+//              0x40 -> configuration saved successfully (see below)
 //    00     2nd byte of status (reserved)
 //    00     3rd byte of status (reserved)
 //    00     always zero for joystick reports
@@ -82,6 +83,14 @@
 // position (the rest position of the plunger) and positive values represent
 // retracted (pulled back) positions.  A negative value means that the plunger
 // is pushed forward of the park position.
+//
+// Status bit 0x40 is set after a successful configuration update via special
+// command 65 6 (save config to flash).  The device always reboots after this
+// command, so if the host wants to receive a status update verifying the 
+// save, it has to request a non-zero reboot delay in the message to allow
+// us time to send at least one of these status reports after the save.
+// This bit is only sent after a successful save, which means that the flash
+// write succeeded and the written sectors verified as correct.
 //
 // 2. Special reports
 // We subvert the joystick report format in certain cases to report other 
