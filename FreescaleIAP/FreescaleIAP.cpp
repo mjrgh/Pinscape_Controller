@@ -285,11 +285,16 @@ FreescaleIAP::IAPCode FreescaleIAP::programFlash(
         {
             // Verify the write.  If it was successful, we're done.
             if (memcmp((void *)address, src, length) == 0)
+            {
+                // LEDs to green on success
+                diagLED(0, 1, 0);
                 break;
+            }
                 
             // We have a mismatch between the flash data and the source.
             // Flag the error and go back for another attempt.
             status = FreescaleIAP::VerifyError;
+            diagLED(1, 0, 0);
         }
     }
     

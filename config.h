@@ -37,7 +37,7 @@
 // 
 #define STANDARD_CONFIG       1     // standard settings, based on v1 base settings
 #define TEST_CONFIG_EXPAN     0     // configuration for the expansion boards
-#define TEST_KEEP_PRINTF      1     // for debugging purposes, keep printf() enabled
+#define TEST_KEEP_PRINTF      0     // for debugging purposes, keep printf() enabled
                                     // by leaving the SDA UART GPIO pins unallocated
 
 

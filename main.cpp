@@ -1962,12 +1962,12 @@ void process_IR(Config &cfg, USBJoystick &js)
         // Time out any received command
         if (IRCommandIn != 0)
         {
-            // Time out inter-key gap mode after 30ms; time out all 
-            // commands after 100ms.
+            // Time out commands after 200ms without a repeat signal.
+            // Time out the inter-key gap after 50ms.
             uint32_t t = IRTimer.read_us();
-            if (t > 100000)
+            if (t > 200000)
                 IRCommandIn = 0;
-            else if (t > 30000)
+            else if (t > 50000)
                 IRKeyGap = false;
         }
     
