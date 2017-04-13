@@ -219,20 +219,24 @@
 #include "NewMalloc.h"
 #include "USBJoystick.h"
 #include "MMA8451Q.h"
-#include "tsl1410r.h"
 #include "FreescaleIAP.h"
 #include "crc32.h"
 #include "TLC5940.h"
 #include "74HC595.h"
 #include "nvm.h"
-#include "plunger.h"
-#include "ccdSensor.h"
-#include "potSensor.h"
-#include "nullSensor.h"
 #include "TinyDigitalIn.h"
 #include "IRReceiver.h"
 #include "IRTransmitter.h"
 #include "NewPwm.h"
+
+// plunger sensors
+#include "plunger.h"
+#include "edgeSensor.h"
+#include "potSensor.h"
+#include "quadSensor.h"
+#include "nullSensor.h"
+#include "barCodeSensor.h"
+#include "distanceSensor.h"
 
 
 #define DECL_EXTERNS
@@ -2418,6 +2422,7 @@ void initButtons(Config &cfg, bool &kbKeys)
 {
     // presume no shift key
     shiftButton.index = -1;
+    shiftButton.state = 0;
     
     // Count up how many button slots we'll need to allocate.  Start
     // with assigned buttons from the configuration, noting that we
@@ -2854,13 +2859,13 @@ void processButtons(Config &cfg)
                 //
                 // Note that the "shift" flag (0x02) has no effect in switch
                 // mode.  Shifting only works for toggle mode.
-                if (cfg.nightMode.flags & 0x01)
+                if ((cfg.nightMode.flags & 0x01) != 0)
                 {
                     // It's an on/off switch.  Night mode simply tracks the
                     // current switch state.
                     setNightMode(bs->logState);
                 }
-                else
+                else if (bs->logState)
                 {
                     // It's a momentary toggle switch.  Toggle the night mode 
                     // state on each distinct press of the button: that is,
@@ -4307,52 +4312,60 @@ void createPlunger()
     // create the new sensor object according to the type
     switch (cfg.plunger.sensorType)
     {
-    case PlungerType_TSL1410RS:
-        // TSL1410R, serial mode (all pixels read in one file)
+    case PlungerType_TSL1410R:
+        // TSL1410R, shadow edge detector
         // pins are: SI, CLOCK, AO
         plungerSensor = new PlungerSensorTSL1410R(
             wirePinName(cfg.plunger.sensorPin[0]), 
             wirePinName(cfg.plunger.sensorPin[1]),
-            wirePinName(cfg.plunger.sensorPin[2]),
-            NC);
+            wirePinName(cfg.plunger.sensorPin[2]));
         break;
         
-    case PlungerType_TSL1410RP:
-        // TSL1410R, parallel mode (each half-sensor's pixels read separately)
-        // pins are: SI, CLOCK, AO1, AO2
-        plungerSensor = new PlungerSensorTSL1410R(
-            wirePinName(cfg.plunger.sensorPin[0]), 
-            wirePinName(cfg.plunger.sensorPin[1]),
-            wirePinName(cfg.plunger.sensorPin[2]), 
-            wirePinName(cfg.plunger.sensorPin[3]));
-        break;
-        
-    case PlungerType_TSL1412SS:
-        // TSL1412S, serial mode
-        // pins are: SI, CLOCK, AO1, AO2
+    case PlungerType_TSL1412S:
+        // TSL1412S, shadow edge detector
+        // pins are: SI, CLOCK, AO
         plungerSensor = new PlungerSensorTSL1412R(
             wirePinName(cfg.plunger.sensorPin[0]),
             wirePinName(cfg.plunger.sensorPin[1]), 
-            wirePinName(cfg.plunger.sensorPin[2]), 
-            NC);
-        break;
-    
-    case PlungerType_TSL1412SP:
-        // TSL1412S, parallel mode
-        // pins are: SI, CLOCK, AO1, AO2
-        plungerSensor = new PlungerSensorTSL1412R(
-            wirePinName(cfg.plunger.sensorPin[0]), 
-            wirePinName(cfg.plunger.sensorPin[1]), 
-            wirePinName(cfg.plunger.sensorPin[2]), 
-            wirePinName(cfg.plunger.sensorPin[3]));
+            wirePinName(cfg.plunger.sensorPin[2]));
         break;
     
     case PlungerType_Pot:
-        // pins are: AO
+        // Potentiometer (or any other sensor with a linear analog voltage
+        // reading as the proxy for the position)
+        // pins are: AO (analog in)
         plungerSensor = new PlungerSensorPot(
             wirePinName(cfg.plunger.sensorPin[0]));
         break;
+        
+    case PlungerType_OptQuad:
+        // Optical quadrature sensor, AEDR8300-K or similar.  The -K is
+        // designed for a 75 LPI scale, which translates to 300 pulses/inch.
+        // Pins are: CHA, CHB (quadrature pulse inputs).
+        plungerSensor = new PlungerSensorQuad(
+            300,
+            wirePinName(cfg.plunger.sensorPin[0]),
+            wirePinName(cfg.plunger.sensorPin[1]));
+        break;
     
+    case PlungerType_TSL1401CL:
+        // TSL1401CL, absolute position encoder with bar code scale
+        // pins are: SI, CLOCK, AO
+        plungerSensor = new PlungerSensorTSL1401CL(
+            wirePinName(cfg.plunger.sensorPin[0]), 
+            wirePinName(cfg.plunger.sensorPin[1]),
+            wirePinName(cfg.plunger.sensorPin[2]));
+        break;
+        
+    case PlungerType_VL6180X:
+        // VL6180X time-of-flight IR distance sensor
+        // pins are: SDL, SCL, GPIO0/CE
+        plungerSensor = new PlungerSensorVL6180X(
+            wirePinName(cfg.plunger.sensorPin[0]),
+            wirePinName(cfg.plunger.sensorPin[1]),
+            wirePinName(cfg.plunger.sensorPin[2]));
+        break;
+        
     case PlungerType_None:
     default:
         plungerSensor = new PlungerSensorNull();
@@ -4456,11 +4469,11 @@ public:
             // read, so it will never be affected by this, but other sensor
             // types don't all have the same hardware cycle time, so we need
             // to throttle them artificially.  E.g., the potentiometer only
-            // needs one ADC sample per reading, which only takes about 15us.
-            // We don't need to check which sensor type we have here; we
-            // just ignore readings until the minimum interval has passed,
-            // so if the sensor is already slower than this, we'll end up
-            // using all of its readings.
+            // needs one ADC sample per reading, which only takes about 15us;
+            // the quadrature sensor needs no time at all since it keeps
+            // track of the position continuously via interrupts.  We don't
+            // need to check which sensor type we have here; we just ignore 
+            // readings until the minimum interval has passed.
             if (uint32_t(r.t - prv.t) < 1000UL)
                 return;
 
@@ -4566,7 +4579,7 @@ public:
             // figures will fit nicely into a 32-bit fixed point value with
             // a 64K scale factor.
             const PlungerReading &prv2 = nthHist(1);
-            int v = ((r.pos - prv2.pos) << 16)/(r.t - prv2.t);
+            int v = ((r.pos - prv2.pos) * 65536L)/int(r.t - prv2.t);
             
             // presume we'll report the latest instantaneous reading
             z = r.pos;
@@ -4738,7 +4751,7 @@ public:
                 {
                     // It's at roughly the same position as the starting point.
                     // Consider it stable if this has been true for 300ms.
-                    if (uint32_t(r.t - f3s.t) > 30000UL)
+                    if (uint32_t(r.t - f3s.t) > 300000UL)
                     {
                         // we're done with the firing event
                         firingMode(0);
@@ -4765,11 +4778,36 @@ public:
             vprv2 = vprv;
             vprv = v;
             
+            // Check for auto-zeroing, if enabled
+            if ((cfg.plunger.autoZero.flags & PlungerAutoZeroEnabled) != 0)
+            {
+                // If we moved since the last reading, reset and restart the 
+                // auto-zero timer.  Otherwise, if the timer has reached the 
+                // auto-zero timeout, it means we've been motionless for that 
+                // long, so auto-zero now.                
+                if (r.pos != prv.pos)
+                {
+                    // movement detected - reset the timer
+                    autoZeroTimer.reset();
+                    autoZeroTimer.start();
+                }
+                else if (autoZeroTimer.read_us() > cfg.plunger.autoZero.t * 1000000UL)
+                {
+                    // auto-zero now
+                    plungerSensor->autoZero();
+                    
+                    // stop the timer so that we don't keep repeating this
+                    // if the plunger stays still for a long time
+                    autoZeroTimer.stop();
+                    autoZeroTimer.reset();
+                }
+            }
+            
             // add the new reading to the history
             hist[histIdx] = r;
-            if (++histIdx > countof(hist))
+            if (++histIdx >= countof(hist))
                 histIdx = 0;
-            
+                
             // apply the post-processing filter
             zf = applyPostFilter();
         }
@@ -4800,6 +4838,9 @@ public:
             calZeroPosN = 0;
             calRlsTimeSum = 0;
             calRlsTimeN = 0;
+            
+            // tell the plunger we're starting calibration
+            plungerSensor->beginCalibration();
             
             // set the initial zero point to the current position
             PlungerReading r;
@@ -4871,6 +4912,8 @@ public:
     bool isFiring() { return firing == 3; }
     
 private:
+    // Auto-zeroing timer
+    Timer autoZeroTimer;
 
     // Plunger data filtering mode:  optionally apply filtering to the raw 
     // plunger sensor readings to try to reduce noise in the signal.  This
@@ -5583,6 +5626,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 nvm.valid(),        // a config is loaded if the config memory block is valid
                 true,               // we support sbx/pbx extensions
                 true,               // we support the new accelerometer settings
+                true,               // we support the "flash write ok" status bit in joystick reports
                 mallocBytesFree()); // remaining memory size
             break;
             
@@ -5835,9 +5879,16 @@ int main(void)
 {
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
-    
+        
     // clear the I2C connection
     clear_i2c();
+    
+    // Elevate GPIO pin interrupt priorities, so that they can preempt
+    // other interrupts.  This is important for some external peripherals,
+    // particularly the quadrature plunger sensors, which can generate
+    // high-speed interrupts that need to be serviced quickly to keep
+    // proper count of the quadrature position.
+    FastInterruptIn::elevatePriority();
 
     // Load the saved configuration.  There are two sources of the
     // configuration data:
@@ -6384,11 +6435,14 @@ int main(void)
         {
             // save the configuration
             if (saveConfigToFlash())
+            {
+                // report success in the status flags
                 saveConfigSucceededFlag = 0x40;
             
-            // if desired, reboot after the specified delay
-            if (saveConfigPending == SAVE_CONFIG_AND_REBOOT)
-                saveConfigRebootTimer.start();
+                // if desired, reboot after the specified delay
+                if (saveConfigPending == SAVE_CONFIG_AND_REBOOT)
+                    saveConfigRebootTimer.start();
+            }
                 
             // the save is no longer pending
             saveConfigPending = 0;

@@ -1,57 +1,88 @@
 /*
- *  TSL1410R/TSL1412R interface class.
+ *  AMS/TAOS TSL14xx series photodiode array interface class.
  *
- *  This provides a high-level interface for the Taos TSL1410R and
- *  TSL1412R linear CCD array sensors.  (The 1410R and 1412R are
- *  identical except for the pixel array size, which the caller 
- *  provides as a parameter when instantiating the class.)
+ *  This provides a high-level interface for the AMS/TAOS TSLxx series
+ *  of photodiode arrays.  This class works with most of the sensors
+ *  in this series, which differ only in pixel array sizes.  This code
+ *  has been tested with the following sensors from the series:
  *
- *  The TSL141xR sensors can take images very quickly.  The minimum
- *  integration time (the time it takes to collect photoelectric
- *  charge on the pixels - roughly equal to the shutter speed for
- *  a film camera) is less than a millisecond, per the data sheet.
- *  The sensor is flexible about timing, though, and allows for
- *  much longer integration periods than the minimum.  It simply
- *  gathers more light (more photoelectric charge) as the integration
- *  period increases.  However, for our purposes in the Pinscape
- *  Controller, we want the highest possible frame rate, as we're
- *  trying to capture the motion of a fast-moving object (the plunger).
- *  The KL25Z can't actually keep up with the fastest frame rate the
- *  sensor can achieve, the limiting factor being its ADC.  The
- *  sensor transfers pixels to the MCU serially, and each pixel is
- *  transferred as an analog voltage level, so we have to collect
- *  one ADC sample per pixel.  Our maximum frame rate is therefore
- *  determined by the product of the minimum ADC sample time and 
- *  the number of pixels.  
+ *  TSL1410R  - 1280 pixels, 400dpi
+ *  TSL1412S  - 1536 pixels, 400dpi
+ *  TSL1401CL - 128 pixels, 400dpi
+ *
+ *  All of these sensors have the same electrical interface, consisting
+ *  of a clock input (CLK), start pulse input (SI), and analog pixel
+ *  output (AO).  The sensors are equipped with hold capacitors and
+ *  shift registers that allow simultaneous sampling of all pixels, and
+ *  serial access to the pixel values.
+ *
+ *  (Note on the plunger sensor class hierarchy: this class is for the
+ *  sensor only, not for the plunger application.  This class is meant
+ *  to be reusable in other contexts that just need to read raw pixel
+ *  data from the sensor.  Plunger/tslxxSensor.h implements the next
+ *  level up, which is the implementation of the generic plunger sensor
+ *  interface for TSL14xx sensors.  That's still an abstract class, since
+ *  it only provides the plunger class specialization for these sensor
+ *  types, without any image analysis component.  The final concrete 
+ *  classes are in Plunger/edgeSensor.h and Plunger/barCodeSensor.h,
+ *  which add the image processing that analyzes the image data to 
+ *  determine the plunger position.)
+ *
+ *  Our API is based on a double-buffered asynchronous read.  The caller
+ *  can access a completed buffer, containing the pixels from the last image 
+ *  frame, while the sensor is transferring data asynchronously (using the 
+ *  microcontroller's DMA capability) into the other buffer.  Each time a
+ *  new read is started, we swap buffers, making the last completed buffer 
+ *  available to the client and handing the other buffer to the DMA
+ *  controller to fill asynchronously.
+ *  
+ *  The photodiodes in these sensors gather light very rapidly, allowing
+ *  for extremely short exposure times.  The "shutter" is electronic;
+ *  a signal on the pulse input resets the pixels and begins an integration
+ *  period, and a subsequent signal ends the integration and transfers the
+ *  pixel voltages to the hold capacitors.  Minimum exposure times are less
+ *  than a millisecond.  The actual timing is under software control, since
+ *  we determine the start and end of the integration period via the pulse
+ *  input.  Longer integration periods gather more light, like a longer
+ *  exposure on a conventional camera.  For our purposes in the Pinscape
+ *  Controller, we want the highest possible frame rate, as we're trying to 
+ *  capture the motion of a fast-moving object (the plunger).  The KL25Z 
+ *  can't actually keep up with shortest integration time the sensor can 
+ *  achieve - the limiting factor is the KL25Z ADC, which needs at least
+ *  2.5us to collect each sample.  The sensor transfers pixels to the MCU 
+ *  serially, and each pixel is transferred as an analog voltage level, so 
+ *  we have to collect one ADC sample per pixel.  Our maximum frame rate 
+ *  is therefore determined by the product of the minimum ADC sample time 
+ *  and the number of pixels.  
  *
  *  The fastest operating mode for the KL25Z ADC is its "continuous"
  *  mode, where it automatically starts taking a new sample every time
  *  it completes the previous one.  The fastest way to transfer the
  *  samples to memory in this mode is via the hardware DMA controller.
  *  
- *  It takes a pretty tricky setup to make this work.  I don't like 
- *  tricky setups - I prefer something easy to understand - but in
- *  this case it's justified because of the dramatic speed improvement
- *  and the importance to the application of maximizing the speed.  
- *  I'm pretty sure there's no other way to even get close to the
- *  speed we can achieve with the continuous ADC/DMA combination.
- *  The ADC/DMA mode gives us pixel read times of about 2us, vs a
- *  minimum of about 14us for the next best method I've found.
- *  Using this mode, we can read TSL1410R's 1280 pixels at full
- *  resolution in about 2.5ms.  That's a frame rate of 400 frames
- *  per second, which is fast enough to capture a fast-moving
- *  plunger with minimal motion blur.
+ *  It takes a pretty tricky setup to make this work.  I don't like tricky 
+ *  setups - I prefer something easy to understand - but in this case it's
+ *  justified because of the importance in this application of maximizing 
+ *  the frame rate.  I'm pretty sure there's no other way to even get close 
+ *  to the rate we can achieve with the continuous ADC/DMA combination.
+ *  The ADC/DMA mode gives us pixel read times of about 2us, vs a minimum 
+ *  of about 14us for the next best method I've found.  Using this mode, we 
+ *  can read the TSL1410R's 1280 pixels at full resolution in about 2.5ms.  
+ *  That's a frame rate of 400 frames per second, which is fast enough to 
+ *  capture a fast-moving plunger with minimal motion blur.
  *
- *  (Note that the TSL141xR sensors have a "parallel" that lets
- *  them physically deliver two pixels at once to the MCU.  This
- *  could potentially provide a 2x speedup by halving all of the
- *  clock counts.  Unfortunately, the KL25Z can't take advantage
- *  of this, because its ADC hardware is only capable of taking one
- *  sample at a time.  The ADC has multiple channels that can connect
- *  to multiple GPIO pins, but internally it has only one physical
- *  sampler.  Using the parallel mode would paradoxically be slower
- *  than our continuous ADC/DMA method because it would preclude use 
- *  of the continuous sampling mode.)
+ *  Note that some of the sensors in this series (TSL1410R, TSL1412S) have
+ *  a "parallel" readout mode that lets them physically deliver two pixels
+ *  at once the MCU, via separate physical connections.  This could provide 
+ *  a 2X speedup on an MCU equipped with two independent ADC samplers.  
+ *  Unfortunately, the KL25Z is not so equipped; even though it might appear
+ *  at first glance to support multiple ADC "channels", all of the channels
+ *  internally connect to a single ADC sampler, so the hardware can ultimately
+ *  perform only one conversion at a time.  Paradoxically, using the sensor's
+ *  parallel mode is actually *slower* with a KL25Z than using its serial
+ *  mode, because we can only maintain the higher throughput of the KL25Z
+ *  ADC's "continuous sampling mode" by reading all samples thorugh a single
+ *  channel.
  *
  *  Here's the tricky approach we use:
  * 
@@ -188,8 +219,8 @@
 #include "SimpleDMA.h"
 #include "DMAChannels.h"
  
-#ifndef TSL1410R_H
-#define TSL1410R_H
+#ifndef TSL14XX_H
+#define TSL14XX_H
 
 
 // To allow DMA access to the clock pin, we need to point the DMA
@@ -222,16 +253,22 @@ IF_DIAG(
     extern uint64_t mainLoopIterCheckpt[];
     extern Timer mainLoopTimer;)
         
-class TSL1410R
+class TSL14xx
 {
 public:
-    TSL1410R(int nPixSensor, PinName siPin, PinName clockPin, PinName ao1Pin, PinName /*ao2Pin*/) 
+    // Set up the interface.  
+    //
+    //  nPixSensor = native number of pixels on sensor
+    //  siPin = SI pin (GPIO, digital out)
+    //  clockPin = CLK pin (GPIO, digital out)
+    //  aoPin = AO pin (GPIO, analog in - must be ADC-capable)
+    TSL14xx(int nPixSensor, PinName siPin, PinName clockPin, PinName aoPin)
         : adc_dma(DMAch_ADC), 
           clkUp_dma(DMAch_CLKUP), 
           clkDn_dma(DMAch_CLKDN),
           si(siPin), 
           clock(clockPin), 
-          ao1(ao1Pin, true),
+          ao(aoPin, true),
           nPixSensor(nPixSensor)
     {
         // start the sample timer with an arbitrary zero point of 'now'
@@ -268,12 +305,18 @@ public:
         // Set up the ADC transfer DMA channel.  This channel transfers
         // the current analog sampling result from the ADC output register
         // to our pixel array.
-        ao1.initDMA(&adc_dma);
+        ao.initDMA(&adc_dma);
 
         // Set up our chain of linked DMA channel:
+        //
         //   ADC sample completion triggers Clock Up
         //   ...which triggers the ADC transfer
-        //   ... which triggers Clock Down
+        //   ...which triggers Clock Down
+        //
+        // We operate the ADC in "continuous mode", meaning that it starts
+        // a new sample immediately after the last one completes.  This is
+        // what keeps the cycle going after the Clock Down, since the Clock
+        // Down transfer itself doesn't trigger another DMA operation.
         clkUp_dma.trigger(Trigger_ADC0);
         clkUp_dma.link(adc_dma);
         adc_dma.link(clkDn_dma, false);
@@ -286,30 +329,11 @@ public:
         
         // Register an interrupt callback so that we're notified when
         // the last transfer completes.
-        clkDn_dma.attach(this, &TSL1410R::transferDone);
+        clkDn_dma.attach(this, &TSL14xx::transferDone);
 
         // clear the timing statistics        
         totalTime = 0.0; 
         nRuns = 0;
-    }
-    
-    // end of transfer notification
-    void transferDone()
-    {
-        // stop the ADC sampler
-        ao1.stop();
-            
-        // clock out one extra pixel to leave A1 in the high-Z state
-        clock = 1;
-        clock = 0;
-    
-        // add this sample to the timing statistics (we collect the data
-        // merely to report to the config tool, for diagnostic purposes)
-        totalTime += uint32_t(t.read_us() - t0);
-        nRuns += 1;
-        
-        // the sampler is no long running
-        running = false;
     }
     
     // Get the stable pixel array.  This is the image array from the
@@ -337,7 +361,7 @@ public:
     // and returns immediately.  The new capture proceeds autonomously 
     // via the DMA hardware, so the caller can continue with other 
     // processing during the capture.
-    void startCapture()
+    void startCapture(uint32_t minIntTime_us = 0)
     {
         IF_DIAG(uint32_t tDiag0 = mainLoopTimer.read_us();)
         
@@ -347,10 +371,20 @@ public:
         // we're starting a new capture immediately        
         running = true;
 
+        // collect timing diagnostics
         IF_DIAG(mainLoopIterCheckpt[8] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
-
-        // note the start time of this transfer
-        t0 = t.read_us();
+        
+        // If the elapsed time since the start of the last integration
+        // hasn't reached the specified minimum yet, wait.  This allows
+        // the caller to control the integration time to optimize the
+        // exposure level.
+        uint32_t dt = uint32_t(t.read_us() - tInt);
+        if (dt < minIntTime_us)
+        {
+            // we haven't reached the required minimum yet - wait for the 
+            // remaining interval
+            wait_us(minIntTime_us - dt);
+        }
         
         // swap to the other DMA buffer for reading the new pixel samples
         pixDMA ^= 1;
@@ -364,6 +398,9 @@ public:
         adc_dma.start(nPixSensor, true);
         clkUp_dma.start(nPixSensor*4, true);
             
+        // note the start time of this transfer
+        t0 = t.read_us();
+        
         // start the next integration cycle by pulsing SI and one clock
         si = 1;
         clock = 1;
@@ -385,12 +422,14 @@ public:
         else
             t1 = tmid;
 
+//$$$
         // pad the timing slightly       
-        clock = 0;
+//        clock = 0;
 
-        // clock in the first pixel
-        clock = 1;
-        clock = 0;
+//        // clock in the first pixel
+//        clock = 1;
+//        clock = 0;
+//$$$
 
         // Start the ADC sampler.  The ADC will read samples continuously
         // until we tell it to stop.  Each sample completion will trigger 
@@ -398,7 +437,7 @@ public:
         // pixel array and pulse the CCD serial data clock to load the next
         // pixel onto the analog sampler pin.  This will all happen without
         // any CPU involvement, so we can continue with other work.
-        ao1.start();
+        ao.start();
         
         // The new integration cycle starts with the 19th clock pulse
         // after the SI pulse.  We offload all of the transfer work (including
@@ -480,6 +519,25 @@ public:
     }
 
 private:
+    // end of transfer notification
+    void transferDone()
+    {
+        // stop the ADC sampler
+        ao.stop();
+            
+        // clock out one extra pixel to leave A1 in the high-Z state
+        clock = 1;
+        clock = 0;
+    
+        // add this sample to the timing statistics (we collect the data
+        // merely to report to the config tool, for diagnostic purposes)
+        totalTime += uint32_t(t.read_us() - t0);
+        nRuns += 1;
+        
+        // the sampler is no long running
+        running = false;
+    }
+    
     // DMA controller interfaces
     SimpleDMA adc_dma;        // DMA channel for reading the analog input
     SimpleDMA clkUp_dma;      // "Clock Up" channel
@@ -490,7 +548,7 @@ private:
     DigitalOut clock;         // GPIO pin for sensor SCLK (serial clock)
     GPIO_Type *clockPort;     // IOPORT base address for clock pin - cached for DMA writes
     uint32_t clockMask;       // IOPORT register bit mask for clock pin
-    AltAnalogIn ao1;          // GPIO pin for sensor AO (analog output)
+    AltAnalogIn ao;           // GPIO pin for sensor AO (analog output)
     
     // number of pixels in the physical sensor array
     int nPixSensor;           // number of pixels in physical sensor array
@@ -522,4 +580,4 @@ private:
     uint32_t nRuns;           // number of runs so far
 };
  
-#endif /* TSL1410R_H */
+#endif /* TSL14XX_H */

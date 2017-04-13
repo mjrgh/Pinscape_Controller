@@ -1,15 +1,15 @@
-; CCD sensor scan mode 2
+; Edge detector scan mode 2
 ; This is an assembly language implementation of "scan mode 2",
-; described more fully in ccdSensor.h.  This scan mode searches
+; described more fully in edgeSensor.h.  This scan mode searches
 ; for the steepest edge in the pixel array, averaging over a few
 ; pixels on each side of the edge.  The assembly version is 
 ; necessary because the best C++ implementation I can come up
 ; with is too slow (about 12ms run time); this assembly version
 ; runs in about 1.5ms.
 
-    AREA ccdScanMode2_asm, CODE, READONLY
+    AREA edgeScanMode2_asm, CODE, READONLY
 
-; void ccdScanMode2(const uint8_t *pix, int npix, const uint8_t **edgep, int dir)
+; void edgeScanMode2(const uint8_t *pix, int npix, const uint8_t **edgep, int dir)
 ;    R0 = pix     = pointer to first byte of pixel array
 ;    R1 = npix    = number of pixels in the array
 ;    R2 = edgep   = filled in with pixel index of best edge on return, 
@@ -19,8 +19,8 @@
 ;
 ; Note: arguments passed in R0, R1,... per ARM conventions.
 
-    EXPORT ccdScanMode2
-ccdScanMode2
+    EXPORT edgeScanMode2
+edgeScanMode2
 
     ; save used registers plus return link
     STMFD   R13!, {R4-R6,LR}

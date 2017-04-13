@@ -298,8 +298,6 @@ FreescaleIAP::IAPCode FreescaleIAP::programFlash(
         }
     }
     
-    __enable_irq();
-        
     // return the result
     return status;
 }

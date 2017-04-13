@@ -50,13 +50,16 @@
 // should remain fixed to keep the PC-side config tool compatible across 
 // versions.
 const int PlungerType_None      = 0;     // no plunger
-const int PlungerType_TSL1410RS = 1;     // TSL1410R linear image sensor (1280x1 pixels, 400dpi), serial mode
-const int PlungerType_TSL1410RP = 2;     // TSL1410R, parallel mode (reads the two sensor sections concurrently)
-const int PlungerType_TSL1412SS = 3;     // TSL1412S linear image sensor (1536x1 pixels, 400dpi), serial mode
-const int PlungerType_TSL1412SP = 4;     // TSL1412S, parallel mode
+const int PlungerType_TSL1410R  = 1;     // TSL1410R linear image sensor (1280x1 pixels, 400dpi), serial mode, edge detection
+const int PlungerType_TSL1412S  = 3;     // TSL1412S linear image sensor (1536x1 pixels, 400dpi), serial mode, edge detection
 const int PlungerType_Pot       = 5;     // potentionmeter
 const int PlungerType_OptQuad   = 6;     // AEDR8300 optical quadrature sensor
 const int PlungerType_MagQuad   = 7;     // AS5304 magnetic quadrature sensor
+const int PlungerType_TSL1401CL = 8;     // TSL1401CL linear image sensor (128x1 pixels, 400dpi), bar code sensing
+const int PlungerType_VL6180X   = 9;     // VL6180X time-of-flight distance sensor
+
+// Plunger auto-zero flags
+const int PlungerAutoZeroEnabled = 0x01; // auto-zeroing enabled
 
 // Accelerometer orientation codes
 // These values are part of the external USB interface
@@ -247,7 +250,7 @@ struct Config
         
 #if TEST_CONFIG_EXPAN || STANDARD_CONFIG
         plunger.enabled = 0x01;
-        plunger.sensorType = PlungerType_TSL1410RS;
+        plunger.sensorType = PlungerType_TSL1410R;
         plunger.sensorPin[0] = PINNAME_TO_WIRE(PTE20); // SI
         plunger.sensorPin[1] = PINNAME_TO_WIRE(PTE21); // SCLK
         plunger.sensorPin[2] = PINNAME_TO_WIRE(PTB0);  // AO1 = PTB0 = ADC0_SE8
@@ -592,14 +595,23 @@ struct Config
         // GPIO usage is also listed.  Certain usages limit which physical
         // pins can be assigned (e.g., AnalogIn or PwmOut).
         //
-        // TSL1410R/1412R, serial:    SI (DigitalOut), CLK (DigitalOut), AO (AnalogIn),  NC
-        // TSL1410R/1412R, parallel:  SI (DigitalOut), CLK (DigitalOut), AO1 (AnalogIn), AO2 (AnalogIn)
+        // TSL1410R/1412S/1401CL:     SI (GPIO),       CLK (GPIO),       AO (AnalogIn),  NC
         // Potentiometer:             AO (AnalogIn),   NC,               NC,             NC
         // AEDR8300:                  A (InterruptIn), B (InterruptIn),  NC,             NC
         // AS5304:                    A (InterruptIn), B (InterruptIn),  NC,             NC
+        // VL6180X:                   SDA (GPIO),      SCL (GPIO),       GPIO0/CE (GPIO)
         //
         // Note!  These are stored in uint8_t WIRE format, not PinName format.
         uint8_t sensorPin[4];
+        
+        // Automatic zeroing.  If enabled, we'll reset the plunger position to
+        // the park position after a period of inactivity.  This only applies
+        // to certain sensor types; sensors that don't use it simply ignore it.  
+        struct
+        {
+            uint8_t flags;  // flags bits - combination of PlungerAutoZeroXxx flags
+            uint8_t t;      // inactivity time in seconds
+        } autoZero;
         
         // ZB LAUNCH BALL button setup.
         //

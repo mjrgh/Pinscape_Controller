@@ -1,14 +1,24 @@
-// CCD plunger sensor
+// Edge position sensor - 2D optical
 //
-// This class implements our generic plunger sensor interface for the 
-// TAOS TSL1410R and TSL1412R linear sensor arrays.  Physically, these
-// sensors are installed with their image window running parallel to
-// the plunger rod, spanning the travel range of the plunger tip.
-// A light source is positioned on the opposite side of the rod, so
-// that the rod casts a shadow on the sensor.  We sense the position
-// by looking for the edge of the shadow.
+// This class implements our plunger sensor interface using edge
+// detection on a 2D optical sensor.  With this setup, a 2D optical
+// sensor is placed close to the plunger, parallel to the rod, with a 
+// light source opposite the plunger.  This makes the plunger cast a
+// shadow on the sensor.  We figure the plunger position by detecting
+// where the shadow is, by finding the edge between the bright and
+// dark regions in the image.
+//
+// This class is designed to work with any type of 2D optical sensor.
+// We have subclasses for the TSL1410R and TSL1412S sensors, but other
+// similar sensors could be supported as well by adding interfaces for
+// the physical electronics.  For the edge detection, we just need an 
+// array of pixel readings.
+
+#ifndef _EDGESENSOR_H_
+#define _EDGESENSOR_H_
 
 #include "plunger.h"
+#include "tsl14xxSensor.h"
 
 // Scan method - select a method listed below.  Method 2 (find the point
 // with maximum brightness slop) seems to work the best so far.
@@ -83,86 +93,22 @@
 //      reduction from considering relationships among pixels.
 //
 
-extern "C" int ccdScanMode2(
+// assembler routine to scan for an edge using "mode 2" (maximum slope)
+extern "C" int edgeScanMode2(
     const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
 
-// PlungerSensor interface implementation for the CCD
-class PlungerSensorCCD: public PlungerSensor
+// PlungerSensor interface implementation for edge detection setups.
+// This is a generic base class for image-based sensors where we detect
+// the plunger position by finding the edge of the shadow it casts on
+// the detector.
+class PlungerSensorEdgePos
 {
 public:
-    PlungerSensorCCD(int nativePix, PinName si, PinName clock, PinName ao1, PinName ao2)
-        : ccd(nativePix, si, clock, ao1, ao2)
+    PlungerSensorEdgePos(int npix)
     {
-        // we don't know the direction yet
-        dir = 0;
-        
-        // Figure the scaling factor for converting native pixel readings
-        // to our normalized 0..65535 range.  The effective calculation we
-        // need to perform is (reading*65535)/(npix-1).  Division is slow
-        // on the M0+, and floating point is dreadfully slow, so recast the
-        // per-reading calculation as a multiply (which, unlike DIV, is fast
-        // on KL25Z - the device has a single-cycle 32-bit hardware multiply).
-        // How do we turn a divide into a multiply?  By calculating the
-        // inverse!  How do we calculate a meaningful inverse of a large
-        // integer using integers?  By doing our calculations in fixed-point
-        // integers, which is to say, using hardware integers but treating
-        // all values as multiplied by a scaling factor.  We'll use 64K as
-        // the scaling factor, since we can divide the scaling factor back
-        // out by using an arithmetic shift (also fast on M0+).  
-        native_npix = nativePix;
-        scaling_factor = (65535U*65536U) / (nativePix - 1);
-        
-        // set the midpoint history arbitrarily to the absolute halfway point
-        memset(midpt, 127, sizeof(midpt));
-        midptIdx = 0;
+        native_npix = npix;
     }
     
-    // initialize
-    virtual void init()
-    {
-        // flush any random power-on values from the CCD's integration
-        // capacitors, and start the first integration cycle
-        ccd.clear();
-    }
-    
-    virtual bool ready() const { return ccd.ready(); }
-    
-    virtual bool read(PlungerReading &r)
-    {
-        // start reading the next pixel array - this also waits for any
-        // previous read to finish, ensuring that we have stable pixel
-        // data in the capture buffer
-        ccd.startCapture();
-        
-        // get the image array from the last capture
-        uint8_t *pix;
-        uint32_t tpix;
-        ccd.getPix(pix, tpix);
-        
-        // process the pixels and look for the edge position
-        int pixpos;
-        if (process(pix, native_npix, pixpos))
-        {            
-            // Normalize to the 16-bit range by applying the scaling
-            // factor.  The scaling factor is 65535/npix expressed as
-            // a fixed-point number with 64K scale, so multiplying the
-            // pixel reading by this will give us the result with 64K
-            // scale: so shift right 16 bits to get the final answer.
-            // (The +32768 is added for rounding: it's equal to 0.5 
-            // at our 64K scale.)
-            r.pos = uint16_t((scaling_factor*uint32_t(pixpos) + 32768) >> 16);
-            r.t = tpix;
-            
-            // success
-            return true;
-        }
-        else
-        {
-            // no position found
-            return false;
-        }
-    }
-        
     // Process an image - scan for the shadow edge to determine the plunger
     // position.
     //
@@ -175,7 +121,7 @@ public:
 
 #if SCAN_METHOD == 0
     // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
@@ -295,7 +241,7 @@ public:
     
 #if SCAN_METHOD == 1
     // Scan method 1: meet in the middle.
-    bool process(uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
@@ -415,7 +361,7 @@ public:
 
 #if SCAN_METHOD == 2
     // Scan method 2: scan for steepest brightness slope.
-    bool process(uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos)
     {        
         // Get the levels at each end by averaging across several pixels.
         // Compute just the sums: don't bother dividing by the count, since 
@@ -449,7 +395,7 @@ public:
         // scan for the steepest edge using the assembly language 
         // implementation (since the C++ version is too slow)
         const uint8_t *edgep = 0;
-        if (ccdScanMode2(pix, n, &edgep, dir))
+        if (edgeScanMode2(pix, n, &edgep, dir))
         {
             // edgep has the pixel array pointer; convert it to an offset
             pos = edgep - pix;
@@ -473,7 +419,7 @@ public:
 
 #if SCAN_METHOD == 3
     // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
@@ -534,119 +480,6 @@ public:
 #endif // SCAN_METHOD 3
     
     
-    // Send a status report to the joystick interface.
-    // See plunger.h for details on the arguments.
-    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t extraTime)
-    {
-        // To get the requested timing for the cycle we report, we need to run
-        // an extra cycle.  Right now, the sensor is integrating from whenever
-        // the last start() call was made.  
-        //
-        // 1. Call startCapture() to end that previous cycle.  This will collect
-        // dits pixels into one DMA buffer (call it EVEN), and start a new 
-        // integration cycle.  
-        // 
-        // 2. We know a new integration has just started, so we can control its
-        // time.  Wait for the cycle we just started to finish, since that sets
-        // the minimum time.
-        //
-        // 3. The integration cycle we started in step 1 has now been running the
-        // minimum time - namely, one read cycle.  Pause for our extraTime delay
-        // to add the requested added time.
-        //
-        // 4. Start the next cycle.  This will make the pixels we started reading
-        // in step 1 available via getPix(), and will end the integration cycle
-        // we started in step 1 and start reading its pixels into the internal
-        // DMA buffer.  
-        //
-        // 5. This is where it gets tricky!  The pixels we want are the ones that 
-        // started integrating in step 1, which are the ones we're reading via DMA 
-        // now.  The pixels available via getPix() are the ones from the cycle we 
-        // *ended* in step 1 - we don't want these.  So we need to start a *third*
-        // cycle in order to get the pixels from the second cycle.
-        
-        ccd.startCapture();                 // read pixels from period A, begin integration period B
-        ccd.wait();                         // wait for scan of A to complete, as minimum integration B time
-        wait_us(long(extraTime) * 100);     // add extraTime (0.1ms == 100us increments) to integration B time
-        ccd.startCapture();                 // read pixels from integration period B, begin period C; period A pixels now available
-        ccd.startCapture();                 // read pixels from integration period C, begin period D; period B pixels now available
-        
-        // get the pixel array
-        uint8_t *pix;
-        uint32_t t;
-        ccd.getPix(pix, t);
-
-        // start a timer to measure the processing time
-        Timer pt;
-        pt.start();
-
-        // process the pixels and read the position
-        int pos;
-        int n = native_npix;
-        if (!process(pix, n, pos))
-            pos = 0xFFFF;
-        
-        // note the processing time
-        uint32_t processTime = pt.read_us();
-        
-        // if a low-res scan is desired, reduce to a subset of pixels
-        if (flags & 0x01)
-        {
-            // figure how many sensor pixels we combine into each low-res pixel
-            const int group = 8;
-            int lowResPix = n / group;
-            
-            // combine the pixels
-            int src, dst;
-            for (src = dst = 0 ; dst < lowResPix ; ++dst)
-            {
-                // average this block of pixels
-                int a = 0;
-                for (int j = 0 ; j < group ; ++j)
-                    a += pix[src++];
-                        
-                // we have the sum, so get the average
-                a /= group;
-
-                // store the down-res'd pixel in the array
-                pix[dst] = uint8_t(a);
-            }
-            
-            // rescale the position for the reduced resolution
-            if (pos != 0xFFFF)
-                pos = pos * (lowResPix-1) / (n-1);
-
-            // update the pixel count to the reduced array size
-            n = lowResPix;
-        }
-        
-        // send the sensor status report report
-        js.sendPlungerStatus(n, pos, dir, ccd.getAvgScanTime(), processTime);
-        
-        // If we're not in calibration mode, send the pixels
-        extern bool plungerCalMode;
-        if (!plungerCalMode)
-        {
-            // send the pixels in report-sized chunks until we get them all
-            int idx = 0;
-            while (idx < n)
-                js.sendPlungerPix(idx, n, pix);
-        }
-            
-        // It takes us a while to send all of the pixels, since we have
-        // to break them up into many USB reports.  This delay means that
-        // the sensor has been sitting there integrating for much longer
-        // than usual, so the next frame read will be overexposed.  To
-        // mitigate this, make sure we don't have a capture running,
-        // then clear the sensor and start a new capture.
-        ccd.wait();
-        ccd.clear();
-        ccd.startCapture();
-    }
-    
-    // get the average sensor scan time
-    virtual uint32_t getAvgScanTime() { return ccd.getAvgScanTime(); }
-    
 protected:
     // Sensor orientation.  +1 means that the "tip" end - which is always
     // the brighter end in our images - is at the 0th pixel in the array.
@@ -661,18 +494,12 @@ protected:
     // this each time we can infer the direction, so the device will adapt
     // on the fly even if the user repositions the sensor while the software
     // is running.
+    virtual int getOrientation() const { return dir; }
     int dir;
-    
+       
     // number of pixels
     int native_npix;
     
-    // Scaling factor for converting a native pixel reading to the normalized
-    // 0..65535 plunger reading scale.  This value contains 65535*65536/npix,
-    // which is equivalent to 65535/npix as a fixed-point number with a 64K
-    // scale.  To apply this, multiply a pixel reading by this value and
-    // shift right by 16 bits.
-    uint32_t scaling_factor;
-
     // History of midpoint brightness levels for the last few successful
     // scans.  This is a circular buffer that we write on each scan where
     // we successfully detect a shadow edge.  (It's circular, so we
@@ -701,27 +528,53 @@ protected:
     uint8_t midptIdx;
     
 public:
-    // the low-level interface to the CCD hardware
-    TSL1410R ccd;
 };
 
 
-// TSL1410R sensor 
-class PlungerSensorTSL1410R: public PlungerSensorCCD
+// -------------------------------------------------------------------------
+//
+// Edge position plunger sensor for TSL14xx-based sensors
+//
+class PlungerSensorEdgePosTSL14xx: public PlungerSensorTSL14xx, public PlungerSensorEdgePos
 {
 public:
-    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao1, PinName ao2) 
-        : PlungerSensorCCD(1280, si, clock, ao1, ao2)
+    PlungerSensorEdgePosTSL14xx(int nativePix, PinName si, PinName clock, PinName ao)
+        : PlungerSensorTSL14xx(nativePix, si, clock, ao),
+          PlungerSensorEdgePos(nativePix)
+    {
+        // we don't know the direction yet
+        dir = 0;
+        
+        // set the midpoint history arbitrarily to the absolute halfway point
+        memset(midpt, 127, sizeof(midpt));
+        midptIdx = 0;
+    }
+    
+    // process the image through the edge detector
+    virtual bool process(const uint8_t *pix, int npix, int &pixpos) 
+    {
+        return PlungerSensorEdgePos::process(pix, npix, pixpos);
+    }
+};
+
+// TSL1410R sensor 
+class PlungerSensorTSL1410R: public PlungerSensorEdgePosTSL14xx
+{
+public:
+    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao)
+        : PlungerSensorEdgePosTSL14xx(1280, si, clock, ao)
     {
     }
 };
 
 // TSL1412R
-class PlungerSensorTSL1412R: public PlungerSensorCCD
+class PlungerSensorTSL1412R: public PlungerSensorEdgePosTSL14xx
 {
 public:
-    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao1, PinName ao2)
-        : PlungerSensorCCD(1536, si, clock, ao1, ao2)
+    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao)
+        : PlungerSensorEdgePosTSL14xx(1536, si, clock, ao)
     {
     }
 };
+
+#endif /* _EDGESENSOR_H_ */

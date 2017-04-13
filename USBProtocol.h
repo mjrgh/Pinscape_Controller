@@ -91,6 +91,11 @@
 // us time to send at least one of these status reports after the save.
 // This bit is only sent after a successful save, which means that the flash
 // write succeeded and the written sectors verified as correct.
+// NOTE: older firmware versions didn't support this status bit, so clients
+// can't interpret the lack of a response as a failure for older versions.
+// To determine if the flag is supported, check the config report feature
+// flags.
+//
 //
 // 2. Special reports
 // We subvert the joystick report format in certain cases to report other 
@@ -209,6 +214,8 @@
 //                 0x04 -> new accelerometer features supported (adjustable
 //                         dynamic range, auto-centering on/off, adjustable
 //                         auto-centering time)
+//                 0x08 -> flash write status flag supported (see flag 0x40
+//                         in normal joystick status report)
 //    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
 //                of unused heap (malloc'able) memory.  The firmware generally
 //                allocates all of the dynamic memory it needs during startup,
@@ -498,12 +505,16 @@
 //
 //        6 -> Save configuration to flash.  This saves all variable updates sent via
 //             type 66 messages since the last reboot, then automatically reboots the
-//             device to put the changes into effect.
+//             device to put the changes into effect.  If the flash write succeeds,
+//             we set the "flash write OK" bit in our status reports, which we 
+//             continue sending between the successful write and the delayed reboot.
+//             We don't set the bit or reboot if the write fails.
 //
 //               third byte = delay time in seconds.  The device will wait this long
-//               before disconnecting, to allow the PC to perform any cleanup tasks
-//               while the device is still attached (e.g., modifying Windows device
-//               driver settings)
+//               before disconnecting, to allow the PC to test for the success bit
+//               in the status report, and to perform any cleanup tasks while the 
+//               device is still attached (e.g., modifying Windows device driver 
+//               settings)
 //
 //        7 -> Query device ID.  The device replies with a special device ID report
 //             (see above; see also USBJoystick.cpp), then resumes sending normal
@@ -788,18 +799,24 @@
 //
 //        byte 3 -> plunger type:
 //           0 = none (disabled)
-//           1 = TSL1410R linear image sensor, 1280x1 pixels, serial mode
-//          *2 = TSL1410R, parallel mode
-//           3 = TSL1412R linear image sensor, 1536x1 pixels, serial mode
-//          *4 = TSL1412R, parallel mode
+//           1 = TSL1410R linear image sensor, 1280x1 pixels, serial mode, edge detection
+//           3 = TSL1412R linear image sensor, 1536x1 pixels, serial mode, edge detection
 //           5 = Potentiometer with linear taper, or any other device that
 //               represents the position reading with a single analog voltage
-//          *6 = AEDR8300 optical quadrature sensor, 75lpi
+//           6 = AEDR8300 optical quadrature sensor, 75lpi
 //          *7 = AS5304 magnetic quadrature sensor, 160 steps per 2mm
+//           8 = TSL1401CL linear image sensor, 128x1 pixel, bar code detection
+//           9 = VL6180X time-of-flight distance sensor
 //
 //       * The sensor types marked with asterisks (*) are reserved for types
 //       that aren't currently implemented but could be added in the future.  
-//       Selecting these types will effectively disable the plunger.  
+//       Selecting these types will effectively disable the plunger.  Note
+//       that sensor types 2 and 4 were formerly reserved for TSL14xx sensors
+//       in parallel wiring mode, but support for these is no longer planned,
+//       as the KL25Z's single ADC sampler makes it incapable of gaining any
+//       advantage from the parallel mode offered by the sensors.  Those slots
+//       could be reassigned in the future for other sensors, since they were
+//       never enabled in any version of the firwmare.
 //
 // 6  -> Plunger pin assignments.
 //
@@ -811,15 +828,17 @@
 //       All of the pins use the standard GPIO port format (see "GPIO pin number
 //       mappings" below).  The actual use of the four pins depends on the plunger
 //       type, as shown below.  "NC" means that the pin isn't used at all for the
-//       corresponding plunger type.
+//       corresponding plunger type.  "GPIO" means that any GPIO pin will work.
+//       AnalogIn and InterruptIn means that only pins with the respective 
+//       capabilities can be chosen.
 //
 //         Plunger Type              Pin 1            Pin 2             Pin 3           Pin 4
 //
-//         TSL1410R/1412R, serial    SI (DigitalOut)  CLK (DigitalOut)  AO (AnalogIn)   NC
-//         TSL1410R/1412R, parallel  SI (DigitalOut)  CLK (DigitalOut)  AO1 (AnalogIn)  AO2 (AnalogIn)
+//         TSL1410R/1412R/1401CL     SI (GPIO)        CLK (GPIO)        AO (AnalogIn)   NC
 //         Potentiometer             AO (AnalogIn)    NC                NC              NC
 //         AEDR8300                  A (InterruptIn)  B (InterruptIn)   NC              NC
 //         AS5304                    A (InterruptIn)  B (InterruptIn)   NC              NC
+//         VL6180X                   SDA (GPIO)       SCL (GPIO)        GPIO0/CE (GPIO) NC
 //
 // 7  -> Plunger calibration button pin assignments.
 //
@@ -1009,6 +1028,14 @@
 //
 //       byte 3 = receiver input GPIO pin ID.  Must be interrupt-capable.
 //       byte 4 = transmitter pin.  Must be PWM-capable.
+//
+// 18 -> Plunger auto-zeroing.  This only applies to sensor types with
+//       relative positioning, such as quadrature sensors.  Other sensor
+//       types simply ignore this.
+//
+//       byte 3 = bit flags:
+//                0x01 -> auto-zeroing enabled
+//       byte 4 = auto-zeroing time in seconds
 //
 //
 // SPECIAL DIAGNOSTICS VARIABLES:  These work like the array variables below,

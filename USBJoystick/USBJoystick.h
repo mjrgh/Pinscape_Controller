@@ -185,11 +185,13 @@ public:
      * @param newAccelFeatures true if this firmware version supports the new accelerometer
      *        features (adjustable dynamic range, adjustable auto-centering mode time,
      *        auto-centering mode on/off)
+     * @param flashStatusFeature true if this firmware versions upports the flash write
+     *        success flags in the status bits
      * @param freeHeapBytes number of free bytes in the malloc heap
      */
     bool reportConfig(int numOutputs, int unitNo, 
         int plungerZero, int plungerMax, int plunterRlsTime, 
-        bool configured, bool sbxpbx, bool newAccelFeatures,
+        bool configured, bool sbxpbx, bool newAccelFeatures, bool flashStatusFeature,
         size_t freeHeapBytes);
         
     /**

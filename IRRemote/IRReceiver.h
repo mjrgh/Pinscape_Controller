@@ -363,6 +363,8 @@
 #include "IRRemote.h"
 #include "IRCommand.h"
 #include "circbuf.h"
+#include "FastInterruptIn.h"
+
 
 // IR receiver protocol interface.  This contains functions that we only
 // want to make accessible to the protocol decoders.
@@ -485,10 +487,16 @@ public:
     static const uint32_t MAX_PULSE = 131068;    
 
 private:
-    // Input pin - reads from a TSOP384xx or similar sensor.  Any
+    // Input pin.  Reads from a TSOP384xx or similar sensor.  Any
     // sensor should work that demodulates the carrier wave and 
-    // gives us an active-low input on the pin.
-    InterruptIn pin;
+    // gives us an active-low input on the pin.  
+    //
+    // Note that we use our FastInterruptIn replacement instead of the
+    // mbed InterruptIn.  We don't actually need the higher speed here of
+    // FastInterruptIn, but we have to use it anyway because other parts
+    // of the system use it.  The two classes don't play nice together:
+    // the whole app has to use one or the other.
+    FastInterruptIn pin;
 
     // IR raw data buffer.  The interrupt handlers store the pulse
     // timings here as they arrive, and the process() routine reads from
@@ -528,9 +536,11 @@ private:
     void processProtocols(uint32_t t, bool mark);
     
     // rise and fall interrupt handlers for the input pin
-    void fall(void);
-    void rise(void);
-
+    static void cbFall(void *obj) { ((IRReceiver *)obj)->fall(); }
+    static void cbRise(void *obj) { ((IRReceiver *)obj)->rise(); }
+    void fall();
+    void rise();
+    
     // timeout for time-limited states
     Timeout timeout;
     

@@ -48,7 +48,7 @@ void v_func
         
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
-        v_byte_ro(17, 2);       // number of SCALAR variables
+        v_byte_ro(18, 2);       // number of SCALAR variables
         v_byte_ro(6, 3);        // number of ARRAY variables
         break;
         
@@ -172,6 +172,12 @@ void v_func
         // IR sensor and emitter setup
         v_byte(IR.sensor, 2);
         v_byte(IR.emitter, 3);
+        break;
+        
+    case 18:
+        // plunger auto-zeroing time
+        v_byte(plunger.autoZero.flags, 2);
+        v_byte(plunger.autoZero.t, 3);
         break;
         
     // case N: // new scalar variable

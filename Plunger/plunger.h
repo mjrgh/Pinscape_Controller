@@ -3,6 +3,12 @@
 // This module defines the abstract interface to the plunger sensors.
 // We support several different physical sensor types, so we need a
 // common interface for use in the main code.
+//
+// In case it's helpful in developing code for new sensor types, I've
+// measured the maximum instantaneous speed of a plunger at .175 inches
+// per millisecond, or 4.46 mm/ms.  (I measured that with an AEDR-8300;
+// see that code for more details.)
+//
 
 #ifndef PLUNGER_H
 #define PLUNGER_H
@@ -33,15 +39,27 @@ public:
     
     // Initialize the physical sensor device.  This is called at startup
     // to set up the device for first use.
-    virtual void init() = 0;
+    virtual void init() { }
     
+    // Auto-zero the plunger.  Relative sensor types, such as quadrature
+    // sensors, can lose sync with the absolute position over time if they
+    // ever miss any motion.  We can automatically correct for this by
+    // resetting to the park position after periods of inactivity.  It's
+    // usually safe to assume that the plunger is at the park position if it 
+    // hasn't moved in a long time, since the spring always returns it to 
+    // that position when it isn't being manipulated.  The main loop monitors
+    // for motion, and calls this after a long enough time goes by without
+    // seeing any movement.  Sensor types that are inherently absolute
+    // (TSL1410, potentiometers) shouldn't do anything here.
+    virtual void autoZero() { }
+
     // Is the sensor ready to take a reading?  The optical sensor requires
     // a fairly long time (2.5ms) to transfer the data for each reading, but 
     // this is done via DMA, so we can carry on other work while the transfer
     // takes place.  This lets us poll the sensor to see if it's still busy
     // working on the current reading's data transfer.
-    virtual bool ready() const { return true; }
-
+    virtual bool ready() { return true; }
+    
     // Read the sensor position, if possible.  Returns true on success,
     // false if it wasn't possible to take a reading.  On success, fills
     // in 'r' with the current reading.
@@ -50,7 +68,7 @@ public:
     // range 0x0000..0xFFFF.  r.t is set to the timestamp of the reading,
     // in microseconds.
     //
-    // Also sets 't' to the microsecond timestamp of the reading, if a
+    // Also sets r.t to the microsecond timestamp of the reading, if a
     // reading was successfully taken.  This timestamp is relative to an
     // arbitrary zero point and rolls over when it overflows its 32-bit
     // container (every 71.58 minutes).  Callers can use this to calculate
@@ -78,6 +96,12 @@ public:
     // Returns true on success, false on failure.  Returning false means
     // that it wasn't possible to take a valid reading.
     virtual bool read(PlungerReading &r) = 0;
+    
+    // Begin calibration.  The main loop calls this when the user activates
+    // calibration mode.  Sensors that work in terms of relative positions,
+    // such as quadrature-based sensors, can use this to set the reference
+    // point for the park position internally.
+    virtual void beginCalibration() { }
     
     // Send a sensor status report to the host, via the joystick interface.
     // This provides some common information for all sensor types, and also

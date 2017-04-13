@@ -34,8 +34,8 @@ void IRReceiver::enable()
     startPulse(pin.read() ? 0 : 1);
     
     // set interrupt handlers for edges on the input pin
-    pin.fall(this, &IRReceiver::fall);
-    pin.rise(this, &IRReceiver::rise);
+    pin.fall(&IRReceiver::cbFall, this);
+    pin.rise(&IRReceiver::cbRise, this);
 }
 
 // Disable reception
