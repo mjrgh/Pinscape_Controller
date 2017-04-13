@@ -2860,7 +2860,7 @@ void processButtons(Config &cfg)
                     // current switch state.
                     setNightMode(bs->logState);
                 }
-                else
+                else if (bs->logState)
                 {
                     // It's a momentary toggle switch.  Toggle the night mode 
                     // state on each distinct press of the button: that is,
