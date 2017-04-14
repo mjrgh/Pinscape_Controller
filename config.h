@@ -613,6 +613,11 @@ struct Config
             uint8_t t;      // inactivity time in seconds
         } autoZero;
         
+        // Jitter filter.  This is the size of the hysteresis window, in joystick
+        // units (-4095..+4095).  One joystick unit is approximately 1/10000" of
+        // physical travel.  Zero disables the jitter filter.
+        uint16_t jitterWindow;
+        
         // ZB LAUNCH BALL button setup.
         //
         // This configures the "ZB Launch Ball" feature in DOF, based on Zeb's (of 

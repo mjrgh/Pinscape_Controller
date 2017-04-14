@@ -4082,17 +4082,19 @@ void TVRelay(int mode)
 //
 NVM nvm;
 
-// Flag: configuration save requested.  The USB command message handler
-// sets this flag when a command is sent requesting the save.  We don't
-// do the save inline in the command handler, but handle it on the next 
-// main loop iteration.
-const uint8_t SAVE_CONFIG_ONLY = 1;
-const uint8_t SAVE_CONFIG_AND_REBOOT = 2;
-uint8_t saveConfigPending = 0;
+// Configuration save state
+const uint8_t SAVE_CONFIG_IDLE = 0;         // no config save work pending
+const uint8_t SAVE_CONFIG_ONLY = 1;         // save is pending
+const uint8_t SAVE_CONFIG_AND_REBOOT = 2;   // save is pending, reboot after save
+const uint8_t SAVE_CONFIG_REBOOT = 3;       // save done, reboot is pending
+uint8_t saveConfigState = SAVE_CONFIG_IDLE;
 
-// If saveConfigPending == SAVE_CONFIG_AND_REBOOT, this specifies the
-// delay time in seconds before rebooting.
-uint8_t saveConfigRebootTime;
+// Save Config post-processing time, in seconds.
+//
+// If saveConfigState == SAVE_CONFIG_AND_REBOOT, we reboot after this
+// time elapses.  Otherwise, we simply clear the timer and clear the
+// "succeeded" flag.
+uint8_t saveConfigPostTime;
 
 // status flag for successful config save - set to 0x40 on success
 uint8_t saveConfigSucceededFlag;
@@ -4437,8 +4439,8 @@ public:
         // no history yet
         histIdx = 0;
         
-        // initialize the filter
-        initFilter();
+        // clear the jitter filter
+        jfLow = jfHigh = 0;
     }
     
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -4455,9 +4457,6 @@ public:
         PlungerReading r;
         if (plungerSensor->read(r))
         {
-            // filter the raw sensor reading
-            applyPreFilter(r);
-            
             // Pull the previous reading from the history
             const PlungerReading &prv = nthHist(0);
             
@@ -4808,8 +4807,8 @@ public:
             if (++histIdx >= countof(hist))
                 histIdx = 0;
                 
-            // apply the post-processing filter
-            zf = applyPostFilter();
+            // apply the jitter filter
+            zf = jitterFilter(z);
         }
     }
     
@@ -4847,7 +4846,6 @@ public:
             if (plungerSensor->read(r))
             {
                 // got a reading - use it as the initial zero point
-                applyPreFilter(r);
                 cfg.plunger.cal.zero = r.pos;
                 onUpdateCal();
                 
@@ -4912,206 +4910,35 @@ public:
     bool isFiring() { return firing == 3; }
     
 private:
-    // Auto-zeroing timer
-    Timer autoZeroTimer;
-
-    // Plunger data filtering mode:  optionally apply filtering to the raw 
-    // plunger sensor readings to try to reduce noise in the signal.  This
-    // is designed for the TSL1410/12 optical sensors, where essentially all
-    // of the noise in the signal comes from lack of sharpness in the shadow
-    // edge.  When the shadow is blurry, the edge detector has to pick a pixel,
-    // even though the edge is actually a gradient spanning several pixels.
-    // The edge detection algorithm decides on the exact pixel, but whatever
-    // the algorithm, the choice is going to be somewhat arbitrary given that
-    // there's really no one pixel that's "the edge" when the edge actually
-    // covers multiple pixels.  This can make the choice of pixel sensitive to
-    // small changes in exposure and pixel respose from frame to frame, which
-    // means that the reported edge position can move by a pixel or two from
-    // one frame to the next even when the physical plunger is perfectly still.
-    // That's the noise we're talking about.
-    //
-    // We previously applied a mild hysteresis filter to the signal to try to
-    // eliminate this noise.  The filter tracked the average over the last
-    // several samples, and rejected readings that wandered within a few
-    // pixels of the average.  If a certain number of readings moved away from
-    // the average in the same direction, even by small amounts, the filter
-    // accepted the changes, on the assumption that they represented actual
-    // slow movement of the plunger.  This filter was applied after the firing
-    // detection.
-    //
-    // I also tried a simpler filter that rejected changes that were too fast
-    // to be physically possible, as well as changes that were very close to
-    // the last reported position (i.e., simple hysteresis).  The "too fast"
-    // filter was there to reject spurious readings where the edge detector
-    // mistook a bad pixel value as an edge.  
-    //
-    // The new "mode 2" edge detector (see ccdSensor.h) seems to do a better
-    // job of rejecting pixel-level noise by itself than the older "mode 0"
-    // algorithm did, so I removed the filtering entirely.  Any filtering has
-    // some downsides, so it's better to reduce noise in the underlying signal
-    // as much as possible first.  It seems possible to get a very stable signal
-    // now with a combination of the mode 2 edge detector and optimizing the
-    // physical sensor arrangement, especially optimizing the light source to
-    // cast as sharp as shadow as possible and adjusting the brightness to
-    // maximize bright/dark contrast in the image.
-    //
-    //   0 = No filtering (current default)
-    //   1 = Filter the data after firing detection using moving average
-    //       hysteresis filter (old version, used in most 2016 releases)
-    //   2 = Filter the data before firing detection using simple hysteresis
-    //       plus spurious "too fast" motion rejection
-    //
-#define PLUNGER_FILTERING_MODE  0
-
-#if PLUNGER_FILTERING_MODE == 0
-    // Disable all filtering
-    inline void applyPreFilter(PlungerReading &r) { }
-    inline int applyPostFilter() { return z; }
-#elif PLUNGER_FILTERING_MODE == 1
-    // Apply pre-processing filter.  This filter is applied to the raw
-    // value coming off the sensor, before calibration or fire-event
-    // processing.
-    void applyPreFilter(PlungerReading &r)
+    // Apply the jitter filter
+    int jitterFilter(int z)
     {
-    }
-    
-    // Figure the next post-processing filtered value.  This applies a
-    // hysteresis filter to the last raw z value and returns the 
-    // filtered result.
-    int applyPostFilter()
-    { 
-        if (firing <= 1)
+        // If the new reading is within the current window, simply re-use
+        // the last filtered reading.
+        if (z >= jfLow && z <= jfHigh)
+            return zf;
+            
+        // The new reading is outside the current window.  Push the window
+        // over so that the new reading is at the outside edge.
+        if (z < jfLow)
         {
-            // Filter limit - 5 samples.  Once we've been moving
-            // in the same direction for this many samples, we'll
-            // clear the history and start over.
-            const int filterMask = 0x1f;
-            
-            // figure the last average
-            int lastAvg = int(filterSum / filterN);
-            
-            // figure the direction of this sample relative to the average,
-            // and shift it in to our bit mask of recent direction data
-            if (z != lastAvg)
-            {
-                // shift the new direction bit into the vector
-                filterDir <<= 1;
-                if (z > lastAvg) filterDir |= 1;
-            }
-            
-            // keep only the last N readings, up to the filter limit
-            filterDir &= filterMask;
-            
-            // if we've been moving consistently in one direction (all 1's
-            // or all 0's in the direction history vector), reset the average
-            if (filterDir == 0x00 || filterDir == filterMask) 
-            {
-                // motion away from the average - reset the average
-                filterDir = 0x5555;
-                filterN = 1;
-                filterSum = (lastAvg + z)/2;
-                return int16_t(filterSum);
-            }
-            else
-            {
-                // we're directionless - return the new average, with the 
-                // new sample included
-                filterSum += z;
-                ++filterN;
-                return int16_t(filterSum / filterN);
-            }
+            // the new reading is below the current window, so move the
+            // window such that the new reading is at the bottom of the window
+            jfLow = z;
+            jfHigh = z + cfg.plunger.jitterWindow;
         }
         else
         {
-            // firing mode - skip the filter
-            filterN = 1;
-            filterSum = z;
-            filterDir = 0x5555;
-            return z;
+            // the new reading is above the current window, so move the
+            // window such that the new reading is at the top of the window
+            jfHigh = z;
+            jfLow = z - cfg.plunger.jitterWindow;
         }
-    }
-#elif PLUNGER_FILTERING_MODE == 2
-    // Apply pre-processing filter.  This filter is applied to the raw
-    // value coming off the sensor, before calibration or fire-event
-    // processing.
-    void applyPreFilter(PlungerReading &r)
-    {
-        // get the previous raw reading
-        PlungerReading prv = pre.raw;
         
-        // the new reading is the previous raw reading next time, no 
-        // matter how we end up filtering it
-        pre.raw = r;
-        
-        // If it's too big an excursion from the previous raw reading,
-        // ignore it and repeat the previous reported reading.  This
-        // filters out anomalous spikes where we suddenly jump to a
-        // level that's too far away to be possible.  Real plungers
-        // take about 60ms to travel the full distance when released,
-        // so assuming constant acceleration, the maximum realistic
-        // speed is about 2.200 distance units (on our 0..0xffff scale)
-        // per microsecond.
-        //
-        // On the other hand, if the new reading is too *close* to the
-        // previous reading, use the previous reported reading.  This
-        // filters out jitter around a stationary position.
-        const float maxDist = 2.184f*uint32_t(r.t - prv.t);
-        const int minDist = 256;
-        const int delta = abs(r.pos - prv.pos);
-        if (maxDist > minDist && delta > maxDist)
-        {
-            // too big an excursion - discard this reading by reporting
-            // the last reported reading instead
-            r.pos = pre.reported;
-        }
-        else if (delta < minDist)
-        {
-            // too close to the prior reading - apply hysteresis
-            r.pos = pre.reported;
-        }
-        else
-        {
-            // the reading is in range - keep it, and remember it as
-            // the last reported reading
-            pre.reported = r.pos;
-        }
-    }
-    
-    // pre-filter data
-    struct PreFilterData {
-        PreFilterData() 
-            : reported(0) 
-        {
-            raw.t = 0;
-            raw.pos = 0;
-        }
-        PlungerReading raw;         // previous raw sensor reading
-        int reported;               // previous reported reading
-    } pre;
-    
-    
-    // Apply the post-processing filter.  This filter is applied after
-    // the fire-event processing.  In the past, this used hysteresis to
-    // try to smooth out jittering readings for a stationary plunger.
-    // We've switched to a different approach that massages the readings
-    // coming off the sensor before 
-    int applyPostFilter()
-    {
+        // use the new reading exactly as read from the sensor
         return z;
     }
-#endif
-    
-    void initFilter()
-    {
-        filterSum = 0;
-        filterN = 1;
-        filterDir = 0x5555;
-    }
-    int64_t filterSum;
-    int64_t filterN;
-    uint16_t filterDir;
-    
-    
+
     // Calibration state.  During calibration mode, we watch for release
     // events, to measure the time it takes to complete the release
     // motion; and we watch for the plunger to come to reset after a
@@ -5138,6 +4965,12 @@ private:
     // During calibration, we collect an average for the release time.
     long calRlsTimeSum;
     int calRlsTimeN;
+
+    // Auto-zeroing timer
+    Timer autoZeroTimer;
+    
+    // Current jitter filter window
+    int jfLow, jfHigh;
 
     // set a firing mode
     inline void firingMode(int m) 
@@ -5589,8 +5422,8 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 cfg.plunger.enabled = data[3] & 0x01;
                 
                 // set the flag to do the save
-                saveConfigPending = needReset ? SAVE_CONFIG_AND_REBOOT : SAVE_CONFIG_ONLY;
-                saveConfigRebootTime = 0;
+                saveConfigState = needReset ? SAVE_CONFIG_AND_REBOOT : SAVE_CONFIG_ONLY;
+                saveConfigPostTime = 0;
             }
             break;
             
@@ -5636,10 +5469,15 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
             break;
             
         case 6:
-            // 6 = Save configuration to flash.  Reboot after the delay
-            // time in seconds given in data[2].
-            saveConfigPending = SAVE_CONFIG_AND_REBOOT;
-            saveConfigRebootTime = data[2];
+            // 6 = Save configuration to flash.  Optionally reboot after the 
+            // delay time in seconds given in data[2].
+            //
+            // data[2] = delay time in seconds
+            // data[3] = flags:
+            //           0x01 -> do not reboot
+            saveConfigState = 
+                (data[3] & 0x01) != 0 ? SAVE_CONFIG_ONLY : SAVE_CONFIG_AND_REBOOT;
+            saveConfigPostTime = data[2];
             break;
             
         case 7:
@@ -6095,8 +5933,8 @@ int main(void)
     // start the PWM update polling timer
     polledPwmTimer.start();
     
-    // Timer for configuration change reboots
-    ExtTimer saveConfigRebootTimer;
+    // Timer for configuration change followup timer
+    ExtTimer saveConfigPostTimer;
     
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -6426,12 +6264,24 @@ int main(void)
         }
         
         // if we have a reboot timer pending, check for completion
-        if (saveConfigRebootTimer.isRunning() 
-            && saveConfigRebootTimer.read() > saveConfigRebootTime)
-            reboot(js);
+        if (saveConfigPostTimer.isRunning() 
+            && saveConfigPostTimer.read() > saveConfigPostTime)
+        {
+            // if a reboot is pending, execute it now
+            if (saveConfigState == SAVE_CONFIG_REBOOT)
+                reboot(js);
             
+            // done with the timer - reset it
+            saveConfigPostTimer.stop();
+            saveConfigPostTimer.reset();
+            
+            // clear the save-config success flag
+            saveConfigSucceededFlag = 0;
+        }
+                        
         // if a config save is pending, do it now
-        if (saveConfigPending != 0)
+        if (saveConfigState == SAVE_CONFIG_ONLY  
+            || saveConfigState == SAVE_CONFIG_AND_REBOOT)
         {
             // save the configuration
             if (saveConfigToFlash())
@@ -6439,13 +6289,19 @@ int main(void)
                 // report success in the status flags
                 saveConfigSucceededFlag = 0x40;
             
-                // if desired, reboot after the specified delay
-                if (saveConfigPending == SAVE_CONFIG_AND_REBOOT)
-                    saveConfigRebootTimer.start();
-            }
+                // start the followup timer
+                saveConfigPostTimer.start();
                 
-            // the save is no longer pending
-            saveConfigPending = 0;
+                // The save is no longer pending.  Switch to reboot pending
+                // mode if desired.
+                saveConfigState = (saveConfigState == SAVE_CONFIG_AND_REBOOT ?
+                    SAVE_CONFIG_REBOOT : SAVE_CONFIG_IDLE);
+            }
+            else
+            {
+                // save failed - return to idle state
+                saveConfigState = SAVE_CONFIG_IDLE;
+            }
         }
         
         // if we're disconnected, initiate a new connection

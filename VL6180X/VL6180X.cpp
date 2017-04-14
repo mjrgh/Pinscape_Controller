@@ -13,6 +13,7 @@ VL6180X::VL6180X(PinName sda, PinName scl, uint8_t addr, PinName gpio0)
     distMode = 0;
     
     // initially reset the sensor
+    gpio0Pin.output();
     gpio0Pin.write(0);
 }
 
@@ -23,11 +24,12 @@ VL6180X::~VL6180X()
 bool VL6180X::init()
 {
     // hold reset low for 10ms
+    gpio0Pin.output();
     gpio0Pin.write(0);
     wait_us(10000);
     
     // release reset to allow the sensor to reboot
-    gpio0Pin.write(1);
+    gpio0Pin.input();
     wait_us(10000);
     
     // reset the I2C bus

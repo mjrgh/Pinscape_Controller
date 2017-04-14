@@ -185,7 +185,7 @@ protected:
     BitBangI2C i2c;
     
     // GPIO0 pin for hard reset
-    DigitalOut gpio0Pin;
+    DigitalInOut gpio0Pin;
     
     // device address
     uint8_t addr;

@@ -504,17 +504,22 @@
 //             global flash speed to 2.
 //
 //        6 -> Save configuration to flash.  This saves all variable updates sent via
-//             type 66 messages since the last reboot, then automatically reboots the
+//             type 66 messages since the last reboot, then optionally reboots the
 //             device to put the changes into effect.  If the flash write succeeds,
 //             we set the "flash write OK" bit in our status reports, which we 
 //             continue sending between the successful write and the delayed reboot.
-//             We don't set the bit or reboot if the write fails.
+//             We don't set the bit or reboot if the write fails.  If the "do not
+//             reboot" flag is set, we still set the flag on success for the delay 
+//             time, then clear the flag.
 //
 //               third byte = delay time in seconds.  The device will wait this long
 //               before disconnecting, to allow the PC to test for the success bit
 //               in the status report, and to perform any cleanup tasks while the 
 //               device is still attached (e.g., modifying Windows device driver 
 //               settings)
+//
+//               fourth byte = flags:
+//                 0x01 -> do not reboot
 //
 //        7 -> Query device ID.  The device replies with a special device ID report
 //             (see above; see also USBJoystick.cpp), then resumes sending normal
@@ -1036,6 +1041,22 @@
 //       byte 3 = bit flags:
 //                0x01 -> auto-zeroing enabled
 //       byte 4 = auto-zeroing time in seconds
+//
+// 19 -> Plunger jitter filter.  This sets a hysteresis window size, to
+//       reduce jitter in the plunger reading.  Most sensors aren't perfectly
+//       accurate: consecutive readings at the same physical plunger position
+//       vary slightly, wandering in a range near the true reading.  Over time,
+//       the readings will usually average the true value, but that's not much
+//       of a consolation to us because we want to display the position in
+//       real time.  To reduce the visible jitter, we can apply a hysteresis
+//       filter that hides sensor reading variations within a chosen window.
+//       This sets the window size.  The window is in joystick units; we
+//       report the joystick position on a scale of -4095..+4095, and the
+//       physical plunger travels about 3" overall, so each joystick unit
+//       represents about 1/10000" of physical travel.  Setting this to zero
+//       (the default) disables the filter.
+//
+//       byte 3:4 = window size in joystick units, little-endian
 //
 //
 // SPECIAL DIAGNOSTICS VARIABLES:  These work like the array variables below,

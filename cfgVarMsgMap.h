@@ -48,7 +48,7 @@ void v_func
         
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
-        v_byte_ro(18, 2);       // number of SCALAR variables
+        v_byte_ro(19, 2);       // number of SCALAR variables
         v_byte_ro(6, 3);        // number of ARRAY variables
         break;
         
@@ -178,6 +178,11 @@ void v_func
         // plunger auto-zeroing time
         v_byte(plunger.autoZero.flags, 2);
         v_byte(plunger.autoZero.t, 3);
+        break;
+        
+    case 19:
+        // plunger jitter filter window size
+        v_ui16(plunger.jitterWindow, 2);
         break;
         
     // case N: // new scalar variable
