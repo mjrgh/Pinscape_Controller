@@ -11,10 +11,10 @@
 class PlungerSensorNull: public PlungerSensor
 {
 public:
-    PlungerSensorNull() { }
+    PlungerSensorNull() : PlungerSensor(65535) { }
     
     virtual void init() { }
-    virtual bool read(PlungerReading &r) { return false; }
+    virtual bool readRaw(PlungerReading &r) { return false; }
     virtual uint32_t getAvgScanTime() { return 0; }
 };
 

@@ -94,7 +94,7 @@ bool USBJoystick::mediaUpdate(uint8_t data)
 }
  
 bool USBJoystick::sendPlungerStatus(
-    int npix, int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime)
+    int npix, int edgePos, int flags, uint32_t avgScanTime, uint32_t processingTime)
 {
     HID_REPORT report;
     
@@ -116,15 +116,11 @@ bool USBJoystick::sendPlungerStatus(
     put(ofs, uint16_t(edgePos));
     ofs += 2;
     
-    // write the flags to byte 7
+    // Add the calibration mode flag if applicable
     extern bool plungerCalMode;
-    uint8_t flags = 0;
-    if (dir == 1) 
-        flags |= 0x01; 
-    else if (dir == -1)
-        flags |= 0x02;
-    if (plungerCalMode)
-        flags |= 0x04;
+    if (plungerCalMode) flags |= 0x04;
+    
+    // write the flags to byte 7
     report.data[ofs++] = flags;
     
     // write the average scan time in 10us intervals to bytes 8-10
@@ -138,6 +134,57 @@ bool USBJoystick::sendPlungerStatus(
     report.data[ofs++] = t & 0xff;
     report.data[ofs++] = (t >> 8) & 0xff;
     report.data[ofs++] = (t >> 16) & 0xff;
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::sendPlungerStatus2(
+    int nativeScale, 
+    int jitterLo, int jitterHi, int rawPos,
+    int axcTime)
+{
+    HID_REPORT report;
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate it's an extended
+    // exposure report.
+    put(0, 0x87FF);
+    
+    // start at the second byte
+    int ofs = 2;
+    
+    // write the report subtype (1) to byte 2
+    report.data[ofs++] = 1;
+
+    // write the native scale to bytes 3:4
+    put(ofs, uint16_t(nativeScale));
+    ofs += 2;
+    
+    // limit the jitter filter bounds to the native scale
+    if (jitterLo < 0) 
+        jitterLo = 0;
+    else if (jitterLo > nativeScale) 
+        jitterLo = nativeScale;
+    if (jitterHi < 0)
+        jitterHi = 0;
+    else if (jitterHi > nativeScale)
+        jitterHi = nativeScale;
+    
+    // write the jitter filter window bounds to 5:6 and 7:8
+    put(ofs, uint16_t(jitterLo));
+    ofs += 2;
+    put(ofs, uint16_t(jitterHi));
+    ofs += 2;
+    
+    // add the raw position
+    put(ofs, uint16_t(rawPos));
+    ofs += 2;
+    
+    // add the auto-exposure time
+    put(ofs, uint16_t(axcTime));
+    ofs += 2;
     
     // send the report
     report.length = reportLen;

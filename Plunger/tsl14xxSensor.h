@@ -20,24 +20,13 @@
 class PlungerSensorTSL14xx: public PlungerSensor
 {
 public:
-    PlungerSensorTSL14xx(int nativePix, PinName si, PinName clock, PinName ao)
-        : sensor(nativePix, si, clock, ao)
+    PlungerSensorTSL14xx(int nativePix, int nativeScale, 
+        PinName si, PinName clock, PinName ao)
+        : PlungerSensor(nativeScale),
+          sensor(nativePix, si, clock, ao)
     {
-        // Figure the scaling factor for converting native pixel readings
-        // to our normalized 0..65535 range.  The effective calculation we
-        // need to perform is (reading*65535)/(npix-1).  Division is slow
-        // on the M0+, and floating point is dreadfully slow, so recast the
-        // per-reading calculation as a multiply (which, unlike DIV, is fast
-        // on KL25Z - the device has a single-cycle 32-bit hardware multiply).
-        // How do we turn a divide into a multiply?  By calculating the
-        // inverse!  How do we calculate a meaningful inverse of a large
-        // integer using integers?  By doing our calculations in fixed-point
-        // integers, which is to say, using hardware integers but treating
-        // all values as multiplied by a scaling factor.  We'll use 64K as
-        // the scaling factor, since we can divide the scaling factor back
-        // out by using an arithmetic shift (also fast on M0+).  
+        // remember the native pixel size
         native_npix = nativePix;
-        scaling_factor = (65535U*65536U) / (nativePix - 1);
         
         // start with no additional integration time for automatic 
         // exposure control
@@ -47,43 +36,6 @@ public:
     // is the sensor ready?
     virtual bool ready() { return sensor.ready(); }
     
-    // read the plunger position
-    virtual bool read(PlungerReading &r)
-    {
-        // start reading the next pixel array - this also waits for any
-        // previous read to finish, ensuring that we have stable pixel
-        // data in the capture buffer
-        sensor.startCapture(axcTime);
-        
-        // get the image array from the last capture
-        uint8_t *pix;
-        uint32_t tpix;
-        sensor.getPix(pix, tpix);
-        
-        // process the pixels
-        int pixpos;
-        if (process(pix, native_npix, pixpos))
-        {            
-            // Normalize to the 16-bit range by applying the scaling
-            // factor.  The scaling factor is 65535/npix expressed as
-            // a fixed-point number with 64K scale, so multiplying the
-            // pixel reading by this will give us the result with 64K
-            // scale: so shift right 16 bits to get the final answer.
-            // (The +32768 is added for rounding: it's equal to 0.5 
-            // at our 64K scale.)
-            r.pos = uint16_t((scaling_factor*uint32_t(pixpos) + 32768) >> 16);
-            r.t = tpix;
-            
-            // success
-            return true;
-        }
-        else
-        {
-            // no position found
-            return false;
-        }
-    }
-        
     virtual void init()
     {
         sensor.clear();
@@ -93,59 +45,80 @@ public:
     // See plunger.h for details on the arguments.
     virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t extraTime)
     {
-        // To get the requested timing for the cycle we report, we need to run
-        // an extra cycle.  Right now, the sensor is integrating from whenever
-        // the last start() call was made.  
+        // The sensor's internal buffering scheme makes it a little tricky
+        // to get the requested timing, and our own double-buffering adds a
+        // little complexity as well.  To get the exact timing requested, we
+        // have to work with the buffering pipeline like so:
         //
-        // 1. Call startCapture() to end that previous cycle.  This will collect
-        // dits pixels into one DMA buffer (call it EVEN), and start a new 
-        // integration cycle.  
-        // 
-        // 2. We know a new integration has just started, so we can control its
-        // time.  Wait for the cycle we just started to finish, since that sets
-        // the minimum time.
+        // 1. Call startCapture().  This waits for any in-progress pixel
+        // transfer from the sensor to finish, then executes a HOLD/SI pulse
+        // on the sensor.  The HOLD/SI takes a snapshot of the current live
+        // photo receptors to the sensor shift register.  These pixels have
+        // been integrating starting from before we were called; call this
+        // integration period A.  So the shift register contains period A.
+        // The HOLD/SI then grounds the photo receptors, clearing their
+        // charge, thus starting a new integration period B.  After sending
+        // the HOLD/SI pulse, startCapture() begins a DMA transfer of the
+        // shift register pixels (period A) to one of our two buffers (call
+        // it the EVEN buffer).
         //
-        // 3. The integration cycle we started in step 1 has now been running the
-        // minimum time - namely, one read cycle.  Pause for our extraTime delay
-        // to add the requested added time.
+        // 2. Wait for the current transfer (period A to the EVEN buffer)
+        // to finish.  The minimum integration time is the time of one
+        // transfer cycle, so this brings us to the minimum time for 
+        // period B.
         //
-        // 4. Start the next cycle.  This will make the pixels we started reading
-        // in step 1 available via getPix(), and will end the integration cycle
-        // we started in step 1 and start reading its pixels into the internal
-        // DMA buffer.  
+        // 3. Now pause for the reqeusted extra delay time.  Period B is 
+        // still running at this point (it keeps going until we start a 
+        // new capture), so this pause adds the requested extra time to 
+        // period B's total integration time.  This brings period B to
+        // exactly the requested total time.
         //
-        // 5. This is where it gets tricky!  The pixels we want are the ones that 
-        // started integrating in step 1, which are the ones we're reading via DMA 
-        // now.  The pixels available via getPix() are the ones from the cycle we 
-        // *ended* in step 1 - we don't want these.  So we need to start a *third*
-        // cycle in order to get the pixels from the second cycle.
-        
-        sensor.startCapture(axcTime);       // transfer pixels from period A, begin integration period B
+        // 4. Call startCapture() to end period B, move period B's pixels
+        // to the sensor's shift register, and begin period C.  This 
+        // switches DMA buffers, so the EVEN buffer (with period A) is now 
+        // available, and the ODD buffer becomes the DMA target for the 
+        // period B pixels.
+        //
+        // 5. Wait for the period B pixels to become available, via
+        // waitPix().  This waits for the DMA transfer to complete and
+        // hands us the latest (ODD) transfer buffer.
+        //       
+        sensor.startCapture(axcTime);       // begin transfer of pixels from incoming period A, begin integration period B
         sensor.wait();                      // wait for scan of A to complete, as minimum integration B time
         wait_us(long(extraTime) * 100);     // add extraTime (0.1ms == 100us increments) to integration B time
-        sensor.startCapture(axcTime);       // transfer pixels from integration period B, begin period C; period A pixels now available
-        sensor.startCapture(axcTime);       // trnasfer pixels from integration period C, begin period D; period B pixels now available
+        sensor.startCapture(axcTime);       // begin transfer of pixels from integration period B, begin period C; period A pixels now available
         
-        // get the pixel array
+        // wait for the DMA transfer of period B to finish, and get the 
+        // period B pixels
         uint8_t *pix;
         uint32_t t;
-        sensor.getPix(pix, t);
+        sensor.waitPix(pix, t);
 
         // start a timer to measure the processing time
         Timer pt;
         pt.start();
 
         // process the pixels and read the position
-        int pos;
+        int pos, rawPos;
         int n = native_npix;
-        if (!process(pix, n, pos))
+        if (process(pix, n, rawPos))
+        {
+            // success - apply the jitter filter
+            pos = jitterFilter(rawPos);
+        }
+        else
+        {
+            // report 0xFFFF to indicate that the position wasn't read
             pos = 0xFFFF;
+            rawPos = 0xFFFF;
+        }
         
         // note the processing time
         uint32_t processTime = pt.read_us();
         
-        // if a low-res scan is desired, reduce to a subset of pixels
-        if (flags & 0x01)
+        // If a low-res scan is desired, reduce to a subset of pixels.  Ignore
+        // this for smaller sensors (below 512 pixels)
+        if ((flags & 0x01) && n >= 512)
         {
             // figure how many sensor pixels we combine into each low-res pixel
             const int group = 8;
@@ -167,16 +140,24 @@ public:
                 pix[dst] = uint8_t(a);
             }
             
-            // rescale the position for the reduced resolution
-            if (pos != 0xFFFF)
-                pos = pos * (lowResPix-1) / (n-1);
-
             // update the pixel count to the reduced array size
             n = lowResPix;
         }
         
-        // send the sensor status report
-        js.sendPlungerStatus(n, pos, getOrientation(), sensor.getAvgScanTime(), processTime);
+        // figure the report flags
+        int jsflags = 0;
+        
+        // add flags for the detected orientation: 0x01 for normal orientation,
+        // 0x02 for reversed orientation; no flags if orientation is unknown
+        int dir = getOrientation();
+        if (dir == 1) 
+            jsflags |= 0x01; 
+        else if (dir == -1)
+            jsflags |= 0x02;
+            
+        // send the sensor status report headers
+        js.sendPlungerStatus(n, pos, jsflags, sensor.getAvgScanTime(), processTime);
+        js.sendPlungerStatus2(nativeScale, jfLo, jfHi, rawPos, axcTime);
         
         // If we're not in calibration mode, send the pixels
         extern bool plungerCalMode;
@@ -223,13 +204,6 @@ protected:
     // number of pixels
     int native_npix;
 
-    // Scaling factor for converting a native pixel reading to the normalized
-    // 0..65535 plunger reading scale.  This value contains 65535*65536/npix,
-    // which is equivalent to 65535/npix as a fixed-point number with a 64K
-    // scale.  To apply this, multiply a pixel reading by this value and
-    // shift right by 16 bits.
-    uint32_t scaling_factor;
-    
     // Automatic exposure control time, in microseconds.  This is an amount
     // of time we add to each integration cycle to compensate for low light
     // levels.  By default, this is always zero; the base class doesn't have
@@ -239,5 +213,153 @@ protected:
     // if the image looks over- or under-exposed.
     uint32_t axcTime;
 };
+
+// ---------------------------------------------------------------------
+//
+// Subclass for the large sensors, such as TSL1410R (1280 pixels)
+// and TSL1412S (1536 pixels).
+//
+// For the large sensors, pixel transfers take a long time: about
+// 2.5ms on the 1410R and 1412S.  This is much longer than our main
+// loop time, so we don't want to block other work to do a transfer.
+// Instead, we want to do our transfers asynchronously, so that the
+// main loop can keep going while a transfer proceeds.  This is
+// possible via our DMA double buffering.  
+//
+// This scheme gives us three images in our pipeline at any given time:
+//
+//  - a live image integrating light on the photo receptors on the sensor
+//  - the prior image being held in the sensor's shift register and being
+//    transferred via DMA into one of our buffers
+//  - the image before that in our other buffer
+//
+// Integration of a live image starts when we begin the transfer of the
+// prior image.  Integration ends when we start the next transfer after
+// that.  So the total integration time, which is to say the exposure
+// time, is the time between consecutive transfer starts.  It's important
+// for this time to be consistent from image to image, because that
+// determines the exposure level.  We use polling from the main loop
+// to initiate new transfers, so the main loop is responsible for
+// polling frequently during the 2.5ms transfer period.  It would be
+// more consistent if we did this in an interrupt handler instead,
+// but that would complicate things considerably since our image
+// analysis is too time-consuming to do in interrupt context.
+//
+class PlungerSensorTSL14xxLarge: public PlungerSensorTSL14xx
+{
+public:
+    PlungerSensorTSL14xxLarge(int nativePix, int nativeScale, 
+        PinName si, PinName clock, PinName ao)
+        : PlungerSensorTSL14xx(nativePix, nativeScale, si, clock, ao)
+    {
+    }
+
+    // read the plunger position
+    virtual bool readRaw(PlungerReading &r)
+    {
+        // start reading the next pixel array (this waits for any DMA
+        // transfer in progress to finish, ensuring a stable pixel buffer)
+        sensor.startCapture(axcTime);
+
+        // get the image array from the last capture
+        uint8_t *pix;
+        uint32_t tpix;
+        sensor.getPix(pix, tpix);
+        
+        // process the pixels
+        int pixpos;
+        if (process(pix, native_npix, pixpos))
+        {            
+            r.pos = pixpos;
+            r.t = tpix;
+            
+            // success
+            return true;
+        }
+        else
+        {
+            // no position found
+            return false;
+        }
+    }
+};        
+
+// ---------------------------------------------------------------------
+//
+// Subclass for the small sensors, such as TSL1401CL (128 pixels).
+//
+// For the small sensors, we can't use the asynchronous transfer
+// scheme we use for the large sensors, because the transfer times
+// are so short that the main loop can't poll frequently enough to
+// maintain consistent exposure times.  With the short transfer
+// times, though, we don't need to do them asynchronously.
+//
+// Instead, each time we want to read the sensor, we do the whole
+// integration and transfer synchronously, so that we can precisly
+// control the total time.  This requires two transfers.  First,
+// we start a transfer in order to set the exact starting time of
+// an integration period: call it period A.  We wait for the
+// transfer to complete, which fills a buffer with the prior
+// integration period's pixels.  We don't want those pixels,
+// because they started before we got here and thus we can't
+// control how long they were integrating.  So we discard that
+// buffer and start a new transfer.  This starts period B while
+// transferring period A's pixels into a DMA buffer.  We want
+// those period A pixels, so we wait for this transfer to finish.
+//
+class PlungerSensorTSL14xxSmall: public PlungerSensorTSL14xx
+{
+public:
+    PlungerSensorTSL14xxSmall(int nativePix, int nativeScale, 
+        PinName si, PinName clock, PinName ao)
+        : PlungerSensorTSL14xx(nativePix, nativeScale, si, clock, ao)
+    {
+    }
+
+    // read the plunger position
+    virtual bool readRaw(PlungerReading &r)
+    {
+        // Clear the sensor.  This sends a HOLD/SI pulse to the sensor,
+        // which ends the current integration period, starts a new one
+        // (call the new one period A) right now, and clocks out all
+        // of the pixels from the old cycle.  We want to discard these
+        // pixels because they've been integrating from some time in
+        // the past, so we can't control the exact timing of that cycle.
+        // Clearing the sensor clocks the pixels out without waiting to
+        // read them on DMA, so it's much faster than a regular transfer
+        // and thus gives us the shortest possible base integration time
+        // for period A.
+        sensor.clear();
+        
+        // Start a real transfer.  This ends integration period A (the
+        // one we just started), starts a new integration period B, and
+        // begins transferring period A's pixels to memory via DMA.  We
+        // use the auto-exposure time to get the optimal exposure.
+        sensor.startCapture(axcTime);
+        
+        // wait for the period A pixel transfer to finish, and grab
+        // its pixels
+        uint8_t *pix;
+        uint32_t tpix;
+        sensor.waitPix(pix, tpix);
+        
+        // process the pixels
+        int pixpos;
+        if (process(pix, native_npix, pixpos))
+        {            
+            r.pos = pixpos;
+            r.t = tpix;
+            
+            // success
+            return true;
+        }
+        else
+        {
+            // no position found
+            return false;
+        }
+    }
+};        
+
 
 #endif

@@ -17,7 +17,9 @@
 class PlungerSensorPot: public PlungerSensor
 {
 public:
-    PlungerSensorPot(PinName ao) : pot(ao)
+    // Our native readings are taken as 16-bit ADC samples, so
+    // our native scale is an unsigned 16-bit int, 0..65535.
+    PlungerSensorPot(PinName ao) : PlungerSensor(65535), pot(ao)
     {
         // start our sample timer with an arbitrary zero point of now
         timer.start();
@@ -30,7 +32,7 @@ public:
     }
     
     // read the sensor
-    virtual bool read(PlungerReading &r)
+    virtual bool readRaw(PlungerReading &r)
     {
         // get the starting time of the sampling
         uint32_t t0 = timer.read_us();

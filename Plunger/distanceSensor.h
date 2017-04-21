@@ -41,7 +41,7 @@
 class PlungerSensorDistance: public PlungerSensor
 {
 public:
-    PlungerSensorDistance()
+    PlungerSensorDistance(int nativeScale) : PlungerSensor(nativeScale)
     {
         // start the sample timer
         t.start();
@@ -68,11 +68,18 @@ protected:
 };
 
 // PlungerSensor interface implementation for VL6180X sensors.  
+//
+// The VL6180X reports distances in millimeter quanta, so the native
+// sensor units are millimeters.  A physical plunger has about 3" of
+// total travel, but leave a little extra padding for measurement
+// inaccuracies and other unusual situations, so'll use an actual
+// native scale of 5" = 127mm.
 class PlungerSensorVL6180X: public PlungerSensorDistance
 {
 public:
     PlungerSensorVL6180X(PinName sda, PinName scl, PinName gpio0)
-        : sensor(sda, scl, I2C_ADDRESS, gpio0)
+        : PlungerSensorDistance(127),
+          sensor(sda, scl, I2C_ADDRESS, gpio0)
     {
     }
     
@@ -96,7 +103,7 @@ public:
         return sensor.rangeReady();
     }
     
-    virtual bool read(PlungerReading &r)
+    virtual bool readRaw(PlungerReading &r)
     {
         // get the range reading
         uint8_t d;
@@ -109,22 +116,11 @@ public:
         // use the current timestamp
         r.t = t.read_us();
         
-        // Normalize the reading to the 0..65536 scale.  We assume
-        // that the sensor is mounted at the front of the cabinet
-        // facing towards the back, so the plunger moves towards 
-        // the sensor as its retracted.  The maximum distance that
-        // a standard plunger e-ring can get from the front wall of
-        // the cabinet is about 5" or 127mm, so we'll use 127mm as
-        // our normalized zero point (the maximum forward position).  
-        // We'll assume that the sensor is set up so that the target
-        // at the e-ring gets no closer than 1cm = 10mm, so this is
-        // our maximum retracted position, or 65535 on the normalized
-        // scale.  So our scale maps from 10mm..127mm to 65535..0.
-        if (d > 127)
-            d = 127;
-        else if (d < 10)
-            d = 10;
-        r.pos = (117 - (d - 10)) * (65535/117);
+        // The sensor measures distance from the front of the cabinet
+        // (in our standard setup).  For reporting purposes, we want
+        // the position reading to increase as the plunger is retracted,
+        // so we want to reverse the scale.
+        r.pos = nativeScale - d;
         
         // collect scan time statistics
         if (err == 0)

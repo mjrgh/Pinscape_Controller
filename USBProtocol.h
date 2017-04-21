@@ -124,18 +124,17 @@
 // (see below).  The device replies with a message in this format:
 //
 //    bytes 0:1 = 0x87FF
-//    byte  2   = 0 -> first (currently only) status report packet
-//                (additional packets could be added in the future if
-//                more fields need to be added)
+//    byte  2   = 0 -> first status report packet
 //    bytes 3:4 = number of pixels to be sent in following messages, as
 //                an unsigned 16-bit little-endian integer.  This is 0 if 
 //                the sensor isn't an imaging type.
-//    bytes 5:6 = current plunger position registered on the sensor.
-//                For imaging sensors, this is the pixel position, so it's
-//                scaled from 0 to number of pixels - 1.  For non-imaging
-//                sensors, this uses the generic joystick scale 0..4095.
-//                The special value 0xFFFF means that the position couldn't
-//                be determined,
+//    bytes 5:6 = current plunger position registered on the sensor.  This
+//                is on the *native* scale for the sensor, which might be
+//                different from joystick units.  By default, the native
+//                scale is the number of pixels for an imaging sensor, or
+//                4096 for other sensor types.  The actual native scale can
+//                be reported separately via a second status report message
+//                (see below).
 //    byte  7   = bit flags: 
 //                   0x01 = normal orientation detected
 //                   0x02 = reversed orientation detected
@@ -159,6 +158,21 @@
 //                is usually zero or negligible for analog sensor types, 
 //                since the only "analysis" is a multiplication to rescale 
 //                the ADC sample.
+//
+// An optional second message provides additional information:
+//
+//    bytes 0:1 = 0x87FF
+//    byte  2   = 1 -> second status report packet
+//    bytes 3:4 = Native sensor scale.  This is the actual native scale
+//                used for the position report in the first status report
+//                packet above.
+//    bytes 5:6 = Jitter window lower bound, in native sensor scale units.
+//    bytes 7:8 = Jitter window upper bound, in native sensor scale units.
+//                The jitter window bounds reflect the current jitter filter
+//                status as of this reading.
+//    bytes 9:10 = Raw sensor reading before jitter filter was applied.
+//    bytes 11:12 = Auto-exposure time in microseconds
+//   
 //
 // If the sensor is an imaging sensor type, this will be followed by a
 // series of pixel messages.  The imaging sensor types have too many pixels

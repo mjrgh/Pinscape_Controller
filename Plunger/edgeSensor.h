@@ -533,13 +533,20 @@ public:
 
 // -------------------------------------------------------------------------
 //
-// Edge position plunger sensor for TSL14xx-based sensors
+// Edge position plunger sensor for TSL14xx-based sensors.  An edge
+// detection setup requires one of the large sensors, 1410R or 1412S,
+// since we need the sensor to cover the whole extent of the physical 
+// plunger's travel, which is about 3".
 //
-class PlungerSensorEdgePosTSL14xx: public PlungerSensorTSL14xx, public PlungerSensorEdgePos
+// The native scale for image edge detectors is sensor pixels, since
+// we read the plunger position as the pixel location of the shadow
+// edge on the image.
+//
+class PlungerSensorEdgePosTSL14xx: public PlungerSensorTSL14xxLarge, public PlungerSensorEdgePos
 {
 public:
     PlungerSensorEdgePosTSL14xx(int nativePix, PinName si, PinName clock, PinName ao)
-        : PlungerSensorTSL14xx(nativePix, si, clock, ao),
+        : PlungerSensorTSL14xxLarge(nativePix, nativePix - 1, si, clock, ao),
           PlungerSensorEdgePos(nativePix)
     {
         // we don't know the direction yet
@@ -548,8 +555,13 @@ public:
         // set the midpoint history arbitrarily to the absolute halfway point
         memset(midpt, 127, sizeof(midpt));
         midptIdx = 0;
+        
+        // the native reporting scale is the pixel size of the sensor, since
+        // the position is figured as the shadow location in the image
+        nativeScale = nativePix;
     }
     
+protected:
     // process the image through the edge detector
     virtual bool process(const uint8_t *pix, int npix, int &pixpos) 
     {

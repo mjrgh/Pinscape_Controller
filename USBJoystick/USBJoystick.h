@@ -150,16 +150,33 @@ public:
     bool updateStatus(uint32_t stat);
      
     /**
-     * Write the plunger status report.
+     * Write the plunger status report header.
+     *
+     * Note that we automatically add the "calibration mode" bit to the flags,
+     * so the caller doesn't have to include this.  The caller only has to
+     * include the sensor-specific flags.
      *
      * @param npix number of pixels in the sensor (0 for non-imaging sensors)
-     * @param edgePos the pixel position of the detected edge in this image, or -1 if none detected
-     * @param dir sensor orientation (1 = standard, -1 = reversed, 0 = unknown)
+     * @param pos the decoded plunger position, or -1 if none detected
+     * @param flags (see USBProtocol.h, message type 2A, "byte 7" bit flags)
      * @param avgScanTime average sensor scan time in microseconds
      * @param processingTime time in microseconds to process the current frame
      */
-    bool sendPlungerStatus(int npix, int edgePos, int dir, uint32_t avgScanTime, uint32_t processingTime);
-     
+    bool sendPlungerStatus(int npix, int flags, int dir, 
+        uint32_t avgScanTime, uint32_t processingTime);
+        
+    /**
+      * Send a secondary plunger status report header.
+      *
+      * @param nativeScale upper bound of the sensor's native reading scale
+      * @param jitterLo low end of jitter filter window (in sensor native scale units)
+      * @param jitterHi high end of jitter filter window
+      * @param rawPos raw position reading, before applying jitter filter
+      * @param axcTime auto-exposure time in microseconds
+      */
+    bool sendPlungerStatus2(
+        int nativeScale, int jitterLo, int jitterHi, int rawPos, int axcTime);
+    
     /**
      * Write an exposure report.  We'll fill out a report with as many pixels as
      * will fit in the packet, send the report, and update the index to the next

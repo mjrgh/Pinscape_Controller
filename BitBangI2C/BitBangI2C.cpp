@@ -1,27 +1,9 @@
-// Bit Bang BitBangI2C implementation
-//
-// This implements an I2C interface that can operate on any GPIO ports,
-// whether or not connected to I2C hardware on the MCU.  We simply send
-// and receive bits using DigitalInOut ports instead of MCU I2C hardware.
-//
-// Electrically, the I2C bus is designed as a a pair of open-collector 
-// lines with pull-up resistors.  Any device can pull a line low by
-// shorting it to ground, but no one can pull a line high: instead, you
-// *allow* a line to go high by releasing it, which is to say putting
-// your connection to it in a high-Z state.  On an MCU, we put a GPIO
-// in in high-Z state by setting its direction to INPUT mode.  So our
-// GPIO write strategy is like this:
-//
-//   - take a pin low (0):   
-//        pin.input(); 
-//        pin.write(0);
-//
-//   - take a pin high (1):
-//        pin.output();
+// Bit Bang BitBangI2C implementation for KL25Z
 //
 
 #include "mbed.h"
 #include "BitBangI2C.h"
+
 
 // --------------------------------------------------------------------------
 //
@@ -57,6 +39,7 @@ static const char *dbgbytes(const uint8_t *bytes, size_t len)
 }
 #else
 # define dprintf(...)
+# define eprintf(...)
 #endif
 
 // --------------------------------------------------------------------------
@@ -67,50 +50,84 @@ BitBangI2C::BitBangI2C(PinName sda, PinName scl) :
     sclPin(scl), sdaPin(sda)
 {
     // set the default frequency to 100kHz
-    setFrequency(100000);
-    
-    // start with pins in high Z state
-    this->sda(1);
-    this->scl(1);
+    frequency(100000);
 }
 
-void BitBangI2C::setFrequency(uint32_t freq)
+void BitBangI2C::frequency(uint32_t freq)
 {
-    // figure the wait time per half-bit in microseconds for this frequency,
-    // with a minimum of 1us
-    clkPeriod_us = 500000/freq;
-    if (clkPeriod_us < 1)
-        clkPeriod_us = 1;
+    // figure the clock time per cycle
+    clkPeriod_us = 1000000/freq;
+
+    // Figure wait times according to frequency
+    if (freq <= 100000)
+    {
+        // standard mode I2C bus - up to 100kHz
+        tLow = calcHiResWaitTime(4700);
+        tHigh = calcHiResWaitTime(4000);
+        tBuf = calcHiResWaitTime(4700);
+        tHdSta = calcHiResWaitTime(4000);
+        tSuSta = calcHiResWaitTime(4700);
+        tSuSto = calcHiResWaitTime(4000);
+        tAck = calcHiResWaitTime(300);
+        tData = calcHiResWaitTime(300);
+        tSuDat = calcHiResWaitTime(250);
+    }
+    else if (freq <= 400000)
+    {
+        // fast mode I2C - up to 400kHz
+        tLow = calcHiResWaitTime(1300);
+        tHigh = calcHiResWaitTime(600);
+        tBuf = calcHiResWaitTime(1300);
+        tHdSta = calcHiResWaitTime(600);
+        tSuSta = calcHiResWaitTime(600);
+        tSuSto = calcHiResWaitTime(600);
+        tAck = calcHiResWaitTime(100);
+        tData = calcHiResWaitTime(100);
+        tSuDat = calcHiResWaitTime(100);
+    }
+    else
+    {
+        // fast mode plus - up to 1MHz
+        tLow = calcHiResWaitTime(500);
+        tHigh = calcHiResWaitTime(260);
+        tBuf = calcHiResWaitTime(500);
+        tHdSta = calcHiResWaitTime(260);
+        tSuSta = calcHiResWaitTime(260);
+        tSuSto = calcHiResWaitTime(260);
+        tAck = calcHiResWaitTime(50);
+        tData = calcHiResWaitTime(50);
+        tSuDat = calcHiResWaitTime(50);
+    }
 }
 
 void BitBangI2C::start() 
 {    
-    // take clock high
-    scl(1);
-    wait_us(clkPeriod_us);
-    
-    // take data high
-    sda(1);
-    wait_us(clkPeriod_us);
+    // take clock and data high
+    sclHi();
+    sdaHi();
+    hiResWait(tBuf);
     
     // take data low
-    sda(0);
-    wait_us(clkPeriod_us);
+    sdaLo();
+    hiResWait(tHdSta);
     
     // take clock low
-    scl(0);
-    wait_us(clkPeriod_us);
+    sclLo();
+    hiResWait(tLow);
 }
 
 void BitBangI2C::stop() 
 {
+    // take SDA low
+    sdaLo();
+
     // take SCL high
-    scl(1);
-    wait_us(clkPeriod_us);
+    sclHi();
+    hiResWait(tSuSto);
     
     // take SDA high
-    sda(1);
-    wait_us(clkPeriod_us);
+    sdaHi();
+    hiResWait(tBuf);
 }
 
 bool BitBangI2C::wait(uint32_t timeout_us)
@@ -129,9 +146,6 @@ bool BitBangI2C::wait(uint32_t timeout_us)
         // if we've reached the timeout, abort
         if (t.read_us() > timeout_us)
             return false;
-        
-        // wait briefly
-        wait_us(20);
     }
 }
 
@@ -145,8 +159,10 @@ void BitBangI2C::reset()
     start();
     
     // take the clock high
-    scl(1);
-    wait_us(clkPeriod_us);
+    sclHi();
+    
+    // wait for a few clock cycles
+    wait_us(4*clkPeriod_us);
 }
 
 int BitBangI2C::write(uint8_t addr, const uint8_t *data, size_t len, bool repeated)
@@ -236,32 +252,10 @@ int BitBangI2C::read(bool ack)
     return data;
 }
 
-void BitBangI2C::writeBit(int bit) 
-{
-    // express the bit on the SDA line
-    if (bit)
-        sdaPin.input();
-    else
-    {
-        sdaPin.output();
-        sdaPin.write(0);
-    }
-    
-    // clock it
-    wait_us(clkPeriod_us);
-    sclPin.input();
-    
-    wait_us(clkPeriod_us);
-    sclPin.output();
-    sclPin.write(0);
-    
-    wait_us(clkPeriod_us);
-}
-
 int BitBangI2C::readBit() 
 {
     // take the clock high (actually, release it to the pull-up)
-    scl(1);
+    sclHi();
     
     // Wait (within reason) for it to actually read as high.  The device
     // can intentionally pull the clock line low to tell us to wait while
@@ -284,34 +278,9 @@ int BitBangI2C::readBit()
     bool bit = sdaPin.read();
     
     // take the clock low again
-    scl(0);
-    wait_us(clkPeriod_us);
+    sclLo();
+    hiResWait(tLow);
     
     // return the bit
     return bit;
-}
-
-// --------------------------------------------------------------------------
-//
-// Low-level line controls.  
-// 
-// - To take a line LOW, we pull it to ground by setting the GPIO pin 
-//   direction to OUTPUT and writing a 0.  
-//
-// - To take a line HIGH, we simply put it in high-Z state by setting 
-//   its GPIO pin direction to INPUT.
-//
-void BitBangI2C::setLevel(DigitalInOut pin, int level)
-{
-    if (level)
-    {
-        // set HIGH - release line by setting pin to INPUT mode
-        pin.input();
-    }
-    else
-    {
-        // set LOW - pull line low by setting as OUTPUT and writing 0
-        pin.output();
-        pin.write(0);
-    }
 }

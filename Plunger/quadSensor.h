@@ -92,20 +92,17 @@ public:
     // since the main loop rescales it anyway via calibration.  But it's
     // helpful to have the approximate figure so that we can scale the
     // raw data readings appropriately for the interface datatypes.
+    //
+    // For the native scale, we'll assume a 4" range at our dpi rating.
+    // The actual plunger travel is constrainted to about a 3" range, but
+    // we want to leave a little extra padding to reduce the chances of
+    // going out of range in unusual situations.
     PlungerSensorQuad(int dpi, PinName pinA, PinName pinB) 
-        : chA(pinA), chB(pinB)
+        : PlungerSensor(dpi*4),
+          chA(pinA), chB(pinB)
     {   
-        // remember the dpi setting
-        this->dpi = dpi;
-        
         // Use 1" as the reference park position
         parkPos = dpi;
-        
-        // Figure the scale factor for reports.  We want a 3" range to
-        // mostly cover the 16-bit unsigned range (0..65535) of the read()
-        // reports.  To leave a little cushion to avoid overflow, figure
-        // the actual factor using a 4" range.
-        posScale = 65535/(dpi*4);
         
         // start at the park position
         pos = parkPos;
@@ -138,10 +135,10 @@ public:
     }
     
     // read the sensor
-    virtual bool read(PlungerReading &r)
+    virtual bool readRaw(PlungerReading &r)
     {
-        // Return the current position, adjusted for our dpi scaling
-        r.pos = uint16_t(pos * posScale);
+        // Get the current position in native units
+        r.pos = pos;
         
         // Set the timestamp on the reading to right now.  Our internal
         // position counter reflects the position in real time, since it's
@@ -164,30 +161,6 @@ public:
 private:
     // interrupt inputs for our channel pins
     FastInterruptIn chA, chB;
-    
-    // "Dots per inch" for the sensor.  This reflects the approximate
-    // number of quadrature transition pulses we expect per inch of
-    // physical travel.  This is usually a function of the "scale" 
-    // (the reference guide that the sensor moves across to sense
-    // its motion).  Quadrature sensors usually generate four pulses
-    // per "bar/window pair" on the scale, and the scale is usually
-    // measured in terms of "lines per inch" (or something analogous
-    // for non-optical sensors, such as "poles per inch" for a magnetic 
-    // sensor).  So the effective "dots per inch" is usually equal to
-    // 4x the scale marks per inch.  It's not critical for us to know
-    // the exact dpi rating, since the main loop rescales the raw 
-    // readings via its calibration mechanism, but it's helpful to
-    // know at least an approximate dpi so that the raw readings fit
-    // in the interface datatypes.
-    int dpi;
-    
-    // Position report scaling factor.  The read() interface uses 16-bit
-    // ints, so we need to report positions on a 0..65535 scale.  For
-    // maximum precision in downstream calculations, we should use as
-    // much of the range as possible, so we need to rescale our raw
-    // readings to fill the range.  We figure this based on our sensor
-    // dpi.
-    int posScale;
     
     // current position - this is the cumulate counter for all
     // transitions so far

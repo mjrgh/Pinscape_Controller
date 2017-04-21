@@ -356,6 +356,35 @@ public:
         }
     }
     
+    // Wait for the current DMA transfer to finish, and retrieve its
+    // pixel array buffer.  This provides access to the latest image
+    // without starting a new transfer.  These pixels are valid throughout
+    // the next transfer (started via startCapture()) and remain valid 
+    // until the next transfer after that.
+    void waitPix(uint8_t * &pix, uint32_t &t)
+    {
+        // wait for the current transfer to finish
+        wait();
+        
+        // Return the pixel array that IS assigned to DMA, since this
+        // is the latest buffer filled.  This buffer is stable, even
+        // though it's assigned to DMA, because the last transfer is
+        // already finished and thus DMA is no longer accessing the
+        // buffer.
+        if (pixDMA)
+        {
+            // DMA owns pix2
+            pix = pix2;
+            t = t2;
+        }
+        else
+        {
+            // DMA owns pix1
+            pix = pix1;
+            t = t1;
+        }
+    }
+    
     // Start an image capture from the sensor.  Waits the previous
     // capture to finish if it's still running, then starts a new one
     // and returns immediately.  The new capture proceeds autonomously 
@@ -408,28 +437,20 @@ public:
         clock = 0;
         
         // Set the timestamp for the current active buffer.  The SI pulse
-        // we just did performed the HOLD operation, which transfers the 
-        // current integration cycle's pixel charges to the output 
-        // capacitors in the sensor.  We noted the start of the current
-        // integration cycle in tInt when we started it during the previous
-        // scan.  The image we're about to transfer therefore represents 
-        // the photons collected between tInt and right now (actually, the
-        // SI pulse above, but close enough).  Set the timestamp to the 
-        // midpoint between tInt and now.
+        // we just did performed the HOLD operation, which takes a snapshot
+        // of the photo receptors and stores it in the sensor's shift
+        // register.  We noted the start of the current integration cycle 
+        // in tInt when we started it during the previous scan.  The image 
+        // we're about to transfer therefore represents the light collected
+        // between tInt and right now (actually, the SI pulse above, but 
+        // close enough).  The image covers a time range rather than a
+        // single point in time, but we still have to give it a single
+        // timestamp.  Use the midpoint of the integration period.
         uint32_t tmid = (t0 + tInt) >> 1;
         if (pixDMA)
             t2 = tmid;
         else
             t1 = tmid;
-
-//$$$
-        // pad the timing slightly       
-//        clock = 0;
-
-//        // clock in the first pixel
-//        clock = 1;
-//        clock = 0;
-//$$$
 
         // Start the ADC sampler.  The ADC will read samples continuously
         // until we tell it to stop.  Each sample completion will trigger 
@@ -441,15 +462,12 @@ public:
         
         // The new integration cycle starts with the 19th clock pulse
         // after the SI pulse.  We offload all of the transfer work (including
-        // the clock pulse generation) to the DMA controller, so we won't
-        // be notified of exactly when that 19th clock occurs.  To keep things 
-        // simple, aproximate it as now plus 19 2us sample times.  This isn't 
-        // exact, since it will vary according to the ADC spin-up time and the
-        // actual sampling time, but 19*2us is close enough given that the 
-        // overall integration time we're measuring will be about 64x longer
-        // (around 2.5ms), so even if the 19*2us estimate is off by 100%, our
-        // overall time estimate will still be accurate to about 1.5%.
-        tInt = t.read_us() + 38;
+        // the clock pulse generation) to the DMA controller, which doesn't
+        // notify when that 19th pulse occurs, so we have to approximate.
+        // Based on empirical measurements, each pixel transfer in our DMA
+        // setup takes about 2us, so clocking 19 pixels takes about 38us.
+        // In addition, the ADC takes about 4us extra for the first read.
+        tInt = t.read_us() + 19*2 + 4;
         
         IF_DIAG(mainLoopIterCheckpt[9] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
     }
@@ -460,7 +478,7 @@ public:
         while (running) { }
     }
     
-    // Is a reading ready?
+    // Is the latest reading ready?
     bool ready() const { return !running; }
         
     // Clock through all pixels to clear the array.  Pulses SI at the
@@ -528,14 +546,18 @@ private:
         // clock out one extra pixel to leave A1 in the high-Z state
         clock = 1;
         clock = 0;
-    
-        // add this sample to the timing statistics (we collect the data
-        // merely to report to the config tool, for diagnostic purposes)
-        totalTime += uint32_t(t.read_us() - t0);
+        
+        // add this sample to the timing statistics (for diagnostics and
+        // performance measurement)
+        uint32_t now = t.read_us();
+        totalTime += uint32_t(now - t0);
         nRuns += 1;
         
         // the sampler is no long running
         running = false;
+        
+        // note the ending time of the transfer
+        tDone = now;
     }
     
     // DMA controller interfaces
@@ -576,6 +598,7 @@ private:
     Timer t;                  // sample timer
     uint32_t t0;              // start time (us) of current sample
     uint32_t tInt;            // start time (us) of current integration period
+    uint32_t tDone;           // end time of latest finished transfer
     uint64_t totalTime;       // total time consumed by all reads so far
     uint32_t nRuns;           // number of runs so far
 };

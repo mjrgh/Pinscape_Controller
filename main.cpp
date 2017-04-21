@@ -3811,6 +3811,21 @@ void tvRelayUpdate(uint8_t bit, bool state)
         tv_relay->write(tv_relay_state != 0);
 }
 
+// Does the current power status allow a reboot?  We shouldn't reboot
+// in certain power states, because some states are purely internal:
+// we can't get enough information from the external power sensor to 
+// return to the same state later.  Code that performs discretionary
+// reboots should always check here first, and delay any reboot until
+// we say it's okay.
+static inline bool powerStatusAllowsReboot()
+{
+    // The only safe state for rebooting is state 1, idle/default.
+    // In other states, we can't reboot, because the external sensor
+    // and latch circuit doesn't give us enough information to return
+    // to the same state later.
+    return psu2_state == 1;
+}
+
 // PSU2 Status update routine.  The main loop calls this from time 
 // to time to update the power sensing state and carry out TV ON 
 // functions.
@@ -4082,22 +4097,20 @@ void TVRelay(int mode)
 //
 NVM nvm;
 
-// Configuration save state
-const uint8_t SAVE_CONFIG_IDLE = 0;         // no config save work pending
-const uint8_t SAVE_CONFIG_ONLY = 1;         // save is pending
-const uint8_t SAVE_CONFIG_AND_REBOOT = 2;   // save is pending, reboot after save
-const uint8_t SAVE_CONFIG_REBOOT = 3;       // save done, reboot is pending
-uint8_t saveConfigState = SAVE_CONFIG_IDLE;
+// Save Config followup time, in seconds.  After a successful save,
+// we leave the success flag on in the status for this interval.  At
+// the end of the interval, we reboot the device if requested.
+uint8_t saveConfigFollowupTime;
 
-// Save Config post-processing time, in seconds.
-//
-// If saveConfigState == SAVE_CONFIG_AND_REBOOT, we reboot after this
-// time elapses.  Otherwise, we simply clear the timer and clear the
-// "succeeded" flag.
-uint8_t saveConfigPostTime;
+// is a reboot pending at the end of the config save followup interval?
+uint8_t saveConfigRebootPending;
 
 // status flag for successful config save - set to 0x40 on success
 uint8_t saveConfigSucceededFlag;
+
+// Timer for configuration change followup timer
+ExtTimer saveConfigFollowupTimer;    
+
 
 // For convenience, a macro for the Config part of the NVM structure
 #define cfg (nvm.d.c)
@@ -4164,8 +4177,12 @@ bool loadConfigFromFlash()
     return nvm_valid;
 }
 
-// save the config - returns true on success, false on failure
-bool saveConfigToFlash()
+// Save the config.  Returns true on success, false on failure.
+// 'tFollowup' is the follow-up time in seconds.  If the write is
+// successful, we'll turn on the success flag in the status reports
+// and leave it on for this interval.  If 'reboot' is true, we'll
+// also schedule a reboot at the end of the followup interval.
+bool saveConfigToFlash(int tFollowup, bool reboot)
 {
     // make sure the plunger sensor isn't busy
     waitPlungerIdle();
@@ -4174,7 +4191,25 @@ bool saveConfigToFlash()
     uint32_t addr = uint32_t(configFlashAddr());
 
     // save the data    
-    return nvm.save(iap, addr);
+    if (nvm.save(iap, addr))
+    {
+        // success - report the successful save in the status flags
+        saveConfigSucceededFlag = 0x40;
+            
+        // start the followup timer
+        saveConfigFollowupTimer.start();
+        
+        // if a reboot is pending, flag it
+        saveConfigRebootPending = reboot;
+        
+        // return success
+        return true;
+    }
+    else
+    {
+        // return failure
+        return false;
+    }        
 }
 
 // ---------------------------------------------------------------------------
@@ -4373,6 +4408,9 @@ void createPlunger()
         plungerSensor = new PlungerSensorNull();
         break;
     }
+    
+    // set the jitter filter
+    plungerSensor->setJitterWindow(cfg.plunger.jitterWindow);
 }
 
 // Global plunger calibration mode flag
@@ -4438,9 +4476,6 @@ public:
 
         // no history yet
         histIdx = 0;
-        
-        // clear the jitter filter
-        jfLow = jfHigh = 0;
     }
     
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -4459,7 +4494,7 @@ public:
         {
             // Pull the previous reading from the history
             const PlungerReading &prv = nthHist(0);
-            
+         
             // If the new reading is within 1ms of the previous reading,
             // ignore it.  We require a minimum time between samples to
             // ensure that we have a usable amount of precision in the
@@ -4806,17 +4841,14 @@ public:
             hist[histIdx] = r;
             if (++histIdx >= countof(hist))
                 histIdx = 0;
-                
-            // apply the jitter filter
-            zf = jitterFilter(z);
         }
     }
     
     // Get the current value to report through the joystick interface
     int16_t getPosition()
     {
-        // return the last filtered reading
-        return zf;
+        // return the last reading
+        return z;
     }
         
     // get the timestamp of the current joystick report (microseconds)
@@ -4910,35 +4942,6 @@ public:
     bool isFiring() { return firing == 3; }
     
 private:
-    // Apply the jitter filter
-    int jitterFilter(int z)
-    {
-        // If the new reading is within the current window, simply re-use
-        // the last filtered reading.
-        if (z >= jfLow && z <= jfHigh)
-            return zf;
-            
-        // The new reading is outside the current window.  Push the window
-        // over so that the new reading is at the outside edge.
-        if (z < jfLow)
-        {
-            // the new reading is below the current window, so move the
-            // window such that the new reading is at the bottom of the window
-            jfLow = z;
-            jfHigh = z + cfg.plunger.jitterWindow;
-        }
-        else
-        {
-            // the new reading is above the current window, so move the
-            // window such that the new reading is at the top of the window
-            jfHigh = z;
-            jfLow = z - cfg.plunger.jitterWindow;
-        }
-        
-        // use the new reading exactly as read from the sensor
-        return z;
-    }
-
     // Calibration state.  During calibration mode, we watch for release
     // events, to measure the time it takes to complete the release
     // motion; and we watch for the plunger to come to reset after a
@@ -4969,9 +4972,6 @@ private:
     // Auto-zeroing timer
     Timer autoZeroTimer;
     
-    // Current jitter filter window
-    int jfLow, jfHigh;
-
     // set a firing mode
     inline void firingMode(int m) 
     {
@@ -5074,12 +5074,9 @@ private:
     // freely.
     PlungerReading f3r;
     
-    // next raw (unfiltered) Z value to report to the joystick interface 
-    // (in joystick distance units)
+    // next Z value to report to the joystick interface (in joystick 
+    // distance units)
     int z;
-    
-    // next filtered Z value to report to the joystick interface
-    int zf;    
 };
 
 // plunger reader singleton
@@ -5414,16 +5411,15 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 // we save the *nominal* unit number 1-16 in the config                
                 uint8_t newUnitNo = (data[2] & 0x0f) + 1;
     
-                // we'll need a reset if the LedWiz unit number is changing
-                bool needReset = (newUnitNo != cfg.psUnitNo);
+                // we'll need a reboot if the LedWiz unit number is changing
+                bool reboot = (newUnitNo != cfg.psUnitNo);
                 
                 // set the configuration parameters from the message
                 cfg.psUnitNo = newUnitNo;
                 cfg.plunger.enabled = data[3] & 0x01;
                 
                 // set the flag to do the save
-                saveConfigState = needReset ? SAVE_CONFIG_AND_REBOOT : SAVE_CONFIG_ONLY;
-                saveConfigPostTime = 0;
+                saveConfigToFlash(0, reboot);
             }
             break;
             
@@ -5475,9 +5471,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
             // data[2] = delay time in seconds
             // data[3] = flags:
             //           0x01 -> do not reboot
-            saveConfigState = 
-                (data[3] & 0x01) != 0 ? SAVE_CONFIG_ONLY : SAVE_CONFIG_AND_REBOOT;
-            saveConfigPostTime = data[2];
+            saveConfigToFlash(data[2], !(data[3] & 0x01));
             break;
             
         case 7:
@@ -5579,6 +5573,11 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
         // to update, and the remaining bytes give the new value,
         // in a variable-dependent format.
         configVarSet(data);
+        
+        // If updating the jitter window (variable 19), apply it immediately
+        // to the plunger sensor object
+        if (data[1] == 19)
+            plungerSensor->setJitterWindow(cfg.plunger.jitterWindow);
     }
     else if (data[0] == 67)
     {
@@ -5836,8 +5835,10 @@ int main(void)
         // reboot.  Some PCs won't reconnect if we were left plugged in
         // during a power cycle on the PC, but fortunately a reboot on
         // the KL25Z will make the host notice us and trigger a reconnect.
+        // Don't do this if we're in a non-recoverable PSU2 power state.
         if (cfg.disconnectRebootTimeout != 0 
-            && connTimeoutTimer.read() > cfg.disconnectRebootTimeout)
+            && connTimeoutTimer.read() > cfg.disconnectRebootTimeout
+            && powerStatusAllowsReboot())
             reboot(js, false, 0);
             
         // update the PSU2 power sensing status
@@ -5932,9 +5933,6 @@ int main(void)
     
     // start the PWM update polling timer
     polledPwmTimer.start();
-    
-    // Timer for configuration change followup timer
-    ExtTimer saveConfigPostTimer;
     
     // we're all set up - now just loop, processing sensor reports and 
     // host requests
@@ -6048,7 +6046,7 @@ int main(void)
                 
                 // save the updated configuration
                 cfg.plunger.cal.calibrated = 1;
-                saveConfigToFlash();
+                saveConfigToFlash(0, false);
             }
             else if (calBtnState != 3)
             {
@@ -6264,46 +6262,33 @@ int main(void)
         }
         
         // if we have a reboot timer pending, check for completion
-        if (saveConfigPostTimer.isRunning() 
-            && saveConfigPostTimer.read() > saveConfigPostTime)
+        if (saveConfigFollowupTimer.isRunning() 
+            && saveConfigFollowupTimer.read() > saveConfigFollowupTime)
         {
             // if a reboot is pending, execute it now
-            if (saveConfigState == SAVE_CONFIG_REBOOT)
-                reboot(js);
-            
-            // done with the timer - reset it
-            saveConfigPostTimer.stop();
-            saveConfigPostTimer.reset();
-            
-            // clear the save-config success flag
-            saveConfigSucceededFlag = 0;
-        }
-                        
-        // if a config save is pending, do it now
-        if (saveConfigState == SAVE_CONFIG_ONLY  
-            || saveConfigState == SAVE_CONFIG_AND_REBOOT)
-        {
-            // save the configuration
-            if (saveConfigToFlash())
+            if (saveConfigRebootPending)
             {
-                // report success in the status flags
-                saveConfigSucceededFlag = 0x40;
-            
-                // start the followup timer
-                saveConfigPostTimer.start();
-                
-                // The save is no longer pending.  Switch to reboot pending
-                // mode if desired.
-                saveConfigState = (saveConfigState == SAVE_CONFIG_AND_REBOOT ?
-                    SAVE_CONFIG_REBOOT : SAVE_CONFIG_IDLE);
+                // Only reboot if the PSU2 power state allows it.  If it 
+                // doesn't, suppress the reboot for now, but leave the boot
+                // flags set so that we keep checking on future rounds.
+                // That way we should eventually reboot when the power
+                // status allows it.
+                if (powerStatusAllowsReboot())
+                    reboot(js);
             }
             else
             {
-                // save failed - return to idle state
-                saveConfigState = SAVE_CONFIG_IDLE;
+                // No reboot required.  Exit the timed post-save state.
+                
+                // stop and reset the post-save timer
+                saveConfigFollowupTimer.stop();
+                saveConfigFollowupTimer.reset();
+                
+                // clear the post-save success flag
+                saveConfigSucceededFlag = 0;
             }
         }
-        
+                        
         // if we're disconnected, initiate a new connection
         if (!connected)
         {
@@ -6358,9 +6343,12 @@ int main(void)
                 // rebooting Windows, cycling power on the PC, or just a lost
                 // USB connection.  Rebooting the KL25Z seems to be the most
                 // reliable way to get Windows to notice us again after one
-                // of these events and make it reconnect.
+                // of these events and make it reconnect.  Only reboot if
+                // the PSU2 power status allows it - if not, skip it on this
+                // round and keep waiting.
                 if (cfg.disconnectRebootTimeout != 0 
-                    && reconnTimeoutTimer.read() > cfg.disconnectRebootTimeout)
+                    && reconnTimeoutTimer.read() > cfg.disconnectRebootTimeout
+                    && powerStatusAllowsReboot())
                     reboot(js, false, 0);
 
                 // update the PSU2 power sensing status
@@ -6409,8 +6397,10 @@ int main(void)
                     // The reboot timeout is in effect.  If we've been incommunicado for
                     // longer than the timeout, reboot.  If we haven't reached the time
                     // limit, keep running for now, and leave the OK timer running so 
-                    // that we can continue to monitor this.
-                    if (jsOKTimer.read() > cfg.disconnectRebootTimeout)
+                    // that we can continue to monitor this.  Only reboot if the PSU2
+                    // power status allows it.
+                    if (jsOKTimer.read() > cfg.disconnectRebootTimeout
+                        && powerStatusAllowsReboot())
                         reboot(js, false, 0);
                 }
                 else

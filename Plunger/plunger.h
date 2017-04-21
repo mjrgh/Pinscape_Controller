@@ -33,7 +33,20 @@ struct PlungerReading
 class PlungerSensor
 {
 public:
-    PlungerSensor() { }
+    PlungerSensor(int nativeScale)
+    {
+        // use the joystick scale as our native scale by default
+        this->nativeScale = nativeScale;
+        
+        // figure the scaling factor
+        scalingFactor = (65535UL*65536UL) / nativeScale;
+        
+        // presume no jitter filter
+        jfWindow = 0;
+        
+        // initialize the jitter filter
+        jfLo = jfHi = jfLast = 0;
+    }
 
     // ---------- Abstract sensor interface ----------
     
@@ -62,40 +75,52 @@ public:
     
     // Read the sensor position, if possible.  Returns true on success,
     // false if it wasn't possible to take a reading.  On success, fills
-    // in 'r' with the current reading.
+    // in 'r' with the current reading and timestamp and returns true.
+    // Returns false if a reading couldn't be taken.
     //
-    // r.pos is set to the current raw sensor reading, normalized to the
-    // range 0x0000..0xFFFF.  r.t is set to the timestamp of the reading,
-    // in microseconds.
+    // r.pos is set to the normalized position reading, and r.t is set to
+    // the timestamp of the reading.
     //
-    // Also sets r.t to the microsecond timestamp of the reading, if a
-    // reading was successfully taken.  This timestamp is relative to an
-    // arbitrary zero point and rolls over when it overflows its 32-bit
-    // container (every 71.58 minutes).  Callers can use this to calculate
-    // the interval between two readings (e.g., to figure the average 
-    // velocity of the plunger between readings).
+    // The normalized position is the sensor reading, corrected for jitter,
+    // and adjusted to the abstract 0x0000..0xFFFF range.
+    // 
+    // The timestamp is the time the sensor reading was taken, relative to
+    // an arbitrary zero point.  The arbitrary zero point makes this useful
+    // only for calculating the time between readings.  Note that the 32-bit
+    // timestamp rolls over about every 71 minutes, so it should only be
+    // used for time differences between readings taken fairly close together.
+    // In practice, the higher level code only uses this for a few consecutive
+    // readings to calculate (nearly) instantaneous velocities, so the time
+    // spans are only tens of milliseconds.
     //
     // Timing requirements:  for best results, readings should be taken
-    // in well under 5ms.  There are two factors that go into this limit.
-    // The first is the joystick report rate in the main loop.  We want
-    // to send those as fast as possible to avoid any perceptible control 
-    // input lag in the pinball emulation.  "As fast as possible" is about
-    // every 10ms - that's VP's approximate sampling rate, so any faster
-    // wouldn't do any good, and could even slow things down by adding CPU 
-    // load in the Windows drivers handling the extra messages.  The second
-    // is the speed of the plunger motion.  During release events, the
-    // plunger moves in a sinusoidal pattern (back and forth) as it reaches
-    // the extreme of its travel and bounces back off the spring.  To
-    // resolve this kind of cyclical motion accurately, we have to take
-    // samples much faster than the cycle period - otherwise we encounter
-    // an effect known as aliasing, where we mistake a bounce for a small
-    // forward motion.  Tests with real plungers indicate that the bounce
-    // period is on the order of 10ms, so ideally we'd like to take
-    // samples much faster than that.
-    //
-    // Returns true on success, false on failure.  Returning false means
-    // that it wasn't possible to take a valid reading.
-    virtual bool read(PlungerReading &r) = 0;
+    // in well under 5ms.  The release motion of the physical plunger
+    // takes from 30ms to 50ms, so we need to collect samples much faster
+    // than that to avoid aliasing during the bounce.
+    bool read(PlungerReading &r)
+    {
+        // get the raw reading
+        if (readRaw(r))
+        {
+            // process it through the jitter filter
+            //$$$ r.pos = jitterFilter(r.pos);
+            
+            // adjust to the abstract scale via the scaling factor
+            r.pos = uint16_t(uint32_t((scalingFactor * r.pos) + 32768) >> 16);
+            
+            // success
+            return true;
+        }
+        else
+        {
+            // no reading is available
+            return false;
+        }
+    }
+
+    // Get a raw plunger reading.  This gets the raw sensor reading with
+    // timestamp, without jitter filtering and without any scale adjustment.
+    virtual bool readRaw(PlungerReading &r) = 0;
     
     // Begin calibration.  The main loop calls this when the user activates
     // calibration mode.  Sensors that work in terms of relative positions,
@@ -138,28 +163,105 @@ public:
         // read the current position
         int pos = 0xFFFF;
         PlungerReading r;
-        if (read(r))
+        if (readRaw(r))
         {
-            // success - scale it to 0..4095 (the generic scale used
-            // for non-imaging sensors)
-            pos = int(r.pos*4095L / 65535L);
+            // success - apply the jitter filter
+            pos = jitterFilter(r.pos);
         }
         
         // Send the common status information, indicating 0 pixels, standard
         // sensor orientation, and zero processing time.  Non-imaging sensors 
-        // usually don't have any way to detect the orientation, so they have 
-        // to rely on being installed in a pre-determined direction.  Non-
-        // imaging sensors usually have negligible analysis time (the only
-        // "analysis" is usually nothing more than a multiply to rescale an 
-        // ADC sample), so there's no point in collecting actual timing data; 
-        // just report zero.
-        js.sendPlungerStatus(0, pos, 1, getAvgScanTime(), 0);
+        // usually don't have any way to detect the orientation, so assume
+        // normal orientation (flag 0x01).  Also assume zero analysis time,
+        // as most non-image sensors don't have to do anything CPU-intensive
+        // with the raw readings (all they usually have to do is scale the
+        // value to the abstract reporting range).
+        js.sendPlungerStatus(0, pos, 0x01, getAvgScanTime(), 0);
+        js.sendPlungerStatus2(nativeScale, jfLo, jfHi, r.pos, 0);
     }
     
     // Get the average sensor scan time in microseconds
     virtual uint32_t getAvgScanTime() = 0;
         
+    // Apply the jitter filter
+    int jitterFilter(int pos)
+    {
+        // Check to see where the new reading is relative to the
+        // current window
+        if (pos < jfLo)
+        {
+            // the new position is below the current window, so move
+            // the window down such that the new point is at the bottom 
+            // of the window
+            jfLo = pos;
+            jfHi = pos + jfWindow;
+            jfLast = pos;
+            return pos;
+        }
+        else if (pos > jfHi)
+        {
+            // the new position is above the current window, so move
+            // the window up such that the new point is at the top of
+            // the window
+            jfHi = pos;
+            jfLo = pos - jfWindow;
+            jfLast = pos;
+            return pos;
+        }
+        else
+        {
+            // the new position is inside the current window, so repeat
+            // the last reading
+            return jfLast;
+        }
+    }
+    
+    // Set the jitter filter window size.  This is specified in native
+    // sensor units.
+    void setJitterWindow(int w)
+    {
+        // set the new window size
+        jfWindow = w;
+        
+        // reset the running window
+        jfHi = jfLo = jfLast;
+    }
+        
 protected:
+    // Native scale of the device.  This is the scale used for the position
+    // reading in status reports.  This lets us report the position in the
+    // same units the sensor itself uses, to avoid any rounding error 
+    // converting to an abstract scale.
+    //
+    // Image edge detection sensors use the pixel size of the image, since
+    // the position is determined by the pixel position of the shadow in
+    // the image.  Quadrature sensors and other sensors that report the
+    // distance in terms of physical distance units should use the number
+    // of quanta in the approximate total plunger travel distance of 3".
+    // For example, the VL6180X uses millimeter quanta, so can report
+    // about 77 quanta over 3"; a quadrature sensor that reports at 1/300"
+    // intervals has about 900 quanta over 3".  Absolute encoders (e.g., 
+    // bar code sensors) should use the bar code range.
+    //
+    // Sensors that are inherently analog (e.g., potentiometers, analog
+    // distance sensors) can quantize on any arbitrary scale.  In most cases,
+    // it's best to use the same 0..65535 scale used for the regular plunger
+    // reports.
+    uint16_t nativeScale;
+    
+    // Scaling factor to convert native readings to abstract units on the
+    // 0x0000..0xFFFF scale used in the higher level sensor-independent
+    // code.  Multiply a raw sensor position reading by this value to
+    // get the equivalent value on the abstract scale.  This is expressed 
+    // as a fixed-point real number with a scale of 65536: calculate it as
+    //
+    //   (65535U*65536U) / (nativeScale - 1);
+    uint32_t scalingFactor;
+    
+    // Jitter filtering
+    int jfWindow;                // window size, in native sensor units
+    int jfLo, jfHi;              // bounds of current window
+    int jfLast;                  // last filtered reading
 };
 
 #endif /* PLUNGER_H */
