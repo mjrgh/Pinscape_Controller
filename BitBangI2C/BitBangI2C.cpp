@@ -16,7 +16,7 @@
 // dprintf() = general debug diagnostics (printed only in case 2)
 // eprintf() = error diagnostics (printed in case 1 and above)
 //
-#define BBI2C_DEBUG 1
+#define BBI2C_DEBUG 0
 #if BBI2C_DEBUG
 # define eprintf(...) printf(__VA_ARGS__)
 # if BBI2C_DEBUG >= 2
@@ -46,11 +46,14 @@ static const char *dbgbytes(const uint8_t *bytes, size_t len)
 //
 // Bit-bang I2C implementation
 //
-BitBangI2C::BitBangI2C(PinName sda, PinName scl) :
-    sclPin(scl), sdaPin(sda)
+BitBangI2C::BitBangI2C(PinName sda, PinName scl, bool internalPullup) :
+    sdaPin(sda, internalPullup), sclPin(scl, internalPullup)
 {
     // set the default frequency to 100kHz
     frequency(100000);
+    
+    // we're initially in a stop
+    inStop = true;
 }
 
 void BitBangI2C::frequency(uint32_t freq)
@@ -62,72 +65,101 @@ void BitBangI2C::frequency(uint32_t freq)
     if (freq <= 100000)
     {
         // standard mode I2C bus - up to 100kHz
+        
+        // nanosecond parameters
         tLow = calcHiResWaitTime(4700);
         tHigh = calcHiResWaitTime(4000);
-        tBuf = calcHiResWaitTime(4700);
         tHdSta = calcHiResWaitTime(4000);
         tSuSta = calcHiResWaitTime(4700);
         tSuSto = calcHiResWaitTime(4000);
         tAck = calcHiResWaitTime(300);
-        tData = calcHiResWaitTime(300);
         tSuDat = calcHiResWaitTime(250);
+        tBuf = calcHiResWaitTime(4700);
     }
     else if (freq <= 400000)
     {
         // fast mode I2C - up to 400kHz
+
+        // nanosecond parameters
         tLow = calcHiResWaitTime(1300);
         tHigh = calcHiResWaitTime(600);
-        tBuf = calcHiResWaitTime(1300);
         tHdSta = calcHiResWaitTime(600);
         tSuSta = calcHiResWaitTime(600);
         tSuSto = calcHiResWaitTime(600);
         tAck = calcHiResWaitTime(100);
-        tData = calcHiResWaitTime(100);
         tSuDat = calcHiResWaitTime(100);
+        tBuf = calcHiResWaitTime(1300);
     }
     else
     {
         // fast mode plus - up to 1MHz
+
+        // nanosecond parameters
         tLow = calcHiResWaitTime(500);
         tHigh = calcHiResWaitTime(260);
-        tBuf = calcHiResWaitTime(500);
         tHdSta = calcHiResWaitTime(260);
         tSuSta = calcHiResWaitTime(260);
         tSuSto = calcHiResWaitTime(260);
         tAck = calcHiResWaitTime(50);
-        tData = calcHiResWaitTime(50);
         tSuDat = calcHiResWaitTime(50);
+        tBuf = calcHiResWaitTime(500);
     }
 }
 
 void BitBangI2C::start() 
 {    
-    // take clock and data high
-    sclHi();
-    sdaHi();
-    hiResWait(tBuf);
+    // check to see if we're starting after a stop, or if this is a
+    // repeated start
+    if (inStop)
+    {
+        // in a stop - make sure we waited for the minimum hold time
+        hiResWait(tBuf);
+    }
+    else
+    {
+        // repeated start - take data high
+        sdaHi();
+        hiResWait(tSuDat);
+        
+        // take clock high
+        sclHi();
+        
+        // wait for the minimum setup period
+        hiResWait(tSuSta);
+    }
     
     // take data low
     sdaLo();
-    hiResWait(tHdSta);
     
-    // take clock low
+    // wait for the setup period and take clock low
+    hiResWait(tHdSta);
     sclLo();
-    hiResWait(tLow);
+
+    // wait for the low period
+    hiResWait(tLow);    
+    
+    // no longer in a stop
+    inStop = false;
 }
 
 void BitBangI2C::stop() 
 {
-    // take SDA low
-    sdaLo();
+    // if we're not in a stop, enter one
+    if (!inStop)
+    {
+        // take SDA low
+        sdaLo();
 
-    // take SCL high
-    sclHi();
-    hiResWait(tSuSto);
-    
-    // take SDA high
-    sdaHi();
-    hiResWait(tBuf);
+        // take SCL high
+        sclHi();
+        hiResWait(tSuSto);
+
+        // take SDA high
+        sdaHi();
+        
+        // we're in a stop
+        inStop = true;
+    }
 }
 
 bool BitBangI2C::wait(uint32_t timeout_us)
@@ -233,13 +265,25 @@ int BitBangI2C::write(uint8_t data)
     // write the bits, most significant first
     for (int i = 0 ; i < 8 ; ++i, data <<= 1)
         writeBit(data & 0x80);
-
-    // read and return the ACK bit
-    return readBit();
+        
+    // release SDA so the device can control it
+    sdaHi();
+        
+    // read the ACK bit
+    int ack = readBit();
+    
+    // take SDA low again
+    sdaLo();
+            
+    // return success if ACK was 0
+    return ack;
 }
 
 int BitBangI2C::read(bool ack) 
 {
+    // take SDA high before reading
+    sdaHi();
+
     // read 8 bits, most significant first
     uint8_t data = 0;
     for (int i = 0 ; i < 8 ; ++i)
@@ -247,6 +291,9 @@ int BitBangI2C::read(bool ack)
 
     // switch to output mode and send the ACK bit
     writeBit(!ack);
+
+    // release SDA
+    sdaHi();
 
     // return the data byte we read
     return data;
@@ -260,27 +307,29 @@ int BitBangI2C::readBit()
     // Wait (within reason) for it to actually read as high.  The device
     // can intentionally pull the clock line low to tell us to wait while
     // it's working on preparing the data for us.
-    Timer t;
-    t.start();
-    while (sclPin.read() == 0 && t.read_us() < 500000) ;
-    
-    // if the clock isn't high, we timed out
-    if (sclPin.read() == 0)
+    int t = 0;
+    do
     {
-        eprintf("i2c.readBit, clock stretching timeout\r\n");
-        return 0;
+        // if the clock is high, we're ready to go
+        if (sclPin.read())
+        {
+            // wait for the data setup time
+            hiResWait(tSuDat);
+            
+            // read the bit    
+            bool bit = sdaPin.read();
+            
+            // take the clock low again
+            sclLo();
+            hiResWait(tLow);
+            
+            // return the bit
+            return bit;
+        }
     }
-    
-    // wait until the clock interval is up
-    while (t.read_us() < clkPeriod_us);
-    
-    // read the bit    
-    bool bit = sdaPin.read();
-    
-    // take the clock low again
-    sclLo();
-    hiResWait(tLow);
-    
-    // return the bit
-    return bit;
+    while (t++ < 100000);
+
+    // we timed out
+    eprintf("i2c.readBit, clock stretching timeout\r\n");
+    return 0;
 }

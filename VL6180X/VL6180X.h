@@ -7,23 +7,6 @@
 #include "BitBangI2C.h"
 
 
-class MyI2C: public I2C
-{
-public:
-    MyI2C(PinName sda, PinName scl) : I2C(sda, scl) { }
-    
-    int write(int addr, const uint8_t *data, size_t len, bool repeated = false)
-    {
-        return I2C::write(addr, (const char *)data, len, repeated);
-    }
-    int read(int addr, uint8_t *data, size_t len, bool repeated = false)
-    {
-        return I2C::read(addr, (char *)data, len, repeated);
-    }
-    
-    void reset() { }
-};
-
 #define VL6180X_IDENTIFICATION_MODEL_ID              0x0000
 #define VL6180X_IDENTIFICATION_MODEL_REV_MAJOR       0x0001
 #define VL6180X_IDENTIFICATION_MODEL_REV_MINOR       0x0002
@@ -135,12 +118,19 @@ class VL6180X
 {
 public:
     // Set up the interface with the given I2C pins, I2C address, and
-    // the GPIO0 pin (for resetting the sensor at startup).
+    // the GPIO0 pin (for resetting the sensor at startup).  
+    //
+    // If 'internalPullups' is true, we'll set the I2C SDA/SCL pins to 
+    // enable the internal pullup resistors.  Set this to false if you're
+    // using your own external pullup resistors on the lines.  External
+    // pullups are better if you're attaching more than one device to the
+    // same I2C bus; the internal pullups are fine for a single device.
     //
     // Note that the power-on default I2C address is always 0x29.  The
     // address can be changed during a session, but it's not saved 
     // persistently; it always resets to 0x29 on the next power cycle.
-    VL6180X(PinName sda, PinName scl, uint8_t addr, PinName gpio0);
+    VL6180X(PinName sda, PinName scl, uint8_t addr, PinName gpio0,
+        bool internalPullups);
     
     // destruction
     ~VL6180X();
@@ -159,7 +149,15 @@ public:
 
     // Get TOF range distance in mm.  Returns 0 on success, a device
     // "range error code" (>0) on failure, or -1 on timeout.
-    int getRange(uint8_t &distance, uint32_t timeout_us);
+    //
+    // 'tMid' is the timestamp in microseconds of the midpoint of the
+    // sample, relative to an arbitrary zero point.  This can be used
+    // to construct a timeline of successive readings, such as for
+    // velocity calculations.  'dt' is the time the sensor took to
+    // collect the sample.
+    int getRange(
+        uint8_t &distance, uint32_t &tMid, uint32_t &dt, 
+        uint32_t timeout_us);
     
     // get range statistics
     void getRangeStats(VL6180X_RangeStats &stats);
@@ -170,17 +168,15 @@ public:
     // is a sample ready?
     bool rangeReady();
 
-    // get ambient light level in lux
-    float getAmbientLight(VL6180X_ALS_Gain gain);
-
     // get identification data
     void getID(VL6180X_ID &id);
 
-    // Change the address of the device.  Returns the new address.
-    uint8_t changeAddress(uint8_t newAddress);
- 
-
 protected:
+    // READOUT_AVERAGING_SAMPLE_PERIOD setting.  Each unit represents
+    // 64.5us of added time beyond the 1.3ms fixed base period.  The
+    // default is 48 units.
+    static const int averagingSamplePeriod = 48;
+
     // I2C interface to device
     BitBangI2C i2c;
     
@@ -192,6 +188,15 @@ protected:
     
     // current distance mode: 0=single shot, 1=continuous
     bool distMode;
+    
+    // range reading is in progress
+    bool rangeStarted;
+    
+    // sample timer
+    Timer sampleTimer;
+
+    // time (from Timer t) of start of last range sample
+    uint32_t tSampleStart;
 
     // read registers
     uint8_t readReg8(uint16_t regAddr);

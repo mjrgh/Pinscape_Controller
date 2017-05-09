@@ -172,6 +172,21 @@
 //                status as of this reading.
 //    bytes 9:10 = Raw sensor reading before jitter filter was applied.
 //    bytes 11:12 = Auto-exposure time in microseconds
+//
+// An optional third message provides additional information specifically
+// for bar-code sensors:
+//
+//    bytes 0:1 = 0x87FF
+//    byte  2   = 2 -> bar code status report
+//    byte  3   = number of bits in bar code
+//    byte  4   = bar code type:
+//                  1 = Gray code/Manchester bit coding
+//    bytes 5:6 = pixel offset of first bit
+//    byte  7   = width in pixels of each bit
+//    bytes 8:9 = raw bar code bits
+//    bytes 10:11 = mask of successfully read bar code bits; a '1' bit means
+//                that the bit was read successfully, '0' means the bit was
+//                unreadable
 //   
 //
 // If the sensor is an imaging sensor type, this will be followed by a
@@ -182,7 +197,7 @@
 // zero, so obviously no pixel packets will follow.  If the "calibration
 // active" bit in the flags byte is set, no pixel packets are sent even
 // if the sensor is an imaging type, since the transmission time for the
-// pixels would intefere with the calibration process.  If pixels are sent,
+// pixels would interfere with the calibration process.  If pixels are sent,
 // they're sent in order starting at the first pixel.  The format of each 
 // pixel packet is:
 //
@@ -898,7 +913,7 @@
 //       finishes.  This allows TVs to be turned on via IR remotes codes rather than
 //       hard-wiring them through the relay.  The relay can be omitted in this case.
 //
-// 10 -> TLC5940NT setup.  This chip is an external PWM controller, with 32 outputs
+// 10 -> TLC5940NT setup.  This chip is an external PWM controller, with 16 outputs
 //       per chip and a serial data interface that allows the chips to be daisy-
 //       chained.  We can use these chips to add an arbitrary number of PWM output 
 //       ports for the LedWiz emulation.
@@ -1072,6 +1087,44 @@
 //
 //       byte 3:4 = window size in joystick units, little-endian
 //
+// 20 -> Plunger bar code setup.  Sets parameters applicable only to bar code
+//       sensor types.
+//
+//       bytes 3:4 = Starting pixel offset of bar code (margin width)
+//
+// 21 -> TLC59116 setup.  This chip is an external PWM controller with 16
+//       outputs per chip and an I2C bus interface.  Up to 14 of the chips
+//       can be connected to a single bus.  This chip is a successor to the 
+//       TLC5940 with a more modern design and some nice improvements, such 
+//       as glitch-free startup and a standard (I2C) physical interface.
+//
+//       Each chip has a 7-bit I2C address.  The top three bits of the
+//       address are fixed in the chip itself and can't be configured, but
+//       the low four bits are configurable via the address line pins on
+//       the chip, A3 A2 A1 A0.  Our convention here is to ignore the fixed
+//       three bits and refer to the chip address as just the A3 A2 A1 A0
+//       bits.  This gives each chip an address from 0 to 15.
+//
+//       I2C allows us to discover the attached chips automatically, so in
+//       principle we don't need to know which chips will be present.  
+//       However, it's useful for the config tool to know which chips are
+//       expected so that it can offer them in the output port setup UI.
+//       We therefore provide a bit mask specifying the enabled chips.  Each
+//       bit specifies whether the chip at the corresponding address is
+//       present: 0x0001 is the chip at address 0, 0x0002 is the chip at
+//       address 1, etc.  This is mostly for the config tool's use; we only
+//       use it to determine if TLC59116 support should be enabled at all,
+//       by checking if it's non-zero.
+//
+//       To disable support, set the populated chip mask to 0.  The pin
+//       assignments are all ignored in this case.
+//
+//          bytes 3:4 = populated chips, as a bit mask (OR in 1<<address
+//                   each populated address)
+//          byte 5 = SDA (any GPIO pin)
+//          byte 6 = SCL (any GPIO pin)
+//          byte 7 = RESET (any GPIO pin)
+//
 //
 // SPECIAL DIAGNOSTICS VARIABLES:  These work like the array variables below,
 // the only difference being that we don't report these in the number of array
@@ -1225,42 +1278,63 @@
 //        regardless of the settings for post 34 and higher.
 //
 //        The bytes of the message are:
+//
 //          byte 3 = LedWiz port number (1 to MAX_OUT_PORTS)
+//
 //          byte 4 = physical output type:
+//
 //                    0 = Disabled.  This output isn't used, and isn't visible to the
 //                        LedWiz/DOF software on the host.  The FIRST disabled port
 //                        determines the number of ports visible to the host - ALL ports
 //                        after the first disabled port are also implicitly disabled.
+//
 //                    1 = GPIO PWM output: connected to GPIO pin specified in byte 5,
 //                        operating in PWM mode.  Note that only a subset of KL25Z GPIO
 //                        ports are PWM-capable.
+//
 //                    2 = GPIO Digital output: connected to GPIO pin specified in byte 5,
 //                        operating in digital mode.  Digital ports can only be set ON
 //                        or OFF, with no brightness/intensity control.  All pins can be
 //                        used in this mode.
+//
 //                    3 = TLC5940 port: connected to TLC5940 output port number specified 
 //                        in byte 5.  Ports are numbered sequentially starting from port 0
 //                        for the first output (OUT0) on the first chip in the daisy chain.
+//
 //                    4 = 74HC595 port: connected to 74HC595 output port specified in byte 5.
 //                        As with the TLC5940 outputs, ports are numbered sequentially from 0
 //                        for the first output on the first chip in the daisy chain.
+//
 //                    5 = Virtual output: this output port exists for the purposes of the
 //                        LedWiz/DOF software on the host, but isn't physically connected
 //                        to any output device.  This can be used to create a virtual output
 //                        for the DOF ZB Launch Ball signal, for example, or simply as a
 //                        placeholder in the LedWiz port numbering.  The physical output ID 
 //                        (byte 5) is ignored for this port type.
+//
+//                    6 = TLC59116 output: connected to the TLC59116 output port specified
+//                        in byte 5.  The high four bits of this value give the chip's
+//                        I2C address, specifically the A3 A2 A1 A0 bits configured in
+//                        the hardware.  (A chip's I2C address is actually 7 bits, but
+//                        the three high-order bits are fixed, so we don't bother including
+//                        those in the byte 5 value).  The low four bits of this value
+//                        give the output port number on the chip.  For example, 0x37
+//                        specifies chip 3 (the one with A3 A2 A1 A0 wired as 0 0 1 1),
+//                        output #7 on that chip.  Note that outputs are numbered from 0
+//                        to 15 (0xF) on each chip.
+//
 //          byte 5 = physical output port, interpreted according to the value in byte 4
+//
 //          byte 6 = flags: a combination of these bit values:
 //                    0x01 = active-high output (0V on output turns attached device ON)
 //                    0x02 = noisemaker device: disable this output when "night mode" is engaged
 //                    0x04 = apply gamma correction to this output
 //
-//        Note that the on-board LED segments can be used as LedWiz output ports.  This
+//        Note that the KL25Z's on-board LEDs can be used as LedWiz output ports.  This
 //        is useful for testing a new installation with DOF or other PC software without
-//        having to connect any external devices.  Assigning the on-board LED segments to
-//        output ports overrides their normal status/diagnostic display use, so the normal
-//        status flash pattern won't appear when they're used this way.
+//        having to connect any external devices.  Assigning the on-board LEDs as output
+//        ports overrides their normal status/diagnostic display use, so the normal status 
+//        flash pattern won't appear when they're used this way.
 //
 
 

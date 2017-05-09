@@ -176,6 +176,18 @@ public:
       */
     bool sendPlungerStatus2(
         int nativeScale, int jitterLo, int jitterHi, int rawPos, int axcTime);
+        
+    /**
+     * Send a barcode plunger status report header.
+     *
+     * @param nbits number of bits in bar code
+     * @param codetype bar code type (1=Gray code/Manchester bit coding)
+     * @param pixofs pixel offset of first bit
+     * @param raw raw bar code bits
+     * @param mask mask of successfully read bar code bits
+     */
+    bool sendPlungerStatusBarcode(
+        int nbits, int codetype, int startOfs, int pixPerBit, int raw, int mask);
     
     /**
      * Write an exposure report.  We'll fill out a report with as many pixels as

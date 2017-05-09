@@ -1,48 +1,43 @@
 // Pinscape Controller Configuration
 //
-// New for 2016:  dynamic configuration!  To configure the controller,
-// connect the KL25Z to your PC, install the STANDARD pre-compiled .bin 
-// file, and run the Windows config tool.  There's no need (as there was in 
-// the past) to edit the source code or to compile a custom version of the 
-// binary just to customize setup options.
+// !!! ATTENTION !!! 
+// If you've come here on advice in a forum to change a GPIO setting or 
+// to #define a macro to enable the expansion boards, >>>STOP NOW<<<.  The 
+// advice you found is out of date and no longer applies.  You don't need 
+// to edit this file or recompile the firmware, and you shouldn't.  Instead,
+// use the standard firmware, and set options using the Pinscape Config Tool
+// on your Windows PC.  All options that were formerly configurable by 
+// editing this file can be selected with the Config Tool.  That's much 
+// cleaner and easier than editing the source code, and it eliminates the
+// problem of re-synchronizing a private copy of the source code with future 
+// updates.  With the config tool, you only need the standard firmware build, 
+// so future updates are a simple matter of downloading the latest version.
 //
-// In earlier versions, configuration was handled mostly with #ifdef and
-// similar constructs.  To customize the setup, you had to create a private 
-// forked copy of the source code, edit the constants defined in config.h, 
-// and compile a custom binary.  That's no longer necessary!
 //
-// The new approach is to do everything (or as much as possible, anyway)
-// via the Windows config tool.  You shouldn't have to recompile a custom
-// version just to make a configurable change.  Of course, you're still free
-// to create a custom version if you want to add entirely new features or 
-// make changes that go beyond what the setup tool exposes.
+// IN THE PAST (but NOT NOW - see above), configuration was handled mostly 
+// with #defines and #ifdefs.  To customize the setup, you had to create a 
+// private forked copy of the source code, edit the constants defined in 
+// config.h, and compile a custom binary.  That's no longer necessary because
+// the config tool lets you set all configurable options dynamically.  Of 
+// course, you're still free to create a custom version if you want to add 
+// entirely new features or make changes that go beyond the configurable
+// options.
 //
+#ifndef CONFIG_H
+#define CONFIG_H
 
-// Pre-packaged configuration selection.
+
+// TEST SETTINGS - FOR DEBUGGING PURPOSES ONLY.  The macros below select
+// special option combinations for debugging purposes.
 //
-// IMPORTANT!  If you just want to create a custom configuration, DON'T
-// modify this file, DON'T use these macros, and DON'T compiler on mbed.
-// Instead, use the unmodified standard build and configure your system
-// using the Pinscape Config Tool on Windows.  That's easier and better
-// because the config tool will be able to back up your settings to a
-// local file on your PC, and will automatically preserve your settings
-// across upgrades.  You won't have to worry about merging your changes
-// into every update of the repository source code, since you'll never
-// have to change the source code.
-//
-// The different configurations here are purely for testing purposes.  
-// The standard build uses the STANDARD_CONFIG settings, which are the 
-// same as the original version where you had to modify config.h by hand 
-// to customize your system.
-// 
+// IMPORTANT!  If you're trying to create a custom configuration because
+// you have a pin conflict or because you're using the expansion boards,
+// DON'T modify this file, DON'T use these macros, and DON'T recompile 
+// the firmware.  Use the Config Tool on your Windows PC instead.
 #define STANDARD_CONFIG       1     // standard settings, based on v1 base settings
 #define TEST_CONFIG_EXPAN     0     // configuration for the expansion boards
 #define TEST_KEEP_PRINTF      0     // for debugging purposes, keep printf() enabled
                                     // by leaving the SDA UART GPIO pins unallocated
-
-
-#ifndef CONFIG_H
-#define CONFIG_H
 
 // Plunger type codes
 // NOTE!  These values are part of the external USB interface.  New
@@ -143,6 +138,7 @@ const int PortTypeTLC5940      = 3;      // TLC5940 port
 const int PortType74HC595      = 4;      // 74HC595 port
 const int PortTypeVirtual      = 5;      // Virtual port - visible to host software, but not connected 
                                          //  to a physical output
+const int PortTypeTLC59116     = 6;      // TLC59116 port
 
 // LedWiz output port flag bits
 const uint8_t PortFlagActiveLow  = 0x01; // physical output is active-low
@@ -156,10 +152,22 @@ const int MAX_OUT_PORTS = 128;
 struct LedWizPortCfg
 {
     uint8_t typ;        // port type:  a PortTypeXxx value
-    uint8_t pin;        // physical output pin:  for a GPIO port, this is an index in the 
-                        // USB-to-PinName mapping list; for a TLC5940 or 74HC595 port, it's 
-                        // the output number, starting from 0 for OUT0 on the first chip in 
-                        // the daisy chain.  For inactive and virtual ports, it's unused.
+    uint8_t pin;        // physical output pin:  
+                        //
+                        //  - for a GPIO port, this is an index in the 
+                        //    USB-to-PinName mapping list
+                        //
+                        //  - for a TLC5940 or 74HC595 port, it's the output
+                        //    number in the overall daisy chain, starting 
+                        //    from 0 for OUT0 on the first chip in the chain
+                        //
+                        //  - for a TLC59116, the high 4 bits are the chip
+                        //    address (the low 4 bits of the address only),
+                        //    and the low 4 bits are the output number on
+                        //    the chip
+                        //
+                        //  - for inactive and virtual ports, this is unused
+                        //
     uint8_t flags;      // flags:  a combination of PortFlagXxx values
     
     void set(uint8_t typ, uint8_t pin, uint8_t flags = 0)
@@ -331,6 +339,13 @@ struct Config
         hc595.latch = PINNAME_TO_WIRE(PTA12);
         hc595.ena = PINNAME_TO_WIRE(PTD4);
         
+        // disable all TLC59116 chips by default
+        tlc59116.chipMask = 0;
+        
+        // Default TLC59116 pin assignments
+        tlc59116.sda = PINNAME_TO_WIRE(PTC6);
+        tlc59116.scl = PINNAME_TO_WIRE(PTC5);
+        tlc59116.reset = PINNAME_TO_WIRE(PTC10);
         
         // Default IR hardware pin assignments.  On the expansion boards,
         // the sensor is connected to PTA13, and the emitter LED is on PTC9.
@@ -618,6 +633,12 @@ struct Config
         // physical travel.  Zero disables the jitter filter.
         uint16_t jitterWindow;
         
+        // bar code sensor parameters
+        struct
+        {
+            uint16_t startPix;  // starting pixel offset
+        } barCode;
+        
         // ZB LAUNCH BALL button setup.
         //
         // This configures the "ZB Launch Ball" feature in DOF, based on Zeb's (of 
@@ -757,7 +778,7 @@ struct Config
     struct
     {
         // number of TLC5940NT chips connected in daisy chain
-        int nchips;
+        uint8_t nchips;
         
         // pin connections (wire pin IDs)
         uint8_t sin;        // Serial data - must connect to SPIO MOSI -> PTC6 or PTD2
@@ -774,7 +795,7 @@ struct Config
     struct
     {
         // number of 74HC595 chips attached in daisy chain
-        int nchips;
+        uint8_t nchips;
         
         // pin connections
         uint8_t sin;        // Serial data - use any GPIO pin
@@ -783,6 +804,21 @@ struct Config
         uint8_t ena;        // Enable signal - use any GPIO pin
     
     } hc595;
+    
+    // --- TLC59116 PWM Controller Chip Setup --
+    struct
+    {
+        // Chip mask.  Each bit represents an enabled chip at the
+        // corresponding 4-bit address (i.e., bit 1<<addr represents
+        // the chip at 'addr').
+        uint16_t chipMask;
+        
+        // pin connections
+        uint8_t sda;        // I2C SDA
+        uint8_t scl;        // I2C SCL
+        uint8_t reset;      // !RESET (hardware reset line, active low)
+        
+    } tlc59116;
     
     
     // --- IR Remote Control Hardware Setup ---

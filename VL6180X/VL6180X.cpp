@@ -3,16 +3,19 @@
 #include "mbed.h"
 #include "VL6180X.h"
 
-VL6180X::VL6180X(PinName sda, PinName scl, uint8_t addr, PinName gpio0)
-    : i2c(sda, scl), gpio0Pin(gpio0)
+VL6180X::VL6180X(PinName sda, PinName scl, uint8_t addr, PinName gpio0, 
+    bool internalPullups)
+    : i2c(sda, scl, internalPullups), gpio0Pin(gpio0)
 {
     // remember the address
     this->addr = addr;
     
     // start in single-shot distance mode
     distMode = 0;
+    rangeStarted = false;
     
-    // initially reset the sensor
+    // initially reset the sensor by holding GPIO0/CE low
+    gpio0Pin.mode(PullNone);
     gpio0Pin.output();
     gpio0Pin.write(0);
 }
@@ -28,10 +31,10 @@ bool VL6180X::init()
     gpio0Pin.write(0);
     wait_us(10000);
     
-    // release reset to allow the sensor to reboot
+    // release reset and allow 10ms for the sensor to reboot
     gpio0Pin.input();
     wait_us(10000);
-    
+        
     // reset the I2C bus
     i2c.reset();
     
@@ -40,7 +43,7 @@ bool VL6180X::init()
     t.start();
     while (readReg8(VL6180X_SYSTEM_FRESH_OUT_OF_RESET) != 1)
     {
-        if (t.read_us() > 10000000)
+        if (t.read_us() > 1000000)
             return false;
     }
     
@@ -85,7 +88,10 @@ bool VL6180X::init()
     
     // allow time to settle
     wait_us(1000);
-    
+        
+    // start the sample timer 
+    sampleTimer.start();
+
     // success
     return true;
 }
@@ -94,20 +100,16 @@ void VL6180X::setDefaults()
 {
     writeReg8(VL6180X_SYSTEM_GROUPED_PARAMETER_HOLD, 0x01);         // set parameter hold while updating settings
     
-    writeReg8(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, (4<<3) | 4);    // Enable interrupts from range and ambient integrator
-    writeReg8(VL6180X_SYSTEM_MODE_GPIO1, 0x10);                     // Set GPIO1 low when sample complete
+    writeReg8(VL6180X_SYSTEM_INTERRUPT_CONFIG_GPIO, 4);             // Enable interrupts from range only
+    writeReg8(VL6180X_SYSTEM_MODE_GPIO1, 0x00);                     // Disable GPIO1
     writeReg8(VL6180X_SYSRANGE_VHV_REPEAT_RATE, 0xFF);              // Set auto calibration period (Max = 255)/(OFF = 0)
     writeReg8(VL6180X_SYSRANGE_INTERMEASUREMENT_PERIOD, 0x09);      // Set default ranging inter-measurement period to 100ms
-    writeReg8(VL6180X_SYSRANGE_MAX_CONVERGENCE_TIME, 0x32);         // Max range convergence time 48ms
-    writeReg8(VL6180X_SYSRANGE_RANGE_CHECK_ENABLES, 0x11);          // S/N enable, ignore disable, early convergence test enable
-    writeReg16(VL6180X_SYSRANGE_EARLY_CONVERGENCE_ESTIMATE, 0x7B);  // abort range measurement if convergence rate below this value
-
-    writeReg8(VL6180X_SYSALS_INTERMEASUREMENT_PERIOD, 0x0A);        // Set default ALS inter-measurement period to 100ms
-    writeReg8(VL6180X_SYSALS_ANALOGUE_GAIN, 0x46);                  // Set the ALS gain
-    writeReg16(VL6180X_SYSALS_INTEGRATION_PERIOD, 0x63);            // ALS integration time 100ms
-    
-    writeReg8(VL6180X_READOUT_AVERAGING_SAMPLE_PERIOD, 0x30);       // Sample averaging period (1.3ms + N*64.5us)
-    writeReg8(VL6180X_FIRMWARE_RESULT_SCALER, 0x01);
+    writeReg8(VL6180X_SYSRANGE_MAX_CONVERGENCE_TIME, 63);           // Max range convergence time 63ms
+    writeReg8(VL6180X_SYSRANGE_RANGE_CHECK_ENABLES, 0x00);          // S/N disable, ignore disable, early convergence test disable
+    writeReg16(VL6180X_SYSRANGE_EARLY_CONVERGENCE_ESTIMATE, 0x00);  // abort range measurement if convergence rate below this value
+    writeReg8(VL6180X_READOUT_AVERAGING_SAMPLE_PERIOD, averagingSamplePeriod);  // Sample averaging period (1.3ms + N*64.5us)
+    writeReg8(VL6180X_SYSRANGE_THRESH_LOW, 0x00);                   // low threshold
+    writeReg8(VL6180X_SYSRANGE_THRESH_HIGH, 0xff);                  // high threshold
 
     writeReg8(VL6180X_SYSTEM_GROUPED_PARAMETER_HOLD, 0x00);         // end parameter hold
 
@@ -118,7 +120,7 @@ void VL6180X::setDefaults()
     while (readReg8(VL6180X_SYSRANGE_VHV_RECALIBRATE) != 0)
     {
         // if we've been waiting too long, abort
-        if (t.read_us() > 1000000)
+        if (t.read_us() > 100000)
             break;
     }
 }
@@ -141,25 +143,7 @@ void VL6180X::getID(struct VL6180X_ID &id)
     id.manufDate.mm = (time % 3600) / 60;
     id.manufDate.ss = time % 60;
 }
- 
- 
-uint8_t VL6180X::changeAddress(uint8_t newAddress)
-{  
-    // do nothing if the address is the same or it's out of range
-    if (newAddress == addr || newAddress > 127)
-        return addr;
 
-    // set the new address    
-    writeReg8(VL6180X_I2C_SLAVE_DEVICE_ADDRESS, newAddress);
-    
-    // read it back and store it
-    addr = readReg8(VL6180X_I2C_SLAVE_DEVICE_ADDRESS); 
-    
-    // return the new address
-    return addr;
-}
-  
-  
 void VL6180X::continuousDistanceMode(bool on)
 {
     if (distMode != on)
@@ -184,31 +168,48 @@ void VL6180X::continuousDistanceMode(bool on)
 
 bool VL6180X::rangeReady()
 {
-    return (readReg8(VL6180X_RESULT_INTERRUPT_STATUS_GPIO) & 0x07) == 4;
+    // check if the status register says a sample is ready (bits 0-2/0x07)
+    // or an error has occurred (bits 6-7/0xC0)
+    return ((readReg8(VL6180X_RESULT_INTERRUPT_STATUS_GPIO) & 0xC7) != 0);
 }
  
 void VL6180X::startRangeReading()
 {
-    writeReg8(VL6180X_SYSRANGE_START, 0x01);
+    // start a new range reading if one isn't already in progress
+    if (!rangeStarted)
+    {
+        tSampleStart = sampleTimer.read_us();
+        writeReg8(VL6180X_SYSTEM_INTERRUPT_CLEAR, 0x07);
+        writeReg8(VL6180X_SYSRANGE_START, 0x00);
+        writeReg8(VL6180X_SYSRANGE_START, 0x01);
+        rangeStarted = true;
+    }
 }
 
-int VL6180X::getRange(uint8_t &distance, uint32_t timeout_us)
+int VL6180X::getRange(uint8_t &distance, uint32_t &tMid, uint32_t &dt, uint32_t timeout_us)
 {
-    if (!rangeReady())
-        writeReg8(VL6180X_SYSRANGE_START, 0x01);
+    // start a reading if one isn't already in progress
+    startRangeReading();
+    
+    // we're going to wait until this reading ends, so consider the
+    // 'start' command consumed, no matter what happens next
+    rangeStarted = false;
     
     // wait for the sample
     Timer t;
     t.start();
     for (;;)
     {
-        // if the GPIO pin is high, the sample is ready
+        // check for a sample
         if (rangeReady())
             break;
             
         // if we've exceeded the timeout, return failure
         if (t.read_us() > timeout_us)
+        {
+            writeReg8(VL6180X_SYSRANGE_START, 0x00);
             return -1;
+        }
     }
     
     // check for errors
@@ -216,6 +217,22 @@ int VL6180X::getRange(uint8_t &distance, uint32_t timeout_us)
     
     // read the distance
     distance = readReg8(VL6180X_RESULT_RANGE_VAL);
+    
+    // Read the convergence time, and compute the overall sample time.
+    // Per the data sheet, the total execution time is the sum of the
+    // fixed 3.2ms pre-calculation time, the convergence time, and the
+    // readout averaging time.  We can query the convergence time for
+    // each reading from the sensor.  The averaging time is a controlled
+    // by the READOUT_AVERAGING_SAMPLE_PERIOD setting, which we set to
+    // our constant value averagingSamplePeriod.
+    dt = 
+        3200                                                // fixed 3.2ms pre-calculation period
+        + readReg32(VL6180X_RESULT_RANGE_RETURN_CONV_TIME)  // convergence time
+        + (1300 + 48*averagingSamplePeriod);                // readout averaging period
+        
+    // figure the midpoint of the sample time - the starting time
+    // plus half the collection time
+    tMid = tSampleStart + dt/2;
     
     // clear the data-ready interrupt
     writeReg8(VL6180X_SYSTEM_INTERRUPT_CLEAR, 0x07);
@@ -236,53 +253,13 @@ void VL6180X::getRangeStats(VL6180X_RangeStats &stats)
     stats.refConvTime = readReg32(VL6180X_RESULT_RANGE_REFERENCE_CONV_TIME);
 }
      
-float VL6180X::getAmbientLight(VL6180X_ALS_Gain gain)
-{
-    // set the desired gain
-    writeReg8(VL6180X_SYSALS_ANALOGUE_GAIN, (0x40 | gain));
-    
-    // start the integration
-    writeReg8(VL6180X_SYSALS_START, 0x01);
-
-    // give it time to integrate
-    wait_ms(100);
-    
-    // clear the data-ready interrupt
-    writeReg8(VL6180X_SYSTEM_INTERRUPT_CLEAR, 0x07);
-
-    // retrieve the raw sensor reading om the sensoe
-    unsigned int alsRaw = readReg16(VL6180X_RESULT_ALS_VAL);
-    
-    // get the integration period
-    unsigned int tIntRaw = readReg16(VL6180X_SYSALS_INTEGRATION_PERIOD);
-    float alsIntegrationPeriod = 100.0 / tIntRaw ;
-    
-    // get the actual gain at the user's gain setting
-    float trueGain = 0.0;
-    switch (gain)
-    {
-    case GAIN_20:   trueGain = 20.0; break;
-    case GAIN_10:   trueGain = 10.32; break;
-    case GAIN_5:    trueGain = 5.21; break;
-    case GAIN_2_5:  trueGain = 2.60; break;
-    case GAIN_1_67: trueGain = 1.72; break;
-    case GAIN_1_25: trueGain = 1.28; break;
-    case GAIN_1:    trueGain = 1.01; break;
-    case GAIN_40:   trueGain = 40.0; break;
-    default:        trueGain = 1.0;  break;
-    }
-    
-    // calculate the lux (see the manufacturer's app notes)
-    return alsRaw  * 0.32f / trueGain * alsIntegrationPeriod;
-}
- 
 uint8_t VL6180X::readReg8(uint16_t registerAddr)
 {
     // write the request - MSB+LSB of register address
     uint8_t data_write[2];
     data_write[0] = (registerAddr >> 8) & 0xFF;
     data_write[1] = registerAddr & 0xFF;
-    if (i2c.write(addr << 1, data_write, 2, true))
+    if (i2c.write(addr << 1, data_write, 2, false))
         return 0x00;
 
     // read the result
@@ -300,7 +277,7 @@ uint16_t VL6180X::readReg16(uint16_t registerAddr)
     uint8_t data_write[2];
     data_write[0] = (registerAddr >> 8) & 0xFF;
     data_write[1] = registerAddr & 0xFF;
-    if (i2c.write(addr << 1, data_write, 2, true))
+    if (i2c.write(addr << 1, data_write, 2, false))
         return 0;
     
     // read the result

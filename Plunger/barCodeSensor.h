@@ -5,10 +5,19 @@
 // by reading the bar code and decoding it into a position figure.
 //
 // The bar code has to be encoded in a specific format that we recognize.
-// We use a 10-bit reflected Gray code, optically encoded using a Manchester-
-// type of coding.  Each bit is represented as a fixed-width area on the
-// bar, half white and half black.  The bit value is encoded in the order
-// of the colors: Black/White is '0', and White/Black is '1'.
+// We use a reflected Gray code, optically encoded in black/white pixel
+// patterns.  Each bit is represented by a fixed-width area.  Half the
+// pixels in every bit are white, and half are black.  A '0' bit is
+// represented by black pixels in the left half and white pixels in the
+// right half, and a '1' bit is white on the left and black on the right.
+// To read a bit, we identify the set of pixels covering the bit's fixed
+// area in the code, then we see if the left or right half is brighter.
+//
+// (This optical encoding scheme is based on Manchester coding, which is 
+// normally used in the context of serial protocols, but translates to 
+// bar codes straightforwardly.  Replace the serial protocol's time
+// dimension with the spatial dimension across the bar, and replace the
+// high/low wire voltage levels with white/black pixels.)
 //
 // Gray codes are ideal for this type of application.  Gray codes are
 // defined such that each code point differs in exactly one bit from each
@@ -20,21 +29,73 @@
 // the reading will come out as one of points on either side of the true
 // position.  Finally, motion blur will have the same effect, of creating
 // ambiguity in the least significant bits, and thus giving us a reading
-// that's correct to as many bits as we can read with teh blur.
+// that's correct to as many bits as we can make out.
 //
-// We use the Manchester-type optical coding because it has good properties
-// for low-contrast images, and doesn't require uniform lighting.  Each bit's
-// pixel span contains equal numbers of light and dark pixels, so each bit
-// provides its own local level reference.  This means we don't care about
-// lighting uniformity over the whole image, because we don't need a global
-// notion of light and dark, just a local one over a single bit at a time.
+// The half-and-half optical coding also has good properties for our
+// purposes.  The fixed-width bit regions require essentially no CPU work
+// to find the bits, which is good because we're using a fairly slow CPU.
+// The half white/half black coding of each pixel makes every pixel 
+// self-relative in terms of brightness, so we don't need to figure the 
+// black and white thresholds globally for the whole image.  That makes 
+// the physical device engineering and installation easier because the 
+// software can tolerate a fairly wide range of lighting conditions.
 // 
 
 #ifndef _BARCODESENSOR_H_
 #define _BARCODESENSOR_H_
 
 #include "plunger.h"
-#include "tsl14xxSensor.h"
+
+// Gray code to binary mapping for our special coding.  This is a custom
+// 7-bit code, minimum run length 6, 110 positions populated.  The minimum
+// run length is the minimum number of consecutive code points where each
+// bit must remain fixed.  For out optical coding, this defines the smallest
+// "island" size for a black or white bar horizontally.  Small features are
+// prone to light scattering that makes them appear gray on the sensor.
+// Larger features are less subject to scatter, making them easier to 
+// distinguish by brightness level.
+static const uint8_t grayToBin[] = {
+   0,   1,  83,   2,  71, 100,  84,   3,  69, 102,  82, 128,  70, 101,  57,   4,    // 0-15
+  35,  50,  36,  37,  86,  87,  85, 128,  34, 103,  21, 104, 128, 128,  20,   5,    // 16-31
+  11, 128,  24,  25,  98,  99,  97,  40,  68,  67,  81,  80,  55,  54,  56,  41,    // 32-47
+  10,  51,  23,  38, 128,  52, 128,  39,   9,  66,  22, 128,   8,  53,   7,   6,    // 48-63
+  47,  14,  60, 128,  72,  15,  59,  16,  46,  91,  93,  92,  45, 128,  58,  17,    // 64-79
+  48,  49,  61,  62,  73,  88,  74,  75,  33,  90, 106, 105,  32,  89,  19,  18,    // 80-95
+  12,  13,  95,  26, 128,  28,  96,  27, 128, 128,  94,  79,  44,  29,  43,  42,    // 96-111
+ 128,  64, 128,  63, 110, 128, 109,  76, 128,  65, 107,  78,  31,  30, 108,  77     // 112-127
+};
+
+
+// Auto-exposure counter
+class BarCodeExposureCounter
+{
+public:
+    BarCodeExposureCounter()
+    {
+        nDark = 0;
+        nBright = 0;
+        nZero = 0;
+        nSat = 0;
+    }
+    
+    inline void count(int pix)
+    {
+        if (pix <= 2)
+            ++nZero;
+        else if (pix < 12)
+            ++nDark;
+        else if (pix >= 253)
+            ++nSat;
+        else if (pix > 200)
+            ++nBright;
+    }
+    
+    int nDark;      // dark pixels
+    int nBright;    // bright pixels
+    int nZero;      // pixels at zero brightness
+    int nSat;       // pixels at full saturation
+};
+
 
 // Base class for bar-code sensors
 //
@@ -58,13 +119,51 @@
 // full bit, including both "half bits" - it's the full white/black or 
 // black/white pattern area.
 
+struct BarCodeProcessResult
+{
+    int pixofs;
+    int raw;
+    int mask;
+};
+
 template <int nBits, int leftBarWidth, int leftBarMaxOfs, int bitWidth>
-class PlungerSensorBarCode
+class PlungerSensorBarCode: public PlungerSensorImage<BarCodeProcessResult>
 {
 public:
-    // process the image    
-    bool process(const uint8_t *pix, int npix, int &pos)
+    PlungerSensorBarCode(PlungerSensorImageInterface &sensor, int npix) 
+        : PlungerSensorImage(sensor, npix, (1 << nBits) - 1)
     {
+        startOfs = 0;
+    }
+
+    // process a configuration change
+    virtual void onConfigChange(int varno, Config &cfg)
+    {
+        // check for bar-code variables
+        switch (varno)
+        {
+        case 20:
+            // bar code offset
+            startOfs = cfg.plunger.barCode.startPix;
+            break;
+        }
+        
+        // do the generic work
+        PlungerSensorImage::onConfigChange(varno, cfg);
+    }
+
+protected:
+    // process the image    
+    virtual bool process(const uint8_t *pix, int npix, int &pos, BarCodeProcessResult &res)
+    {
+        // adjust auto-exposure
+        adjustExposure(pix, npix);
+        
+        // clear the result descriptor
+        res.pixofs = 0;
+        res.raw = 0;
+        res.mask = 0;
+        
 #if 0 // $$$
 
         // scan from the left edge until we find the fixed '0' start bit
@@ -147,25 +246,46 @@ public:
         }
         else
         {
-            barStart = 4; // $$$ should be configurable via config tool
+            // start at the fixed pixel offset
+            barStart = startOfs;
         }
 
+        // Start with zero in the barcode and success mask.  The mask
+        // indicates which bits we were able to read successfully: a
+        // '1' bit in the mask indicates that the corresponding bit
+        // position in 'barcode' was successfully read, a '0' bit means
+        // that the image was too fuzzy to read.
+        int barcode = 0, mask = 0;
+
         // Scan the bits
-        int barcode = 0;
         for (int bit = 0, x0 = barStart; bit < nBits ; ++bit, x0 += bitWidth)
         {
-            // figure the extent of this bit
-            int x1 = x0 + bitWidth / 2;
-            int x2 = x0 + bitWidth;
+#if 0
+            // Figure the extent of this bit.  The last bit is double
+            // the width of the other bits, to give us a better chance
+            // of making out the small features of the last bit.
+            int w = bitWidth;
+            if (bit == nBits - 1) w *= 2;
+#else
+            // width of the bit
+            const int w = bitWidth;
+#endif
+
+            // figure the bit's internal pixel layout
+            int halfBitWidth = w / 2;
+            int x1 = x0 + halfBitWidth;     // midpoint
+            int x2 = x0 + w;                // right edge
+            
+            // make sure we didn't go out of bounds
             if (x1 > npix) x1 = npix;
             if (x2 > npix) x2 = npix;
 
+#if 0
             // get the average of the pixels over the bit
             int sum = 0;
             for (int x = x0 ; x < x2 ; ++x)
                 sum += pix[x];
-            int avg = sum / bitWidth;
-
+            int avg = sum / w;
             // Scan the left and right sections.  Classify each
             // section according to whether the majority of its
             // pixels are above or below the local average.
@@ -174,20 +294,56 @@ public:
                 lsum += (pix[x] < avg ? 0 : 1);
             for (int x = x1 + 1 ; x < x2 - 1 ; ++x)
                 rsum += (pix[x] < avg ? 0 : 1);
+#else
+            // Sum the pixel readings in each half-bit.  Ignore
+            // the first and last bit of each section, since these
+            // could be contaminated with scattered light from the
+            // adjacent half-bit.  On the right half, hew to the 
+            // right side if the overall pixel width is odd. 
+            int lsum = 0, rsum = 0;
+            for (int x = x0 + 1 ; x < x1 - 1 ; ++x)
+                lsum += pix[x];
+            for (int x = x2 - halfBitWidth + 1 ; x < x2 - 1 ; ++x)
+                rsum += pix[x];
+#endif
                 
-            // if we don't have a winner, fail
-            if (lsum == rsum)
-                return false;
+            // shift a zero bit into the code and success mask
+            barcode <<= 1;
+            mask <<= 1;
 
-            // black/white = 0, white/black = 1
-            barcode = (barcode << 1) | (lsum < rsum ? 0 : 1);
+            // Brightness difference required per pixel.  Higher values
+            // require greater contrast to make a reading, which reduces
+            // spurious readings at the cost of reducing the overall 
+            // success rate.  The right level depends on the quality of
+            // the optical system.  Setting this to zero makes us maximally
+            // tolerant of low-contrast images, allowing for the simplest
+            // optical system.  Our simple optical system suffers from
+            // poor focus, which in turn causes poor contrast in small
+            // features.
+            const int minDelta = 2;
+
+            // see if we could tell the difference in brightness
+            int delta = lsum - rsum;
+            if (delta < 0) delta = -delta;
+            if (delta > minDelta * w/2)
+            {
+                // got it - black/white = 0, white/black = 1
+                if (lsum > rsum) barcode |= 1;
+                mask |= 1;
+            }
         }
 
         // decode the Gray code value to binary
-        pos = grayToBin(barcode);
+        pos = grayToBin[barcode];
         
-        // success
-        return true;
+        // set the results descriptor structure
+        res.pixofs = barStart;
+        res.raw = barcode;
+        res.mask = mask;
+    
+        // return success if we decoded all bits, and the Gray-to-binary
+        // mapping was populated
+        return pos != (1 << nBits) && mask == ((1 << nBits) - 1);
 #endif
     }
     
@@ -255,82 +411,16 @@ public:
         }
     }
 
-    // convert a reflected Gray code value (up to 16 bits) to binary
-    int grayToBin(int grayval)
-    {
-        int temp = grayval ^ (grayval >> 8);
-        temp ^= (temp >> 4);
-        temp ^= (temp >> 2);
-        temp ^= (temp >> 1);
-        return temp;
-    }
-};
-
-// Auto-exposure counter
-class BarCodeExposureCounter
-{
-public:
-    BarCodeExposureCounter()
-    {
-        nDark = 0;
-        nBright = 0;
-        nZero = 0;
-        nSat = 0;
-    }
-    
-    inline void count(int pix)
-    {
-        if (pix <= 2)
-            ++nZero;
-        else if (pix < 12)
-            ++nDark;
-        else if (pix >= 253)
-            ++nSat;
-        else if (pix > 200)
-            ++nBright;
-    }
-    
-    int nDark;      // dark pixels
-    int nBright;    // bright pixels
-    int nZero;      // pixels at zero brightness
-    int nSat;       // pixels at full saturation
-};
-
-// PlungerSensor interface implementation for bar code readers.
-//
-// Bar code readers are image sensors, so we have a pixel size for
-// the sensor.  However, this isn't the scale for the readings.  The
-// scale for the readings is determined by the number of bits in the
-// bar code, since an n-bit bar code can encode 2^n distinct positions.
-//
-template <int nBits, int leftBarWidth, int leftBarMaxOfs, int bitWidth>
-class PlungerSensorBarCodeTSL14xx: public PlungerSensorTSL14xxSmall,
-    PlungerSensorBarCode<nBits, leftBarWidth, leftBarMaxOfs, bitWidth>
-{
-public:
-    PlungerSensorBarCodeTSL14xx(int nativePix, PinName si, PinName clock, PinName ao)
-        : PlungerSensorTSL14xxSmall(nativePix, (1 << nBits) - 1, si, clock, ao)
-    {
-        // the native scale is the number of positions we can
-        // encode in the bar code
-        nativeScale = 1023;
-    }
-    
-protected:
-    
-    // process the image through the bar code reader
-    virtual bool process(const uint8_t *pix, int npix, int &pos)
-    {
-        // adjust the exposure
-        adjustExposure(pix, npix);
-        
-        // do the standard bar code processing
-        return PlungerSensorBarCode<nBits, leftBarWidth, leftBarMaxOfs, bitWidth>
-            ::process(pix, npix, pos);
-    }
-    
     // bar code sensor orientation is fixed
     virtual int getOrientation() const { return 1; }
+    
+    // send extra status report headers
+    virtual void extraStatusHeaders(USBJoystick &js, BarCodeProcessResult &res)
+    {
+        // Send the bar code status report.  We use coding type 1 (Gray code,
+        // Manchester pixel coding).
+        js.sendPlungerStatusBarcode(nBits, 1, res.pixofs, bitWidth, res.raw, res.mask);
+    }
     
     // adjust the exposure
     void adjustExposure(const uint8_t *pix, int npix)
@@ -342,23 +432,24 @@ protected:
         // pixels has to look: the bit area will be 50% black and 50%
         // white, and the margins will be all white.  For maximum
         // contrast, target an exposure level where the black pixels
-        // are all below the middle brightness level and the white
+        // are all below a certain brightness level and the white
         // pixels are all above.  Start by figuring the number of
         // pixels above and below.
-        int nDark = 0;
+        const int medianTarget = 160;
+        int nBelow = 0;
         for (int i = 0 ; i < npix ; ++i)
         {
-            if (pix[i] < 200)
-                ++nDark;
+            if (pix[i] < medianTarget)
+                ++nBelow;
         }
         
-        // Figure the percentage of black pixels: the left bar is
+        // Figure the desired number of black pixels: the left bar is
         // all black pixels, and 50% of each bit is black pixels.
-        int targetDark = leftBarWidth + (nBits * bitWidth)/2;
+        int targetBelow = leftBarWidth + (nBits * bitWidth)/2;
         
         // Increase exposure time if too many pixels are below the
         // halfway point; decrease it if too many pixels are above.
-        int d = nDark - targetDark;
+        int d = nBelow - targetBelow;
         if (d > 5 || d < -5)
         {
             axcTime += d;
@@ -475,20 +566,21 @@ protected:
         if (axcTime > 2500)
             axcTime = 2500;
     }
-};
 
-// TSL1401CL - 128-bit image sensor, used as a bar code reader
-class PlungerSensorTSL1401CL: public PlungerSensorBarCodeTSL14xx<
-    10,  // number of bits in code
-    0,   // left delimiter bar width in pixels (0 for none)
-    24,  // maximum left margin width in pixels
-    12>  // pixel width of each bit
-{
-public:
-    PlungerSensorTSL1401CL(PinName si, PinName clock, PinName a0)
-        : PlungerSensorBarCodeTSL14xx(128, si, clock, a0)
+#if 0
+    // convert a reflected Gray code value (up to 16 bits) to binary
+    static inline int grayToBin(int grayval)
     {
+        int temp = grayval ^ (grayval >> 8);
+        temp ^= (temp >> 4);
+        temp ^= (temp >> 2);
+        temp ^= (temp >> 1);
+        return temp;
     }
+#endif
+
+    // bar code starting pixel offset
+    int startOfs;
 };
 
 #endif

@@ -43,8 +43,8 @@ class PlungerSensorDistance: public PlungerSensor
 public:
     PlungerSensorDistance(int nativeScale) : PlungerSensor(nativeScale)
     {
-        // start the sample timer
-        t.start();
+        totalTime = 0;
+        nRuns = 0;
     }
 
     // get the average scan time
@@ -58,11 +58,7 @@ protected:
         nRuns += 1;
     }
 
-    // sample timer
-    Timer t;
-    
     // scan time statistics
-    uint32_t tStart;          // time (on this->t) of start of current scan
     uint64_t totalTime;       // total time consumed by all reads so far
     uint32_t nRuns;           // number of runs so far
 };
@@ -73,66 +69,79 @@ protected:
 // sensor units are millimeters.  A physical plunger has about 3" of
 // total travel, but leave a little extra padding for measurement
 // inaccuracies and other unusual situations, so'll use an actual
-// native scale of 5" = 127mm.
+// native scale of 150mm.
 class PlungerSensorVL6180X: public PlungerSensorDistance
 {
 public:
     PlungerSensorVL6180X(PinName sda, PinName scl, PinName gpio0)
-        : PlungerSensorDistance(127),
-          sensor(sda, scl, I2C_ADDRESS, gpio0)
+        : PlungerSensorDistance(150),
+          sensor(sda, scl, I2C_ADDRESS, gpio0, true)
     {
     }
     
-    static const int I2C_ADDRESS = 0x28;
+    // fixed I2C bus address for the VL6180X
+    static const int I2C_ADDRESS = 0x29;
     
     virtual void init()
     {
-        // reboot and initialize the sensor
+        // initialize the sensor and set the default configuration
         sensor.init();
-        
-        // set the default configuration
         sensor.setDefaults();
         
-        // start the first reading
-        tStart = t.read_us();
+        // start a reading
         sensor.startRangeReading();
     }
     
     virtual bool ready()
     {
+        // make sure a reading has been initiated
+        sensor.startRangeReading();
+        
+        // check if a reading is ready
         return sensor.rangeReady();
     }
     
     virtual bool readRaw(PlungerReading &r)
     {
-        // get the range reading
-        uint8_t d;
-        int err = sensor.getRange(d, 25000);
+        // if we have a new reading ready, collect it
+        if (sensor.rangeReady())
+        {
+            // Get the range reading.  Note that we already know that the
+            // sensor has a reading ready, so it shouldn't be possible to 
+            // time out on the read.  (The sensor could have timed out on 
+            // convergence, but if it did, that's in the past already so 
+            // it's not something we have to wait for now.)
+            uint8_t d;
+            uint32_t t, dt;
+            lastErr = sensor.getRange(d, t, dt, 100);
+            
+            // if we got a reading, update the last reading
+            if (lastErr == 0)
+            {
+                // save the new reading
+                last.pos = d;
+                last.t = t;
+            
+                // collect scan time statistics
+                collectScanTimeStats(dt);
+            }
+    
+            // start a new reading
+            sensor.startRangeReading();
+        }
         
-        // start a new reading
-        sensor.startRangeReading();
-        tStart = t.read_us();
-
-        // use the current timestamp
-        r.t = t.read_us();
-        
-        // The sensor measures distance from the front of the cabinet
-        // (in our standard setup).  For reporting purposes, we want
-        // the position reading to increase as the plunger is retracted,
-        // so we want to reverse the scale.
-        r.pos = nativeScale - d;
-        
-        // collect scan time statistics
-        if (err == 0)
-            collectScanTimeStats(uint32_t(r.t - tStart));
-
-        // return the status ('err' is zero on success)
-        return err == 0;
+        // return the most recent reading
+        r = last;
+        return lastErr == 0;
     }
     
 protected:
     // underlying sensor interface
     VL6180X sensor;
+    
+    // last reading and error status
+    PlungerReading last;
+    int lastErr;
 };
 
 

@@ -18,7 +18,6 @@
 #define _EDGESENSOR_H_
 
 #include "plunger.h"
-#include "tsl14xxSensor.h"
 
 // Scan method - select a method listed below.  Method 2 (find the point
 // with maximum brightness slop) seems to work the best so far.
@@ -101,12 +100,15 @@ extern "C" int edgeScanMode2(
 // This is a generic base class for image-based sensors where we detect
 // the plunger position by finding the edge of the shadow it casts on
 // the detector.
-class PlungerSensorEdgePos
+//
+// Edge sensors use the image pixel span as the native position scale,
+// since a position reading is the pixel offset of the shadow edge.
+class PlungerSensorEdgePos: public PlungerSensorImage<int>
 {
 public:
-    PlungerSensorEdgePos(int npix)
+    PlungerSensorEdgePos(PlungerSensorImageInterface &sensor, int npix) 
+        : PlungerSensorImage<int>(sensor, npix, npix - 1)
     {
-        native_npix = npix;
     }
     
     // Process an image - scan for the shadow edge to determine the plunger
@@ -121,7 +123,7 @@ public:
 
 #if SCAN_METHOD == 0
     // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(const uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
@@ -241,7 +243,7 @@ public:
     
 #if SCAN_METHOD == 1
     // Scan method 1: meet in the middle.
-    bool process(const uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
@@ -361,7 +363,7 @@ public:
 
 #if SCAN_METHOD == 2
     // Scan method 2: scan for steepest brightness slope.
-    bool process(const uint8_t *pix, int n, int &pos)
+    virtual bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end by averaging across several pixels.
         // Compute just the sums: don't bother dividing by the count, since 
@@ -419,7 +421,7 @@ public:
 
 #if SCAN_METHOD == 3
     // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(const uint8_t *pix, int n, int &pos)
+    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
@@ -497,9 +499,6 @@ protected:
     virtual int getOrientation() const { return dir; }
     int dir;
        
-    // number of pixels
-    int native_npix;
-    
     // History of midpoint brightness levels for the last few successful
     // scans.  This is a circular buffer that we write on each scan where
     // we successfully detect a shadow edge.  (It's circular, so we
@@ -530,63 +529,5 @@ protected:
 public:
 };
 
-
-// -------------------------------------------------------------------------
-//
-// Edge position plunger sensor for TSL14xx-based sensors.  An edge
-// detection setup requires one of the large sensors, 1410R or 1412S,
-// since we need the sensor to cover the whole extent of the physical 
-// plunger's travel, which is about 3".
-//
-// The native scale for image edge detectors is sensor pixels, since
-// we read the plunger position as the pixel location of the shadow
-// edge on the image.
-//
-class PlungerSensorEdgePosTSL14xx: public PlungerSensorTSL14xxLarge, public PlungerSensorEdgePos
-{
-public:
-    PlungerSensorEdgePosTSL14xx(int nativePix, PinName si, PinName clock, PinName ao)
-        : PlungerSensorTSL14xxLarge(nativePix, nativePix - 1, si, clock, ao),
-          PlungerSensorEdgePos(nativePix)
-    {
-        // we don't know the direction yet
-        dir = 0;
-        
-        // set the midpoint history arbitrarily to the absolute halfway point
-        memset(midpt, 127, sizeof(midpt));
-        midptIdx = 0;
-        
-        // the native reporting scale is the pixel size of the sensor, since
-        // the position is figured as the shadow location in the image
-        nativeScale = nativePix;
-    }
-    
-protected:
-    // process the image through the edge detector
-    virtual bool process(const uint8_t *pix, int npix, int &pixpos) 
-    {
-        return PlungerSensorEdgePos::process(pix, npix, pixpos);
-    }
-};
-
-// TSL1410R sensor 
-class PlungerSensorTSL1410R: public PlungerSensorEdgePosTSL14xx
-{
-public:
-    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao)
-        : PlungerSensorEdgePosTSL14xx(1280, si, clock, ao)
-    {
-    }
-};
-
-// TSL1412R
-class PlungerSensorTSL1412R: public PlungerSensorEdgePosTSL14xx
-{
-public:
-    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao)
-        : PlungerSensorEdgePosTSL14xx(1536, si, clock, ao)
-    {
-    }
-};
 
 #endif /* _EDGESENSOR_H_ */

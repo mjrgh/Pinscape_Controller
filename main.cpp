@@ -47,34 +47,48 @@
 //    have native support for this type of input; as with the nudge setup, you just 
 //    have to set some options in VP to activate the plunger.
 //
-//    The Pinscape software supports optical sensors (the TAOS TSL1410R and TSL1412R 
-//    linear sensor arrays) as well as slide potentiometers.  The specific equipment
-//    that's supported, along with physical mounting and wiring details, can be found
-//    in the Build Guide.
+//    We support several sensor types:
 //
-//    Note that VP has built-in support for plunger devices like this one, but 
-//    some VP tables can't use it without some additional scripting work.  The 
-//    Build Guide has advice on adjusting tables to add plunger support when 
-//    necessary.
+//    - AEDR-8300-1K2 optical encoders.  These are quadrature encoders with
+//      reflective optical sensing and built-in lighting and optics.  The sensor
+//      is attached to the plunger so that it moves with the plunger, and slides
+//      along a guide rail with a reflective pattern of regularly spaces bars 
+//      for the encoder to read.  We read the plunger position by counting the
+//      bars the sensor passes as it moves across the rail.  This is the newest
+//      option, and it's my current favorite because it's highly accurate,
+//      precise, and fast, plus it's relatively inexpensive.
 //
-//    For best results, the plunger sensor should be calibrated.  The calibration
-//    is stored in non-volatile memory on board the KL25Z, so it's only necessary
-//    to do the calibration once, when you first install everything.  (You might
-//    also want to re-calibrate if you physically remove and reinstall the CCD 
-//    sensor or the mechanical plunger, since their alignment shift change slightly 
-//    when you put everything back together.)  You can optionally install a
-//    dedicated momentary switch or pushbutton to activate the calibration mode;
-//    this is describe in the project documentation.  If you don't want to bother
-//    with the extra button, you can also trigger calibration using the Windows 
-//    setup software, which you can find on the Pinscape project page.
+//    - Slide potentiometers.  There are slide potentioneters available with a
+//      long enough travel distance (at least 85mm) to cover the plunger travel.
+//      Attach the plunger to the potentiometer knob so that the moving the
+//      plunger moves the pot knob.  We sense the position by simply reading
+//      the analog voltage on the pot brush.  A pot with a "linear taper" (that
+//      is, the resistance varies linearly with the position) is required.
+//      This option is cheap, easy to set up, and works well.
 //
-//    The calibration procedure is described in the project documentation.  Briefly,
-//    when you trigger calibration mode, the software will scan the CCD for about
-//    15 seconds, during which you should simply pull the physical plunger back
-//    all the way, hold it for a moment, and then slowly return it to the rest
-//    position.  (DON'T just release it from the retracted position, since that
-//    let it shoot forward too far.  We want to measure the range from the park
-//    position to the fully retracted position only.)
+//    - VL6108X time-of-flight distance sensor.  This is an optical distance
+//      sensor that measures the distance to a nearby object (within about 10cm)
+//      by measuring the travel time for reflected pulses of light.  It's fairly
+//      cheap and easy to set up, but I don't recommend it because it has very
+//      low precision.
+//
+//    - TSL1410R/TSL1412R linear array optical sensors.  These are large optical
+//      sensors with the pixels arranged in a single row.  The pixel arrays are
+//      large enough on these to cover the travel distance of the plunger, so we
+//      can set up the sensor near the plunger in such a way that the plunger 
+//      casts a shadow on the sensor.  We detect the plunger position by finding
+//      the edge of the sahdow in the image.  The optics for this setup are very
+//      simple since we don't need any lenses.  This was the first sensor we
+//      supported, and works very well, but unfortunately the sensor is difficult
+//      to find now since it's been discontinued by the manufacturer.
+//
+//    The v2 Build Guide has details on how to build and configure all of the
+//    sensor options.
+//
+//    Visual Pinball has built-in support for plunger devices like this one, but 
+//    some older VP tables (particularly for VP 9) can't use it without some
+//    modifications to their scripting.  The Build Guide has advice on how to
+//    fix up VP tables to add plunger support when necessary.
 //
 //  - Button input wiring.  You can assign GPIO ports as inputs for physical
 //    pinball-style buttons, such as flipper buttons, a Start button, coin
@@ -107,28 +121,34 @@
 //    current handing.  The Build Guide has a reference circuit design for this
 //    purpose that's simple and inexpensive to build.
 //
-//  - Enhanced LedWiz emulation with TLC5940 PWM controller chips.  You can attach
-//    external PWM controller chips for controlling device outputs, instead of using
-//    the on-board GPIO ports as described above.  The software can control a set of 
-//    daisy-chained TLC5940 chips.  Each chip provides 16 PWM outputs, so you just
-//    need two of them to get the full complement of 32 output ports of a real LedWiz.
-//    You can hook up even more, though.  Four chips gives you 64 ports, which should
-//    be plenty for nearly any virtual pinball project.  To accommodate the larger
-//    supply of ports possible with the PWM chips, the controller software provides
-//    a custom, extended version of the LedWiz protocol that can handle up to 128
-//    ports.  PC software designed only for the real LedWiz obviously won't know
-//    about the extended protocol and won't be able to take advantage of its extra
-//    capabilities, but the latest version of DOF (DirectOutput Framework) *does* 
-//    know the new language and can take full advantage.  Older software will still
-//    work, though - the new extensions are all backward compatible, so old software
-//    that only knows about the original LedWiz protocol will still work, with the
-//    obvious limitation that it can only access the first 32 ports.
+//  - Enhanced LedWiz emulation with TLC5940 and/or TLC59116 PWM controller chips. 
+//    You can attach external PWM chips for controlling device outputs, instead of
+//    using (or in addition to) the on-board GPIO ports as described above.  The 
+//    software can control a set of daisy-chained TLC5940 or TLC59116 chips.  Each
+//    chip provides 16 PWM outputs, so you just need two of them to get the full 
+//    complement of 32 output ports of a real LedWiz.  You can hook up even more, 
+//    though.  Four chips gives you 64 ports, which should be plenty for nearly any 
+//    virtual pinball project.  
 //
 //    The Pinscape Expansion Board project (which appeared in early 2016) provides
 //    a reference hardware design, with EAGLE circuit board layouts, that takes full
 //    advantage of the TLC5940 capability.  It lets you create a customized set of
 //    outputs with full PWM control and power handling for high-current devices
-//    built in to the boards.  
+//    built in to the boards.
+//
+//    To accommodate the larger supply of ports possible with the external chips,
+//    the controller software provides a custom, extended version of the LedWiz 
+//    protocol that can handle up to 128 ports.  Legacy PC software designed only
+//    for the original LedWiz obviously can't use the extended protocol, and thus 
+//    can't take advantage of its extra capabilities, but the latest version of 
+//    DOF (DirectOutput Framework) *does*  know the new language and can take full
+//    advantage.  Older software will still work, though - the new extensions are 
+//    all backwards compatible, so old software that only knows about the original 
+//    LedWiz protocol will still work, with the limitation that it can only access 
+//    the first 32 ports.  In addition, we provide a replacement LEDWIZ.DLL that 
+//    creates virtual LedWiz units representing additional ports beyond the first
+//    32.  This allows legacy LedWiz client software to address all ports by
+//    making them think that you have several physical LedWiz units installed.
 //
 //  - Night Mode control for output devices.  You can connect a switch or button
 //    to the controller to activate "Night Mode", which disables feedback devices
@@ -222,6 +242,7 @@
 #include "FreescaleIAP.h"
 #include "crc32.h"
 #include "TLC5940.h"
+#include "TLC59116.h"
 #include "74HC595.h"
 #include "nvm.h"
 #include "TinyDigitalIn.h"
@@ -237,6 +258,7 @@
 #include "nullSensor.h"
 #include "barCodeSensor.h"
 #include "distanceSensor.h"
+#include "tsl14xxSensor.h"
 
 
 #define DECL_EXTERNS
@@ -646,17 +668,26 @@ static int pbaIdx = 0;
 // about 50 GPIO pins.  So if you want to do everything with GPIO ports,
 // you have to ration pins among features.
 //
-// To overcome some of these limitations, we also provide two types of
+// To overcome some of these limitations, we also support several external
 // peripheral controllers that allow adding many more outputs, using only
-// a small number of GPIO pins to interface with the peripherals.  First,
-// we support TLC5940 PWM controller chips.  Each TLC5940 provides 16 ports
-// with full PWM, and multiple TLC5940 chips can be daisy-chained.  The
-// chip only requires 5 GPIO pins for the interface, no matter how many
-// chips are in the chain, so it effectively converts 5 GPIO pins into 
-// almost any number of PWM outputs.  Second, we support 74HC595 chips.
-// These provide only digital outputs, but like the TLC5940 they can be
-// daisy-chained to provide almost unlimited outputs with a few GPIO pins
-// to control the whole chain.
+// a small number of GPIO pins to interface with the peripherals:
+//
+// - TLC5940 PWM controller chips.  Each TLC5940 provides 16 ports with
+//   12-bit PWM, and multiple TLC5940 chips can be daisy-chained.  The
+//   chips connect via 5 GPIO pins, and since they're daisy-chainable,
+//   one set of 5 pins can control any number of the chips.  So this chip
+//   effectively converts 5 GPIO pins into almost any number of PWM outputs.
+//
+// - TLC59116 PWM controller chips.  These are similar to the TLC5940 but
+//   a newer generation with an improved design.  These use an I2C bus,
+//   allowing up to 14 chips to be connected via 3 GPIO pins.
+//
+// - 74HC595 shift register chips.  These provide 8 digital (on/off only)
+//   outputs per chip.  These need 4 GPIO pins, and like the other can be
+//   daisy chained to add more outputs without using more GPIO pins.  These
+//   are advantageous for outputs that don't require PWM, since the data
+//   transfer sizes are so much smaller.  The expansion boards use these
+//   for the chime board outputs.
 //
 // Direct GPIO output ports and peripheral controllers can be mixed and
 // matched in one system.  The assignment of pins to ports and the 
@@ -735,7 +766,7 @@ private:
 
 
 // Gamma correction table for 8-bit input values
-static const uint8_t gamma[] = {
+static const uint8_t dof_to_gamma_8bit[] = {
       0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0, 
       0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   0,   1,   1,   1,   1, 
       1,   1,   1,   1,   1,   1,   1,   1,   1,   2,   2,   2,   2,   2,   2,   2, 
@@ -761,7 +792,7 @@ class LwGammaOut: public LwOut
 {
 public:
     LwGammaOut(LwOut *o) : out(o) { }
-    virtual void set(uint8_t val) { out->set(gamma[val]); }
+    virtual void set(uint8_t val) { out->set(dof_to_gamma_8bit[val]); }
     
 private:
     LwOut *out;
@@ -903,10 +934,55 @@ public:
     uint8_t prv;
 };
 
+//
+// TLC59116 interface object
+//
+TLC59116 *tlc59116 = 0;
+void init_tlc59116(Config &cfg)
+{
+    // Create the interface if any chips are enabled
+    if (cfg.tlc59116.chipMask != 0)
+    {
+        // set up the interface
+        tlc59116 = new TLC59116(
+            wirePinName(cfg.tlc59116.sda),
+            wirePinName(cfg.tlc59116.scl),
+            wirePinName(cfg.tlc59116.reset));
+            
+        // initialize the chips
+        tlc59116->init();
+    }
+}
+
+// LwOut class for TLC59116 outputs.  The 'addr' value in the constructor
+// is low 4 bits of the chip's I2C address; this is the part of the address
+// that's configurable per chip.  'port' is the output number on the chip
+// (0-15).
+//
+// Note that we don't need a separate gamma-corrected subclass for this
+// output type, since there's no loss of precision with the standard layered
+// gamma (it emits 8-bit values, and we take 8-bit inputs).
+class Lw59116Out: public LwOut
+{
+public:
+    Lw59116Out(uint8_t addr, uint8_t port) : addr(addr), port(port) { prv = 0; }
+    virtual void set(uint8_t val)
+    {
+        if (val != prv)
+            tlc59116->set(addr, port, prv = val);
+    }
+    
+protected:
+    uint8_t addr;
+    uint8_t port;
+    uint8_t prv;
+};
 
 
+//
 // 74HC595 interface object.  Set this up with the port assignments in
 // config.h.
+//
 HC595 *hc595 = 0;
 
 // initialize the 74HC595 interface
@@ -1276,12 +1352,21 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
         break;
     
     case PortType74HC595:
-        // 74HC595 port (if we don't have an HC595 controller object, or it's not a valid
-        // output number, create a virtual port)
+        // 74HC595 port (if we don't have an HC595 controller object, or it's not 
+        // a valid output number, create a virtual port)
         if (hc595 != 0 && pin < cfg.hc595.nchips*8)
             lwp = new Lw595Out(pin);
         else
             lwp = new LwVirtualOut();
+        break;
+        
+    case PortTypeTLC59116:
+        // TLC59116 port.  The pin number in the config encodes the chip address
+        // in the high 4 bits and the output number on the chip in the low 4 bits.
+        // There's no gamma-corrected version of this output handler, so we don't
+        // need to worry about that here; just use the layered gamma as needed.
+        if (tlc59116 != 0)
+            lwp = new Lw59116Out((pin >> 4) & 0x0F, pin & 0x0F);
         break;
 
     case PortTypeVirtual:
@@ -3907,10 +3992,8 @@ void powerStatusUpdate(Config &cfg)
         else
         {
             // The latch didn't stick, so PSU2 was still off at
-            // our last check.  Try pulsing it again in case PSU2
-            // was turned on since the last check.
-            psu2_status_set->write(1);
-            psu2_state = 2;
+            // our last check.  Return to idle state.
+            psu2_state = 1;
         }
         break;
         
@@ -4197,6 +4280,8 @@ bool saveConfigToFlash(int tFollowup, bool reboot)
         saveConfigSucceededFlag = 0x40;
             
         // start the followup timer
+        saveConfigFollowupTime = tFollowup;
+        saveConfigFollowupTimer.reset();
         saveConfigFollowupTimer.start();
         
         // if a reboot is pending, flag it
@@ -4336,10 +4421,10 @@ static void toggleNightMode()
 // the plunger sensor interface object
 PlungerSensor *plungerSensor = 0;
 
-// wait for the plunger sensor to complete any outstanding read
+// wait for the plunger sensor to complete any outstanding DMA transfer
 static void waitPlungerIdle(void)
 {
-    while (!plungerSensor->ready()) { }
+    while (plungerSensor->dmaBusy()) { }
 }
 
 // Create the plunger sensor based on the current configuration.  If 
@@ -4409,8 +4494,9 @@ void createPlunger()
         break;
     }
     
-    // set the jitter filter
-    plungerSensor->setJitterWindow(cfg.plunger.jitterWindow);
+    // initialize the config variables affecting the plunger
+    plungerSensor->onConfigChange(19, cfg);
+    plungerSensor->onConfigChange(20, cfg);
 }
 
 // Global plunger calibration mode flag
@@ -4473,9 +4559,6 @@ public:
     {
         // not in a firing event yet
         firing = 0;
-
-        // no history yet
-        histIdx = 0;
     }
     
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -4492,25 +4575,6 @@ public:
         PlungerReading r;
         if (plungerSensor->read(r))
         {
-            // Pull the previous reading from the history
-            const PlungerReading &prv = nthHist(0);
-         
-            // If the new reading is within 1ms of the previous reading,
-            // ignore it.  We require a minimum time between samples to
-            // ensure that we have a usable amount of precision in the
-            // denominator (the time interval) for calculating the plunger
-            // velocity.  The CCD sensor hardware takes about 2.5ms to
-            // read, so it will never be affected by this, but other sensor
-            // types don't all have the same hardware cycle time, so we need
-            // to throttle them artificially.  E.g., the potentiometer only
-            // needs one ADC sample per reading, which only takes about 15us;
-            // the quadrature sensor needs no time at all since it keeps
-            // track of the position continuously via interrupts.  We don't
-            // need to check which sensor type we have here; we just ignore 
-            // readings until the minimum interval has passed.
-            if (uint32_t(r.t - prv.t) < 1000UL)
-                return;
-
             // check for calibration mode
             if (plungerCalMode)
             {
@@ -4575,98 +4639,130 @@ public:
                     r.pos = -JOYMAX;
             }
 
-            // Calculate the velocity from the second-to-last reading
-            // to here, in joystick distance units per microsecond.
-            // Note that we use the second-to-last reading rather than
-            // the very last reading to give ourselves a little longer
-            // time base.  The time base is so short between consecutive
-            // readings that the error bars in the position would be too
-            // large.
+            // Look for a firing event - the user releasing the plunger and
+            // allowing it to shoot forward at full speed.  Wait at least 5ms
+            // between samples for this, to help distinguish random motion 
+            // from the rapid motion of a firing event.  
             //
-            // For reference, the physical plunger velocity ranges up
-            // to about 100,000 joystick distance units/sec.  This is 
-            // based on empirical measurements.  The typical time for 
-            // a real plunger to travel the full distance when released 
-            // from full retraction is about 85ms, so the average velocity 
-            // covering this distance is about 56,000 units/sec.  The 
-            // peak is probably about twice that.  In real-world units, 
-            // this translates to an average speed of about .75 m/s and 
-            // a peak of about 1.5 m/s.
-            //
-            // Note that we actually calculate the value here in units
-            // per *microsecond* - the discussion above is in terms of
-            // units/sec because that's more on a human scale.  Our
-            // choice of internal units here really isn't important,
-            // since we only use the velocity for comparison purposes,
-            // to detect acceleration trends.  We therefore save ourselves
-            // a little CPU time by using the natural units of our inputs.
-            //
-            // We don't care about the absolute velocity; this is a purely
-            // relative calculation.  So to speed things up, calculate it
-            // in the integer domain, using a fixed-point representation
-            // with a 64K scale.  In other words, with the stored values
-            // shifted left 16 bits from the actual values: the value 1
-            // is stored as 1<<16.  The position readings are in the range
-            // -JOYMAX..JOYMAX, which fits in 16 bits, and the time 
-            // differences will generally be on the scale of a few 
-            // milliseconds = thousands of microseconds.  So the velocity
-            // figures will fit nicely into a 32-bit fixed point value with
-            // a 64K scale factor.
-            const PlungerReading &prv2 = nthHist(1);
-            int v = ((r.pos - prv2.pos) * 65536L)/int(r.t - prv2.t);
-            
-            // presume we'll report the latest instantaneous reading
+            // There's a trade-off in the choice of minimum sampling interval.
+            // The longer we wait, the more certain we can be of the trend.
+            // But if we wait too long, the user will perceive a delay.  We
+            // also want to sample frequently enough to see the release motion
+            // at intermediate steps along the way, so the sampling has to be
+            // considerably faster than the whole travel time, which is about
+            // 25-50ms.
+            if (uint32_t(r.t - prv.t) < 5000UL)
+                return;
+                
+            // assume that we'll report this reading as-is
             z = r.pos;
-            
-            // Check firing events
+                
+            // Firing event detection.
+            //
+            // A "firing event" is when the player releases the plunger from
+            // a retracted position, allowing it to shoot forward under the
+            // spring tension.
+            //
+            // We monitor the plunger motion for these events, and when they
+            // occur, we report an "idealized" version of the motion to the
+            // PC.  The idealized version consists of a series of readings
+            // frozen at the fully retracted position for the whole duration 
+            // of the forward travel, followed by a series of readings at the
+            // fully forward position for long enough for the plunger to come
+            // mostly to rest.  The series of frozen readings aren't meant to
+            // be perceptible to the player - we try to keep them short enough
+            // that they're not apparent as delay.  Instead, they're for the
+            // PC client software's benefit.  PC joystick clients use polling,
+            // so they only see an unpredictable subset of the readings we
+            // send.  The only way to be sure that the client sees a particular 
+            // reading is to hold it for long enough that the client is sure to
+            // poll within the hold interval.  In the case of the plunger 
+            // firing motion, it's important that the client sees the *ends*
+            // of the travel - the fully retracted starting position in
+            // particular.  If the PC client only polls for a sample while the
+            // plunger is somewhere in the middle of the travel, the PC will
+            // think that the firing motion *started* in that middle position,
+            // so it won't be able to model the right amount of momentum when
+            // the plunger hits the ball.  We try to ensure that the PC sees
+            // the right starting point by reporting the starting point for 
+            // extra time during the forward motion.  By the same token, we
+            // want the PC to know that the plunger has moved all the way
+            // forward, rather than mistakenly thinking that it stopped
+            // somewhere in the middle of the travel, so we freeze at the
+            // forward position for a short time.
+            //
+            // To detect a firing event, we look for forward motion that's
+            // fast enough to be a firing event.  To determine how fast is
+            // fast enough, we use a simple model of the plunger motion where 
+            // the acceleration is constant.  This is only an approximation, 
+            // as the spring force actually varies with spring's compression, 
+            // but it's close enough for our purposes here.
+            //
+            // Do calculations in fixed-point 2^48 scale with 64-bit ints.
+            // acc2 = acceleration/2 for 50ms release time, units of unit
+            // distances per microsecond squared, where the unit distance
+            // is the overall travel from the starting retracted position
+            // to the park position.
+            const int32_t acc2 = 112590;  // 2^48 scale
             switch (firing)
             {
             case 0:
-                // Default state - not in a firing event.  
-                
-                // If we have forward motion from a position that's retracted 
-                // beyond a threshold, enter phase 1.  If we're not pulled back
-                // far enough, don't bother with this, as a release wouldn't
-                // be strong enough to require the synthetic firing treatment.
-                if (v < 0 && r.pos > JOYMAX/6)
+                // Not in firing mode.  If we're retracted a bit, and the
+                // motion is forward at a fast enough rate to look like a
+                // release, enter firing mode.
+                if (r.pos > JOYMAX/6)
                 {
-                    // enter firing phase 1
-                    firingMode(1);
-                    
-                    // if in calibration state 1 (at rest), switch to state 2 (not 
-                    // at rest)
-                    if (calState == 1)
-                        calState = 2;
-                    
-                    // we don't have a freeze position yet, but note the start time
-                    f1.pos = 0;
-                    f1.t = r.t;
-                    
-                    // Figure the barrel spring "bounce" position in case we complete 
-                    // the firing event.  This is the amount that the forward momentum
-                    // of the plunger will compress the barrel spring at the peak of
-                    // the forward travel during the release.  Assume that this is
-                    // linearly proportional to the starting retraction distance.  
-                    // The barrel spring is about 1/6 the length of the main spring, 
-                    // so figure it compresses by 1/6 the distance.  (This is overly
-                    // simplistic and not very accurate, but it seems to give good 
-                    // visual results, and that's all it's for.)
-                    f2.pos = -r.pos/6;
+                    const uint32_t dt = uint32_t(r.t - prv.t);
+                    const uint32_t dt2 = dt*dt;  // dt^2
+                    if (r.pos < prv.pos - int((prv.pos*acc2*uint64_t(dt2)) >> 48))
+                    {
+                        // Tentatively enter firing mode.  Use the prior reading
+                        // as the starting point, and freeze reports for now.
+                        firingMode(1);
+                        f0 = prv;
+                        z = f0.pos;
+
+                        // if in calibration state 1 (at rest), switch to 
+                        // state 2 (not at rest)
+                        if (calState == 1)
+                            calState = 2;
+                    }
                 }
                 break;
                 
             case 1:
-                // Phase 1 - acceleration.  If we cross the zero point, trigger
-                // the firing event.  Otherwise, continue monitoring as long as we
-                // see acceleration in the forward direction.
+                // Tentative firing mode: the plunger was moving forward
+                // at last check.  To stay in firing mode, the plunger has
+                // to keep moving forward fast enough to look like it's 
+                // moving under spring force.  To figure out how fast is
+                // fast enough, we use a simple model where the acceleration
+                // is constant over the whole travel distance and the total
+                // travel time is 50ms.  The acceleration actually varies
+                // slightly since it comes from the spring force, which
+                // is linear in the displacement; but the plunger spring is
+                // fairly compressed even when the plunger is all the way
+                // forward, so the difference in tension from one end of
+                // the travel to the other is fairly small, so it's not too
+                // far off to model it as constant.  And the real travel
+                // time obviously isn't a constant, but all we need for 
+                // that is an upper bound.  So: we'll figure the time since 
+                // we entered firing mode, and figure the distance we should 
+                // have traveled to complete the trip within the maximum
+                // time allowed.  If we've moved far enough, we'll stay
+                // in firing mode; if not, we'll exit firing mode.  And if
+                // we cross the finish line while still in firing mode,
+                // we'll switch to the next phase of the firing event.
                 if (r.pos <= 0)
                 {
-                    // switch to the synthetic firing mode
+                    // We crossed the park position.  Switch to the second
+                    // phase of the firing event, where we hold the reported
+                    // position at the "bounce" position (where the plunger
+                    // is all the way forward, compressing the barrel spring).
+                    // We'll stick here long enough to ensure that the PC
+                    // client (Visual Pinball or whatever) sees the reading
+                    // and processes the release motion via the simulated
+                    // physics.
                     firingMode(2);
-                    z = f2.pos;
-                    
-                    // note the start time for the firing phase
-                    f2.t = r.t;
                     
                     // if in calibration mode, and we're in state 2 (moving), 
                     // collect firing statistics for calibration purposes
@@ -4676,141 +4772,95 @@ public:
                         // come to rest
                         calState = 0;
                         
-                        // collect average firing time statistics in millseconds, if 
-                        // it's in range (20 to 255 ms)
-                        int dt = uint32_t(r.t - f1.t)/1000UL;
-                        if (dt >= 20 && dt <= 255)
+                        // collect average firing time statistics in millseconds,
+                        // if it's in range (20 to 255 ms)
+                        const int dt = uint32_t(r.t - f0.t)/1000UL;
+                        if (dt >= 15 && dt <= 255)
                         {
                             calRlsTimeSum += dt;
                             calRlsTimeN += 1;
                             cfg.plunger.cal.tRelease = uint8_t(calRlsTimeSum / calRlsTimeN);
                         }
                     }
-                }
-                else if (v < vprv2)
-                {
-                    // We're still accelerating, and we haven't crossed the zero
-                    // point yet - stay in phase 1.  (Note that forward motion is
-                    // negative velocity, so accelerating means that the new 
-                    // velocity is more negative than the previous one, which
-                    // is to say numerically less than - that's why the test
-                    // for acceleration is the seemingly backwards 'v < vprv'.)
 
-                    // If we've been accelerating for at least 20ms, we're probably
-                    // really doing a release.  Jump back to the recent local
-                    // maximum where the release *really* started.  This is always
-                    // a bit before we started seeing sustained accleration, because
-                    // the plunger motion for the first few milliseconds is too slow
-                    // for our sensor precision to reliably detect acceleration.
-                    if (f1.pos != 0)
-                    {
-                        // we have a reset point - freeze there
-                        z = f1.pos;
-                    }
-                    else if (uint32_t(r.t - f1.t) >= 20000UL)
-                    {
-                        // it's been long enough - set a reset point.
-                        f1.pos = z = histLocalMax(r.t, 50000UL);
-                    }
+                    // Figure the "bounce" position as forward of the park
+                    // position by 1/6 of the starting retraction distance.
+                    // This simulates the momentum of the plunger compressing
+                    // the barrel spring on the rebound.  The barrel spring
+                    // can compress by about 1/6 of the maximum retraction 
+                    // distance, so we'll simply treat its compression as
+                    // proportional to the retraction.  (It might be more
+                    // realistic to use a slightly higher value here, maybe
+                    // 1/4 or 1/3 or the retraction distance, capping it at
+                    // a maximum of 1/6, because the real plunger probably 
+                    // compresses the barrel spring by 100% with less than 
+                    // 100% retraction.  But that won't affect the physics
+                    // meaningfully, just the animation, and the effect is
+                    // small in any case.)
+                    z = f0.pos = -f0.pos / 6;
+                    
+                    // reset the starting time for this phase
+                    f0.t = r.t;
                 }
                 else
                 {
-                    // We're not accelerating.  Cancel the firing event.
-                    firingMode(0);
-                    calState = 1;
+                    // check for motion since the start of the firing event
+                    const uint32_t dt = uint32_t(r.t - f0.t);
+                    const uint32_t dt2 = dt*dt;  // dt^2
+                    if (dt < 50000 
+                        && r.pos < f0.pos - int((f0.pos*acc2*uint64_t(dt2)) >> 48))
+                    {
+                        // It's moving fast enough to still be in a release
+                        // motion.  Continue reporting the start position, and
+                        // stay in the first release phase.
+                        z = f0.pos;
+                    }
+                    else
+                    {
+                        // It's not moving fast enough to be a release
+                        // motion.  Return to the default state.
+                        firingMode(0);
+                        calState = 1;
+                    }
                 }
                 break;
                 
             case 2:
-                // Phase 2 - start of synthetic firing event.  Report the fake
-                // bounce for 25ms.  VP polls the joystick about every 10ms, so 
-                // this should be enough time to guarantee that VP sees this
-                // report at least once.
-                if (uint32_t(r.t - f2.t) < 25000UL)
+                // Firing mode, holding at forward compression position.
+                // Hold here for 25ms.
+                if (uint32_t(r.t - f0.t) < 25000)
                 {
-                    // report the bounce position
-                    z = f2.pos;
+                    // stay here for now
+                    z = f0.pos;
                 }
                 else
                 {
-                    // it's been long enough - switch to phase 3, where we
-                    // report the park position until the real plunger comes
-                    // to rest
+                    // advance to the next phase, where we report the park
+                    // position until the plunger comes to rest
                     firingMode(3);
                     z = 0;
-                    
-                    // set the start of the "stability window" to the rest position
-                    f3s.t = r.t;
-                    f3s.pos = 0;
-                    
-                    // set the start of the "retraction window" to the actual position
-                    f3r = r;
+
+                    // remember when we started
+                    f0.t = r.t;
                 }
                 break;
                 
             case 3:
-                // Phase 3 - in synthetic firing event.  Report the park position
-                // until the plunger position stabilizes.  Left to its own devices, 
-                // the plunger will usualy bounce off the barrel spring several 
-                // times before coming to rest, so we'll see oscillating motion
-                // for a second or two.  In the simplest case, we can aimply wait
-                // for the plunger to stop moving for a short time.  However, the
-                // player might intervene by pulling the plunger back again, so
-                // watch for that motion as well.  If we're just bouncing freely,
-                // we'll see the direction change frequently.  If the player is
-                // moving the plunger manually, the direction will be constant
-                // for longer.
-                if (v >= 0)
+                // Firing event, holding at park position.  Stay here for
+                // a few moments so that the PC client can simulate the
+                // full release motion, then return to real readings.
+                if (uint32_t(r.t - f0.t) < 250000)
                 {
-                    // We're moving back (or standing still).  If this has been
-                    // going on for a while, the user must have taken control.
-                    if (uint32_t(r.t - f3r.t) > 65000UL)
-                    {
-                        // user has taken control - cancel firing mode
-                        firingMode(0);
-                        break;
-                    }
-                }
-                else
-                {
-                    // forward motion - reset retraction window
-                    f3r.t = r.t;
-                }
-
-                // Check if we're close to the last starting point.  The joystick
-                // positive axis range (0..4096) covers the retraction distance of 
-                // about 2.5", so 1" is about 1638 joystick units, hence 1/16" is
-                // about 100 units.
-                if (abs(r.pos - f3s.pos) < 100)
-                {
-                    // It's at roughly the same position as the starting point.
-                    // Consider it stable if this has been true for 300ms.
-                    if (uint32_t(r.t - f3s.t) > 300000UL)
-                    {
-                        // we're done with the firing event
-                        firingMode(0);
-                    }
-                    else
-                    {
-                        // it's close to the last position but hasn't been
-                        // here long enough; stay in firing mode and continue
-                        // to report the park position
-                        z = 0;
-                    }
-                }
-                else
-                {
-                    // It's not close enough to the last starting point, so use
-                    // this as a new starting point, and stay in firing mode.
-                    f3s = r;
+                    // stay here a while longer
                     z = 0;
+                }
+                else
+                {
+                    // it's been long enough - return to normal mode
+                    firingMode(0);
                 }
                 break;
             }
-            
-            // save the velocity reading for next time
-            vprv2 = vprv;
-            vprv = v;
             
             // Check for auto-zeroing, if enabled
             if ((cfg.plunger.autoZero.flags & PlungerAutoZeroEnabled) != 0)
@@ -4837,10 +4887,8 @@ public:
                 }
             }
             
-            // add the new reading to the history
-            hist[histIdx] = r;
-            if (++histIdx >= countof(hist))
-                histIdx = 0;
+            // this new reading becomes the previous reading for next time
+            prv = r;
         }
     }
     
@@ -4851,9 +4899,6 @@ public:
         return z;
     }
         
-    // get the timestamp of the current joystick report (microseconds)
-    uint32_t getTimestamp() const { return nthHist(0).t; }
-
     // Set calibration mode on or off
     void setCalMode(bool f) 
     {
@@ -4942,6 +4987,12 @@ public:
     bool isFiring() { return firing == 3; }
     
 private:
+    // current reported joystick reading
+    int z;
+    
+    // previous reading
+    PlungerReading prv;
+
     // Calibration state.  During calibration mode, we watch for release
     // events, to measure the time it takes to complete the release
     // motion; and we watch for the plunger to come to reset after a
@@ -4978,105 +5029,21 @@ private:
         firing = m;
     }
     
-    // Find the most recent local maximum in the history data, up to
-    // the given time limit.
-    int histLocalMax(uint32_t tcur, uint32_t dt)
-    {
-        // start with the prior entry
-        int idx = (histIdx == 0 ? countof(hist) : histIdx) - 1;
-        int hi = hist[idx].pos;
-        
-        // scan backwards for a local maximum
-        for (int n = countof(hist) - 1 ; n > 0 ; idx = (idx == 0 ? countof(hist) : idx) - 1)
-        {
-            // if this isn't within the time window, stop
-            if (uint32_t(tcur - hist[idx].t) > dt)
-                break;
-                
-            // if this isn't above the current hith, stop
-            if (hist[idx].pos < hi)
-                break;
-                
-            // this is the new high
-            hi = hist[idx].pos;
-        }
-        
-        // return the local maximum
-        return hi;
-    }
-
-    // velocity at previous reading, and the one before that
-    int vprv, vprv2;
-    
-    // Circular buffer of recent readings.  We keep a short history
-    // of readings to analyze during firing events.  We can only identify
-    // a firing event once it's somewhat under way, so we need a little
-    // retrospective information to accurately determine after the fact
-    // exactly when it started.  We throttle our readings to no more
-    // than one every 1ms, so we have at least N*1ms of history in this
-    // array.
-    PlungerReading hist[32];
-    int histIdx;
-    
-    // get the nth history item (0=last, 1=2nd to last, etc)
-    inline const PlungerReading &nthHist(int n) const
-    {
-        // histIdx-1 is the last written; go from there
-        n = histIdx - 1 - n;
-        
-        // adjust for wrapping
-        if (n < 0)
-            n += countof(hist);
-            
-        // return the item
-        return hist[n];
-    }
-
     // Firing event state.
     //
-    //   0 - Default state.  We report the real instantaneous plunger 
-    //       position to the joystick interface.
+    //   0 - Default state: not in firing event.  We report the true
+    //       instantaneous plunger position to the joystick interface.
     //
-    //   1 - Moving forward
+    //   1 - Moving forward at release speed
     //
-    //   2 - Accelerating
+    //   2 - Firing - reporting the bounce position
     //
-    //   3 - Firing.  We report the rest position for a minimum interval,
-    //       or until the real plunger comes to rest somewhere.
+    //   3 - Firing - reporting the park position
     //
     int firing;
     
-    // Position/timestamp at start of firing phase 1.  When we see a
-    // sustained forward acceleration, we freeze joystick reports at
-    // the recent local maximum, on the assumption that this was the
-    // start of the release.  If this is zero, it means that we're
-    // monitoring accelerating motion but haven't seen it for long
-    // enough yet to be confident that a release is in progress.
-    PlungerReading f1;
-    
-    // Position/timestamp at start of firing phase 2.  The position is
-    // the fake "bounce" position we report during this phase, and the
-    // timestamp tells us when the phase began so that we can end it
-    // after enough time elapses.
-    PlungerReading f2;
-    
-    // Position/timestamp of start of stability window during phase 3.
-    // We use this to determine when the plunger comes to rest.  We set
-    // this at the beginning of phase 3, and then reset it when the 
-    // plunger moves too far from the last position.
-    PlungerReading f3s;
-    
-    // Position/timestamp of start of retraction window during phase 3.
-    // We use this to determine if the user is drawing the plunger back.
-    // If we see retraction motion for more than about 65ms, we assume
-    // that the user has taken over, because we should see forward
-    // motion within this timeframe if the plunger is just bouncing
-    // freely.
-    PlungerReading f3r;
-    
-    // next Z value to report to the joystick interface (in joystick 
-    // distance units)
-    int z;
+    // Starting position for current firing mode phase
+    PlungerReading f0;
 };
 
 // plunger reader singleton
@@ -5574,10 +5541,9 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
         // in a variable-dependent format.
         configVarSet(data);
         
-        // If updating the jitter window (variable 19), apply it immediately
-        // to the plunger sensor object
-        if (data[1] == 19)
-            plungerSensor->setJitterWindow(cfg.plunger.jitterWindow);
+        // notify the plunger, so that it can update relevant variables
+        // dynamically
+        plungerSensor->onConfigChange(data[1], cfg);
     }
     else if (data[0] == 67)
     {
@@ -5775,6 +5741,9 @@ int main(void)
     // set up the TLC5940 interface, if these chips are present
     init_tlc5940(cfg);
 
+    // initialize the TLC5916 interface, if these chips are present
+    init_tlc59116(cfg);
+    
     // set up 74HC595 interface, if these chips are present
     init_hc595(cfg);
     
@@ -5787,7 +5756,7 @@ int main(void)
     // start the TLC5940 refresh cycle clock
     if (tlc5940 != 0)
         tlc5940->start();
-
+        
     // Assume that nothing uses keyboard keys.  We'll check for keyboard
     // usage when initializing the various subsystems that can send keys
     // (buttons, IR).  If we find anything that does, we'll create the
@@ -5927,6 +5896,8 @@ int main(void)
         tlc5940->enable(true);
     if (hc595 != 0)
         hc595->enable(true);
+    if (tlc59116 != 0)
+        tlc59116->enable(true);
         
     // start the LedWiz flash cycle timer
     wizCycleTimer.start();
@@ -5985,6 +5956,10 @@ int main(void)
         // send TLC5940 data updates if applicable
         if (tlc5940 != 0)
             tlc5940->send();
+            
+        // send TLC59116 data updates
+        if (tlc59116 != 0)
+            tlc59116->send();
        
         // collect diagnostic statistics, checkpoint 1
         IF_DIAG(mainLoopIterCheckpt[1] += mainLoopTimer.read_us();)
@@ -6255,6 +6230,8 @@ int main(void)
                     // the power first comes on.
                     if (tlc5940 != 0)
                         tlc5940->enable(false);
+                    if (tlc59116 != 0)
+                        tlc59116->enable(false);
                     if (hc595 != 0)
                         hc595->enable(false);
                 }
@@ -6263,7 +6240,7 @@ int main(void)
         
         // if we have a reboot timer pending, check for completion
         if (saveConfigFollowupTimer.isRunning() 
-            && saveConfigFollowupTimer.read() > saveConfigFollowupTime)
+            && saveConfigFollowupTimer.read_us() > saveConfigFollowupTime*1000000UL)
         {
             // if a reboot is pending, execute it now
             if (saveConfigRebootPending)
@@ -6323,6 +6300,10 @@ int main(void)
                 // send TLC5940 data if necessary
                 if (tlc5940 != 0)
                     tlc5940->send();
+                    
+                // update TLC59116 outputs
+                if (tlc59116 != 0)
+                    tlc59116->send();
                 
                 // show a diagnostic flash every couple of seconds
                 if (diagTimer.read_us() > 2000000)
@@ -6364,10 +6345,9 @@ int main(void)
 
             // Enable peripheral chips and update them with current output data
             if (tlc5940 != 0)
-            {
                 tlc5940->enable(true);
-                tlc5940->update(true);
-            }
+            if (tlc59116 != 0)
+                tlc59116->enable(true);
             if (hc595 != 0)
             {
                 hc595->enable(true);

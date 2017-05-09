@@ -94,7 +94,7 @@ bool USBJoystick::mediaUpdate(uint8_t data)
 }
  
 bool USBJoystick::sendPlungerStatus(
-    int npix, int edgePos, int flags, uint32_t avgScanTime, uint32_t processingTime)
+    int npix, int plungerPos, int flags, uint32_t avgScanTime, uint32_t processingTime)
 {
     HID_REPORT report;
     
@@ -112,8 +112,8 @@ bool USBJoystick::sendPlungerStatus(
     put(ofs, uint16_t(npix));
     ofs += 2;
     
-    // write the shadow edge position to bytes 5-6
-    put(ofs, uint16_t(edgePos));
+    // write the detected plunger position to bytes 5-6
+    put(ofs, uint16_t(plungerPos));
     ofs += 2;
     
     // Add the calibration mode flag if applicable
@@ -190,6 +190,45 @@ bool USBJoystick::sendPlungerStatus2(
     report.length = reportLen;
     return sendTO(&report, 100);
 }
+
+bool USBJoystick::sendPlungerStatusBarcode(
+        int nbits, int codetype, int startOfs, int pixPerBit, int raw, int mask)
+{
+    HID_REPORT report;
+    memset(report.data, 0, sizeof(report.data));
+    
+    // Set the special status bits to indicate it's an extended
+    // exposure report.
+    put(0, 0x87FF);
+    
+    // start at the second byte
+    int ofs = 2;
+    
+    // write the report subtype (2) to byte 2
+    report.data[ofs++] = 2;
+
+    // write the bit count and code type
+    report.data[ofs++] = nbits;
+    report.data[ofs++] = codetype;
+    
+    // write the bar code starting pixel offset
+    put(ofs, uint16_t(startOfs));
+    ofs += 2;
+    
+    // write the pixel width per bit
+    report.data[ofs++] = pixPerBit;
+    
+    // write the raw bar code and success bit mask
+    put(ofs, uint16_t(raw));
+    ofs += 2;
+    put(ofs, uint16_t(mask));
+    ofs += 2;
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
 
 bool USBJoystick::sendPlungerPix(int &idx, int npix, const uint8_t *pix)
 {

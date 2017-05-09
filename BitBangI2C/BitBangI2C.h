@@ -34,13 +34,17 @@
 // the nominal address from the data sheet left one bit in each call
 // to a routine here.
 //
-// Electrically, the I2C bus is designed as a a pair of open-collector 
-// lines with pull-up resistors.  Any device can pull a line low by
-// shorting it to ground, but no one can pull a line high: instead, you
-// *allow* a line to go high by releasing it, which is to say putting
-// your connection to it in a high-Z state.  On an MCU, we put a GPIO
-// pin in high-Z state by setting its direction to INPUT mode.  So our
-// GPIO write strategy is like this:
+// Electrically, the I2C bus consists of two lines, SDA (data) and SCL
+// (clock).  Multiple devices can connect to the bus by connecting to
+// these two lines; the lines are shared among all of the devices.  Each
+// line has a pull-up resistor that pulls it to logic '1' voltage.  Each
+// device connects with an open-collector circuit that can short the line
+// to ground (logic '0').  This means that any device can assert a 'low'
+// but no one can actually assert a 'high'; the pull-up makes it so that
+// a 'high' occurs when no one is asserting a 'low'.  On an MCU, we release
+// a line by putting the GPIO pin in high-Z state, which we can do on the
+// KL25Z by setting its direction to INPUT mode.  So our GPIO write strategy 
+// is like this:
 //
 //   - take a pin low (0):   
 //        pin.input(); 
@@ -54,6 +58,12 @@
 // the direction to output is enough to assert the low level, since the
 // hardware asserts the level that was previously stored in the output
 // register whenever the direction is changed from input to output.
+//
+// The KL25Z by default provides a built-in pull-up resistor on each GPIO
+// set to input mode.  This can optionally be used as the bus-wide pull-up
+// for each line.  Standard practice is to use external pull-up resistors
+// rather than MCU pull-ups, but the internal pull-ups are fine for ad hoc
+// setups where there's only one external device connected to a GPIO pair.
 
 
 #ifndef _BITBANGI2C_H_
@@ -62,6 +72,27 @@
 #include "mbed.h"
 #include "gpio_api.h"
 #include "pinmap.h"
+
+
+// For testing purposes: a cover class for the mbed library I2C bridging
+// the minor differences in our interface.  This allows switching between
+// BitBangI2C and the mbed library I2C via a macro of the like.
+class MbedI2C: public I2C
+{
+public:
+    MbedI2C(PinName sda, PinName scl, bool internalPullups) : I2C(sda, scl) { }
+    
+    int write(int addr, const uint8_t *data, size_t len, bool repeated = false)
+    {
+        return I2C::write(addr, (const char *)data, len, repeated);
+    }
+    int read(int addr, uint8_t *data, size_t len, bool repeated = false)
+    {
+        return I2C::read(addr, (char *)data, len, repeated);
+    }
+    
+    void reset() { }
+};
 
 
 // DigitalInOut replacmement class for I2C use.  I2C uses pins a little
@@ -81,19 +112,23 @@
 class I2CInOut
 {
 public:
-    I2CInOut(PinName pin)
+    I2CInOut(PinName pin, bool internalPullup)
     {
         // initialize the pin
         gpio_t g;
         gpio_init(&g, pin);
         
         // get the registers
-        unsigned int port = (unsigned int)pin >> PORT_SHIFT;
-        FGPIO_Type *r = (FGPIO_Type *)(FPTA_BASE + port*0x40);
-        __IO uint32_t *pin_pcr = (__IO uint32_t*)(PORTA_BASE + pin); 
+        unsigned int portno = (unsigned int)pin >> PORT_SHIFT;
+        uint32_t pinno = (uint32_t)(pin & 0x7C) >> 2;
+        FGPIO_Type *r = (FGPIO_Type *)(FPTA_BASE + portno*0x40);
+        __IO uint32_t *pin_pcr = &(((PORT_Type *)(PORTA_BASE + 0x1000*portno)))->PCR[pinno];
         
-        // set no-pull-up mode (clear PE bit = Pull Enable)
-        *pin_pcr &= ~0x02;
+        // set the desired internal pull-up mode
+        if (internalPullup)
+            *pin_pcr |= 0x02;
+        else
+            *pin_pcr &= ~0x02;
            
         // save the register information we'll need later
         this->mask = g.mask;
@@ -148,7 +183,7 @@ class BitBangI2C
 {
 public:    
     // create the interface
-    BitBangI2C(PinName sda, PinName scl);
+    BitBangI2C(PinName sda, PinName scl, bool internalPullups);
 
     // set the bus frequency in Hz
     void frequency(uint32_t freq);
@@ -192,7 +227,7 @@ protected:
         
         // clock it
         sclPin.hi();
-        hiResWait(tData);
+        hiResWait(tHigh);
         
         // drop the clock
         sclPin.lo();
@@ -208,9 +243,9 @@ protected:
     inline void sdaHi() { sdaPin.hi(); }
     inline void sdaLo() { sdaPin.lo(); }
 
-    // SCL and SDA pins
-    I2CInOut sclPin;
+    // SDA and SCL pins
     I2CInOut sdaPin;
+    I2CInOut sclPin;
 
     // inverse of frequency = clock period in microseconds
     uint32_t clkPeriod_us;
@@ -263,13 +298,15 @@ protected:
     //
     int tLow;       // SCL low period
     int tHigh;      // SCL high period
-    int tBuf;       // bus free time between start and stop conditions
     int tHdSta;     // hold time for start condition
     int tSuSta;     // setup time for repeated start condition
     int tSuSto;     // setup time for stop condition
     int tSuDat;     // data setup time
     int tAck;       // ACK time
-    int tData;      // data valid time
+    int tBuf;       // bus free time between start and stop conditions
+    
+    // are we in a Stop condition?
+    bool inStop;
 };
  
 #endif /* _BITBANGI2C_H_ */

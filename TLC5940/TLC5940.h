@@ -392,16 +392,6 @@ public:
         }
     }
     
-    // Update the outputs.  In our current implementation, this doesn't do
-    // anything, since we send the current state to the chips on every grayscale
-    // cycle, whether or not there are updates.  We provide the interface for
-    // consistency with other peripheral device interfaces in the main loop,
-    // and in case we make any future implementation changes that require some
-    // action to carry out an explicit update.
-    void update(bool force = false)
-    {
-    }
-    
     // Send updates if ready.  Our top-level program's main loop calls this on
     // every iteration.  This lets us send grayscale updates to the chips in
     // regular application context (rather than in interrupt context), to keep

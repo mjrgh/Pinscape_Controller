@@ -15,35 +15,35 @@
 #define _TSL14XXSENSOR_H_
 
 #include "plunger.h"
+#include "edgeSensor.h"
+#include "barCodeSensor.h"
 #include "TSL14xx.h"
 
-class PlungerSensorTSL14xx: public PlungerSensor
+class PlungerSensorImageInterfaceTSL14xx: public PlungerSensorImageInterface
 {
 public:
-    PlungerSensorTSL14xx(int nativePix, int nativeScale, 
-        PinName si, PinName clock, PinName ao)
-        : PlungerSensor(nativeScale),
-          sensor(nativePix, si, clock, ao)
+    PlungerSensorImageInterfaceTSL14xx(int nativePix, PinName si, PinName clock, PinName ao)
+        : PlungerSensorImageInterface(nativePix), sensor(nativePix, si, clock, ao)
     {
-        // remember the native pixel size
-        native_npix = nativePix;
-        
-        // start with no additional integration time for automatic 
-        // exposure control
-        axcTime = 0;
     }
         
     // is the sensor ready?
     virtual bool ready() { return sensor.ready(); }
+    
+    // is a DMA transfer in progress?
+    virtual bool dmaBusy() { return sensor.dmaBusy(); }
     
     virtual void init()
     {
         sensor.clear();
     }
     
-    // Send a status report to the joystick interface.
-    // See plunger.h for details on the arguments.
-    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t extraTime)
+    // get the average sensor scan time
+    virtual uint32_t getAvgScanTime() { return sensor.getAvgScanTime(); }
+    
+protected:
+    virtual void getStatusReportPixels(
+        uint8_t* &pix, uint32_t &t, int axcTime, int extraTime)
     {
         // The sensor's internal buffering scheme makes it a little tricky
         // to get the requested timing, and our own double-buffering adds a
@@ -90,85 +90,12 @@ public:
         
         // wait for the DMA transfer of period B to finish, and get the 
         // period B pixels
-        uint8_t *pix;
-        uint32_t t;
         sensor.waitPix(pix, t);
-
-        // start a timer to measure the processing time
-        Timer pt;
-        pt.start();
-
-        // process the pixels and read the position
-        int pos, rawPos;
-        int n = native_npix;
-        if (process(pix, n, rawPos))
-        {
-            // success - apply the jitter filter
-            pos = jitterFilter(rawPos);
-        }
-        else
-        {
-            // report 0xFFFF to indicate that the position wasn't read
-            pos = 0xFFFF;
-            rawPos = 0xFFFF;
-        }
-        
-        // note the processing time
-        uint32_t processTime = pt.read_us();
-        
-        // If a low-res scan is desired, reduce to a subset of pixels.  Ignore
-        // this for smaller sensors (below 512 pixels)
-        if ((flags & 0x01) && n >= 512)
-        {
-            // figure how many sensor pixels we combine into each low-res pixel
-            const int group = 8;
-            int lowResPix = n / group;
-            
-            // combine the pixels
-            int src, dst;
-            for (src = dst = 0 ; dst < lowResPix ; ++dst)
-            {
-                // average this block of pixels
-                int a = 0;
-                for (int j = 0 ; j < group ; ++j)
-                    a += pix[src++];
-                        
-                // we have the sum, so get the average
-                a /= group;
-
-                // store the down-res'd pixel in the array
-                pix[dst] = uint8_t(a);
-            }
-            
-            // update the pixel count to the reduced array size
-            n = lowResPix;
-        }
-        
-        // figure the report flags
-        int jsflags = 0;
-        
-        // add flags for the detected orientation: 0x01 for normal orientation,
-        // 0x02 for reversed orientation; no flags if orientation is unknown
-        int dir = getOrientation();
-        if (dir == 1) 
-            jsflags |= 0x01; 
-        else if (dir == -1)
-            jsflags |= 0x02;
-            
-        // send the sensor status report headers
-        js.sendPlungerStatus(n, pos, jsflags, sensor.getAvgScanTime(), processTime);
-        js.sendPlungerStatus2(nativeScale, jfLo, jfHi, rawPos, axcTime);
-        
-        // If we're not in calibration mode, send the pixels
-        extern bool plungerCalMode;
-        if (!plungerCalMode)
-        {
-            // send the pixels in report-sized chunks until we get them all
-            int idx = 0;
-            while (idx < n)
-                js.sendPlungerPix(idx, n, pix);
-        }
-            
+    }
+    
+    // reset after a status report
+    virtual void resetAfterStatusReport(int axcTime)
+    {
         // It takes us a while to send all of the pixels, since we have
         // to break them up into many USB reports.  This delay means that
         // the sensor has been sitting there integrating for much longer
@@ -179,39 +106,9 @@ public:
         sensor.clear();
         sensor.startCapture(axcTime);
     }
-    
-    // get the average sensor scan time
-    virtual uint32_t getAvgScanTime() { return sensor.getAvgScanTime(); }
-    
-protected:
-    // Analyze the image and find the plunger position.  If successful,
-    // fills in 'pixpos' with the plunger position using the 0..65535
-    // scale and returns true.  If no position can be detected from the
-    // image data, returns false.
-    virtual bool process(const uint8_t *pix, int npix, int &pixpos) = 0;
-    
-    // Get the currently detected sensor orientation, if applicable.
-    // Returns 1 for standard orientation, -1 for reversed orientation,
-    // or 0 for orientation unknown or not applicable.  Edge sensors can
-    // automatically detect orientation by observing which side of the
-    // image is in shadow.  Bar code sensors generally can't detect
-    // orientation.
-    virtual int getOrientation() const { return 0; }
-    
+
     // the low-level interface to the TSL14xx sensor
     TSL14xx sensor;
-    
-    // number of pixels
-    int native_npix;
-
-    // Automatic exposure control time, in microseconds.  This is an amount
-    // of time we add to each integration cycle to compensate for low light
-    // levels.  By default, this is always zero; the base class doesn't have
-    // any logic for determining proper exposure, because that's a function
-    // of the type of image we're looking for.  Subclasses can add logic in
-    // the process() function to check exposure level and adjust this value
-    // if the image looks over- or under-exposed.
-    uint32_t axcTime;
 };
 
 // ---------------------------------------------------------------------
@@ -245,42 +142,23 @@ protected:
 // but that would complicate things considerably since our image
 // analysis is too time-consuming to do in interrupt context.
 //
-class PlungerSensorTSL14xxLarge: public PlungerSensorTSL14xx
+class PlungerSensorTSL14xxLarge: public PlungerSensorImageInterfaceTSL14xx
 {
 public:
-    PlungerSensorTSL14xxLarge(int nativePix, int nativeScale, 
-        PinName si, PinName clock, PinName ao)
-        : PlungerSensorTSL14xx(nativePix, nativeScale, si, clock, ao)
+    PlungerSensorTSL14xxLarge(int nativePix, PinName si, PinName clock, PinName ao)
+        : PlungerSensorImageInterfaceTSL14xx(nativePix, si, clock, ao)
     {
     }
 
-    // read the plunger position
-    virtual bool readRaw(PlungerReading &r)
-    {
+    virtual void readPix(uint8_t* &pix, uint32_t &t, int axcTime)
+    {        
         // start reading the next pixel array (this waits for any DMA
         // transfer in progress to finish, ensuring a stable pixel buffer)
         sensor.startCapture(axcTime);
 
         // get the image array from the last capture
-        uint8_t *pix;
-        uint32_t tpix;
-        sensor.getPix(pix, tpix);
+        sensor.getPix(pix, t);
         
-        // process the pixels
-        int pixpos;
-        if (process(pix, native_npix, pixpos))
-        {            
-            r.pos = pixpos;
-            r.t = tpix;
-            
-            // success
-            return true;
-        }
-        else
-        {
-            // no position found
-            return false;
-        }
     }
 };        
 
@@ -307,17 +185,16 @@ public:
 // transferring period A's pixels into a DMA buffer.  We want
 // those period A pixels, so we wait for this transfer to finish.
 //
-class PlungerSensorTSL14xxSmall: public PlungerSensorTSL14xx
+class PlungerSensorTSL14xxSmall: public PlungerSensorImageInterfaceTSL14xx
 {
 public:
-    PlungerSensorTSL14xxSmall(int nativePix, int nativeScale, 
-        PinName si, PinName clock, PinName ao)
-        : PlungerSensorTSL14xx(nativePix, nativeScale, si, clock, ao)
+    PlungerSensorTSL14xxSmall(int nativePix, PinName si, PinName clock, PinName ao)
+        : PlungerSensorImageInterfaceTSL14xx(nativePix, si, clock, ao)
     {
     }
 
-    // read the plunger position
-    virtual bool readRaw(PlungerReading &r)
+    // read the image
+    virtual void readPix(uint8_t* &pix, uint32_t &t, int axcTime)
     {
         // Clear the sensor.  This sends a HOLD/SI pulse to the sensor,
         // which ends the current integration period, starts a new one
@@ -339,27 +216,55 @@ public:
         
         // wait for the period A pixel transfer to finish, and grab
         // its pixels
-        uint8_t *pix;
-        uint32_t tpix;
-        sensor.waitPix(pix, tpix);
-        
-        // process the pixels
-        int pixpos;
-        if (process(pix, native_npix, pixpos))
-        {            
-            r.pos = pixpos;
-            r.t = tpix;
-            
-            // success
-            return true;
-        }
-        else
-        {
-            // no position found
-            return false;
-        }
+        sensor.waitPix(pix, t);
     }
 };        
+
+
+// -------------------------------------------------------------------------
+//
+// Concrete TSL14xx sensor types
+//
+
+
+// TSL1410R sensor - edge detection sensor
+class PlungerSensorTSL1410R: public PlungerSensorEdgePos
+{
+public:
+    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao)
+        : PlungerSensorEdgePos(sensor, 1280), sensor(1280, si, clock, ao)
+    {
+    }
+    
+protected:
+    PlungerSensorTSL14xxLarge sensor;
+};
+
+// TSL1412R - edge detection sensor
+class PlungerSensorTSL1412R: public PlungerSensorEdgePos
+{
+public:
+    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao)
+        : PlungerSensorEdgePos(sensor, 1536), sensor(1536, si, clock, ao)
+    {
+    }
+    
+protected:
+    PlungerSensorTSL14xxLarge sensor;
+};
+
+// TSL1401CL - bar code sensor
+class PlungerSensorTSL1401CL: public PlungerSensorBarCode<7, 0, 1, 16>
+{
+public:
+    PlungerSensorTSL1401CL(PinName si, PinName clock, PinName ao)
+        : PlungerSensorBarCode(sensor, 128), sensor(128, si, clock, ao)
+    {
+    }
+    
+protected:
+    PlungerSensorTSL14xxSmall sensor;
+};
 
 
 #endif

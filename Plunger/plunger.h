@@ -13,6 +13,8 @@
 #ifndef PLUNGER_H
 #define PLUNGER_H
 
+#include "config.h"
+
 // Plunger reading with timestamp
 struct PlungerReading
 {
@@ -73,6 +75,9 @@ public:
     // working on the current reading's data transfer.
     virtual bool ready() { return true; }
     
+    // Is a plunger DMA operation in progress?
+    virtual bool dmaBusy() { return false; }
+    
     // Read the sensor position, if possible.  Returns true on success,
     // false if it wasn't possible to take a reading.  On success, fills
     // in 'r' with the current reading and timestamp and returns true.
@@ -103,7 +108,7 @@ public:
         if (readRaw(r))
         {
             // process it through the jitter filter
-            //$$$ r.pos = jitterFilter(r.pos);
+            r.pos = jitterFilter(r.pos);
             
             // adjust to the abstract scale via the scaling factor
             r.pos = uint16_t(uint32_t((scalingFactor * r.pos) + 32768) >> 16);
@@ -195,7 +200,9 @@ public:
             // of the window
             jfLo = pos;
             jfHi = pos + jfWindow;
-            jfLast = pos;
+            
+            // figure the new position as the centerpoint of the new window
+            jfLast = pos = (jfHi + jfLo)/2;
             return pos;
         }
         else if (pos > jfHi)
@@ -205,7 +212,9 @@ public:
             // the window
             jfHi = pos;
             jfLo = pos - jfWindow;
-            jfLast = pos;
+
+            // figure the new position as the centerpoint of the new window
+            jfLast = pos = (jfHi + jfLo)/2;
             return pos;
         }
         else
@@ -213,6 +222,20 @@ public:
             // the new position is inside the current window, so repeat
             // the last reading
             return jfLast;
+        }
+    }
+    
+    // Process a configuration variable change.  'varno' is the
+    // USB protocol variable number being updated; 'cfg' is the
+    // updated configuration.
+    virtual void onConfigChange(int varno, Config &cfg)
+    {
+        switch (varno)
+        {
+        case 19:
+            // jitter window
+            setJitterWindow(cfg.plunger.jitterWindow);
+            break;
         }
     }
     
@@ -263,5 +286,218 @@ protected:
     int jfLo, jfHi;              // bounds of current window
     int jfLast;                  // last filtered reading
 };
+
+
+// --------------------------------------------------------------------------
+//
+// Generic image sensor interface for image-based plungers
+//
+class PlungerSensorImageInterface
+{
+public:
+    PlungerSensorImageInterface(int npix)
+    {
+        native_npix = npix;
+    }
+    
+    // initialize the sensor
+    virtual void init() = 0;
+
+    // is the sensor ready?
+    virtual bool ready() = 0;
+    
+    // is a DMA transfer in progress?
+    virtual bool dmaBusy() = 0;
+
+    // read the image
+    virtual void readPix(uint8_t* &pix, uint32_t &t, int axcTime) = 0;
+    
+    // Get an image for a pixel status report.  't' is the timestamp of
+    // the image.  'extraTime' is extra exposure time for the image, in
+    // 0.1ms increments.
+    virtual void getStatusReportPixels(
+        uint8_t* &pix, uint32_t &t, int axcTime, int extraTime) = 0;
+    
+    // Reset the sensor after a status report.  Status reports take a long
+    // time to send, so sensors that use continuous integration cycling may
+    // need to reset after a status report so that they aren't overexposed
+    // by the long delay of sending the status report.
+    virtual void resetAfterStatusReport(int axcTime) = 0;
+    
+    // get the average sensor pixel scan time (the time it takes on average
+    // to read one image frame from the sensor)
+    virtual uint32_t getAvgScanTime() = 0;
+    
+protected:
+    // number of pixels on sensor
+    int native_npix;
+};
+
+
+// ----------------------------------------------------------------------------
+//
+// Plunger base class for image-based sensors
+//
+template<class ProcessResult>
+class PlungerSensorImage: public PlungerSensor
+{
+public:
+    PlungerSensorImage(PlungerSensorImageInterface &sensor, int npix, int nativeScale)
+        : PlungerSensor(nativeScale), sensor(sensor)
+    {
+        axcTime = 0;
+        native_npix = npix;
+    }
+    
+    // initialize the sensor
+    virtual void init() { sensor.init(); }
+
+    // is the sensor ready?
+    virtual bool ready() { return sensor.ready(); }
+    
+    // is a DMA transfer in progress?
+    virtual bool dmaBusy() { return sensor.dmaBusy(); }
+    
+    // get the pixel transfer time
+    virtual uint32_t getAvgScanTime() { return sensor.getAvgScanTime(); }
+
+    // read the plunger position
+    virtual bool readRaw(PlungerReading &r)
+    {
+        // read pixels from the sensor
+        uint8_t *pix;
+        uint32_t tpix;
+        sensor.readPix(pix, tpix, axcTime);
+        
+        // process the pixels
+        int pixpos;
+        ProcessResult res;
+        if (process(pix, native_npix, pixpos, res))
+        {            
+            r.pos = pixpos;
+            r.t = tpix;
+            
+            // success
+            return true;
+        }
+        else
+        {
+            // no position found
+            return false;
+        }
+    }
+
+    // Send a status report to the joystick interface.
+    // See plunger.h for details on the arguments.
+    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t extraTime)
+    {
+        // get pixels
+        uint8_t *pix;
+        uint32_t t;
+        sensor.getStatusReportPixels(pix, t, axcTime, extraTime);
+
+        // start a timer to measure the processing time
+        Timer pt;
+        pt.start();
+
+        // process the pixels and read the position
+        int pos, rawPos;
+        int n = native_npix;
+        ProcessResult res;
+        if (process(pix, n, rawPos, res))
+        {
+            // success - apply the jitter filter
+            pos = jitterFilter(rawPos);
+        }
+        else
+        {
+            // report 0xFFFF to indicate that the position wasn't read
+            pos = 0xFFFF;
+            rawPos = 0xFFFF;
+        }
+        
+        // note the processing time
+        uint32_t processTime = pt.read_us();
+        
+        // If a low-res scan is desired, reduce to a subset of pixels.  Ignore
+        // this for smaller sensors (below 512 pixels)
+        if ((flags & 0x01) && n >= 512)
+        {
+            // figure how many sensor pixels we combine into each low-res pixel
+            const int group = 8;
+            int lowResPix = n / group;
+            
+            // combine the pixels
+            int src, dst;
+            for (src = dst = 0 ; dst < lowResPix ; ++dst)
+            {
+                // average this block of pixels
+                int a = 0;
+                for (int j = 0 ; j < group ; ++j)
+                    a += pix[src++];
+                        
+                // we have the sum, so get the average
+                a /= group;
+
+                // store the down-res'd pixel in the array
+                pix[dst] = uint8_t(a);
+            }
+            
+            // update the pixel count to the reduced array size
+            n = lowResPix;
+        }
+        
+        // figure the report flags
+        int jsflags = 0;
+        
+        // add flags for the detected orientation: 0x01 for normal orientation,
+        // 0x02 for reversed orientation; no flags if orientation is unknown
+        int dir = getOrientation();
+        if (dir == 1) 
+            jsflags |= 0x01; 
+        else if (dir == -1)
+            jsflags |= 0x02;
+            
+        // send the sensor status report headers
+        js.sendPlungerStatus(n, pos, jsflags, sensor.getAvgScanTime(), processTime);
+        js.sendPlungerStatus2(nativeScale, jfLo, jfHi, rawPos, axcTime);
+
+        // send any extra status headers for subclasses
+        extraStatusHeaders(js, res);
+        
+        // If we're not in calibration mode, send the pixels
+        extern bool plungerCalMode;
+        if (!plungerCalMode)
+        {
+            // send the pixels in report-sized chunks until we get them all
+            int idx = 0;
+            while (idx < n)
+                js.sendPlungerPix(idx, n, pix);
+        }
+        
+        // reset the sensor, if necessary
+        sensor.resetAfterStatusReport(axcTime);
+    }
+    
+protected:
+    // process an image to read the plunger position
+    virtual bool process(const uint8_t *pix, int npix, int &rawPos, ProcessResult &res) = 0;    
+    
+    // send extra status headers, following the standard headers (types 0 and 1)
+    virtual void extraStatusHeaders(USBJoystick &js, ProcessResult &res) { }
+    
+    // get the detected orientation
+    virtual int getOrientation() const { return 0; }
+    
+    // underlying hardware sensor interface
+    PlungerSensorImageInterface &sensor;
+
+    // number of pixels
+    int native_npix;
+    
+    // auto-exposure time
+    uint32_t axcTime;
+};
+
 
 #endif /* PLUNGER_H */

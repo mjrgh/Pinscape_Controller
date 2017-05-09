@@ -480,6 +480,9 @@ public:
     
     // Is the latest reading ready?
     bool ready() const { return !running; }
+    
+    // Is a DMA transfer in progress?
+    bool dmaBusy() const { return running; }
         
     // Clock through all pixels to clear the array.  Pulses SI at the
     // beginning of the operation, which starts a new integration cycle.

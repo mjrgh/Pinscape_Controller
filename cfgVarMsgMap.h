@@ -48,7 +48,7 @@ void v_func
         
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
-        v_byte_ro(19, 2);       // number of SCALAR variables
+        v_byte_ro(21, 2);       // number of SCALAR variables
         v_byte_ro(6, 3);        // number of ARRAY variables
         break;
         
@@ -183,6 +183,18 @@ void v_func
     case 19:
         // plunger jitter filter window size
         v_ui16(plunger.jitterWindow, 2);
+        break;
+        
+    case 20:
+        // bar-code plunger setup
+        v_ui16(plunger.barCode.startPix, 2);
+        break;
+        
+    case 21:
+        v_ui16(tlc59116.chipMask, 2);
+        v_byte(tlc59116.sda, 4);
+        v_byte(tlc59116.scl, 5);
+        v_byte(tlc59116.reset, 6);
         break;
         
     // case N: // new scalar variable
