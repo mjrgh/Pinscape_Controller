@@ -1858,7 +1858,7 @@ static struct
     uint8_t dittos : 1;     // using dittos?
     uint8_t ready : 1;      // do we have a code ready to transmit?    
 } IRAdHocCmd;
-    
+
 
 // IR mode timer.  In normal mode, this is the time since the last
 // command received; we use this to handle commands with timed effects,
@@ -4075,10 +4075,10 @@ void powerStatusUpdate(Config &cfg)
                         ir_tx->pushButton(vb, true);
                         
                         // Pushing the button starts transmission, and once
-                        // started, the transmission will run to completion
-                        // even if the button is no longer pushed.  So we
-                        // can immediately un-push the button, since we only
-                        // need to send the code once.
+                        // started, the transmission runs to completion even
+                        // if the button is no longer pushed.  So we can 
+                        // immediately un-push the button, since we only need
+                        // to send the code once.
                         ir_tx->pushButton(vb, false);
                         
                         // Advance to the next TV ON IR state, where we'll
@@ -5530,6 +5530,28 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
             // as the IR transmitter is free.
             IRAdHocCmd.code |= (uint64_t(wireUI32(&data[2])) << 32);
             IRAdHocCmd.ready = 1;
+            break;
+            
+        case 17:
+            // 17 = send pre-programmed IR command.  This works just like
+            // sending an ad hoc command above, but we get the command data
+            // from an IR slot in the config rather than from the client.
+            // First make sure we have a valid slot number.
+            if (data[2] >= 1 && data[2] <= MAX_IR_CODES)
+            {
+                // get the IR command slot in the config
+                IRCommandCfg &cmd = cfg.IRCommand[data[2] - 1];
+                
+                // copy the IR command data from the config
+                IRAdHocCmd.protocol = cmd.protocol;
+                IRAdHocCmd.dittos = (cmd.flags & IRFlagDittos) != 0;
+                IRAdHocCmd.code = (uint64_t(cmd.code.hi) << 32) | cmd.code.lo;
+                
+                // mark the command as ready - this will trigger the polling
+                // routine to send the command as soon as the transmitter
+                // is free
+                IRAdHocCmd.ready = 1;
+            }
             break;
         }
     }

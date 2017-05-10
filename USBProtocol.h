@@ -490,12 +490,19 @@
 //        0 -> No Op - does nothing.  (This can be used to send a test message on the
 //             USB endpoint.)
 //
-//        1 -> Set device unit number and plunger status, and save the changes immediately
-//             to flash.  The device will automatically reboot after the changes are saved.
-//             The additional bytes of the message give the parameters:
+//        1 -> Set the device's LedWiz unit number and plunger status, and save the 
+//             changes to flash.  The device automatically reboots after the changes 
+//             are saved if the unit number is changed, since this changes the USB
+//             product ID code.  The additional bytes of the message give the 
+//             parameters:
 //
-//               third byte = new unit number (0-15, corresponding to nominal unit numbers 1-16)
+//               third byte  = new LedWiz unit number (0-15, corresponding to nominal 
+//                             LedWiz unit numbers 1-16)
 //               fourth byte = plunger on/off (0=disabled, 1=enabled)
+//
+//             Note that this command is from the original version and isn't typically
+//             used any more, since the same information has been subsumed into more
+//             generalized option settings via the config variable system.
 //
 //        2 -> Begin plunger calibration mode.  The device stays in this mode for about
 //             15 seconds, and sets the zero point and maximum retraction points to the
@@ -578,7 +585,8 @@
 //
 //       11 -> TV ON relay manual control.  This allows testing and operating the
 //             relay from the PC.  This doesn't change the power-up configuration;
-//             it merely allows the relay to be controlled directly.
+//             it merely allows the relay to be controlled directly.  The third
+//             byte specifies the relay operation to perform:
 //              
 //                 0 = turn relay off
 //                 1 = turn relay on
@@ -624,6 +632,11 @@
 //             receiving this message, the device performs the transmission.
 //
 //               byte 3-6 = high-order 32 bits of command code, little-endian
+//
+//       17 -> Send a pre-programmed IR command.  This immediately transmits an
+//             IR code stored in a command slot.
+//
+//               byte 3 = command number (1..MAX_IR_CODES)
 //               
 //
 // 66  -> Set configuration variable.  The second byte of the message is the config
