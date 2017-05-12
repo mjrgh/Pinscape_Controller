@@ -1341,13 +1341,58 @@
 //          byte 6 = flags: a combination of these bit values:
 //                    0x01 = active-high output (0V on output turns attached device ON)
 //                    0x02 = noisemaker device: disable this output when "night mode" is engaged
-//                    0x04 = apply gamma correction to this output
+//                    0x04 = apply gamma correction to this output (PWM outputs only)
+//                    0x08 = "Flipper Logic" enabled for this output (PWM outputs only)
 //
-//        Note that the KL25Z's on-board LEDs can be used as LedWiz output ports.  This
-//        is useful for testing a new installation with DOF or other PC software without
-//        having to connect any external devices.  Assigning the on-board LEDs as output
-//        ports overrides their normal status/diagnostic display use, so the normal status 
-//        flash pattern won't appear when they're used this way.
+//          byte 7 = "Flipper Logic" parameters.  If Flipper Logic is enabled (via bit 0x08 
+//                   in the flags byte above), the software limits power to the output when
+//                   the output stays on continuously for longer than a short time.  This is 
+//                   designed to protect coils and solenoids.  Most coils are designed to
+//                   be energized only in short bursts, just long enough to complete the
+//                   mechanical stroke, and will overheat if energized continuously.  In a
+//                   pinball machine, most coils are used this way naturally: bumpers,
+//                   slingshots, kickers, knockers, chimes, etc. are only fired in brief
+//                   bursts.  Some coils are left on for long periods, though, particularly
+//                   the flippers.  The Flipper Logic feature is designed to handle this
+//                   in a way similar to how real pinball machines solve the same problem.
+//                   When Flipper Logic is enabled, the software gives the output full
+//                   power when initially turned on, but reduces the power to a lower
+//                   level (via PWM) after a short time elapses.  The point is to reduce
+//                   the power to a level low enough that the coil can safely dissipate
+//                   the generated heat indefinitely, but still high enough to keep the 
+//                   solenoid mechanically actuated.  This is possible because solenoids 
+//                   generally need much less power to "hold" than to actuate initially.
+//
+//                   The high-order 4 bits of this byte give the initial full power time, 
+//                   in 50ms increments, starting at a minimum of 50ms: 0 = 50ms, 1 = 100ms,
+//                   2 = 150ms, ..., 15 = 800ms.
+//
+//                   The low-order 4 bits of the byte give the percentage power, in 6.66%
+//                   increments: 0 = 0% (off), 1 = 6.66%, ..., 15 = 100%.
+//
+//                   A hold power of 0 provides a software equivalent of the timer-protected
+//                   output logic of the Pinscape expansion boards used in the main board's
+//                   replay knocker output and all of the chime board outputs.  This is
+//                   suitable for devices that shouldn't ever fire for long periods to
+//                   start with.  
+//
+//                   Non-zero hold powers are suitable for devices that do need to stay on 
+//                   for long periods, such as flippers.  The "right" level will vary by
+//                   device; you should experiment to find the lowest setting where the
+//                   device stays mechanically actuated.  Once you find the level, you
+//                   should confirm that the device won't overheat at that level by turning
+//                   it on at the selected level and carefully monitoring it for heating.
+//                   If the coil stays cool for a minute or two, it should be safe to assume
+//                   that it's in thermal equilibrium, meaning it should be able to sustain
+//                   the power level indefinitely.
+//
+//
+//        Note that the KL25Z's on-board LEDs can be used as LedWiz output ports, simply
+//        by assigning the LED GPIO pins as output ports.  This is useful for testing a new 
+//        installation without having to connect any external devices.  Assigning the 
+//        on-board LEDs as output ports automatically overrides their normal status and
+//        diagnostic display use, so be aware that the normal status flash pattern won't
+//        appear when they're used this way.
 //
 
 

@@ -823,7 +823,7 @@ class LwNightModeIndicatorOut: public LwOut
 {
 public:
     LwNightModeIndicatorOut(LwOut *o) : out(o) { }
-    virtual void set(uint8_t) 
+    virtual void set(uint8_t)
     {
         // ignore the host value and simply show the current 
         // night mode setting
@@ -834,6 +834,259 @@ private:
     LwOut *out;
 };
 
+
+// Flipper Logic output.  This is a filter object that we layer on
+// top of a physical pin output.
+//
+// A Flipper Logic output is effectively a digital output from the
+// client's perspective, in that it ignores the intensity level and
+// only pays attention to the ON/OFF state.  0 is OFF and any other
+// level is ON.
+//
+// In terms of the physical output, though, we do use varying power.
+// It's just that the varying power isn't under the client's control;
+// we control it according to our flipperLogic settings:
+//
+// - When the software port transitions from OFF (0 brightness) to ON
+//   (any non-zero brightness level), we set the physical port to 100%
+//   power and start a timer.
+//
+// - When the full power time in our flipperLogic settings elapses,
+//   if the software port is still ON, we reduce the physical port to
+//   the PWM level in our flipperLogic setting.
+//
+class LwFlipperLogicOut: public LwOut
+{
+public:
+    // Set up the output.  'params' is the flipperLogic value from
+    // the configuration.
+    LwFlipperLogicOut(LwOut *o, uint8_t params)
+        : out(o), params(params)
+    {
+        // initially OFF
+        state = 0;
+    }
+    
+    virtual void set(uint8_t level)
+    {
+        // remebmber the new nominal level set by the client
+        val = level;
+        
+        // update the physical output according to our current timing state
+        switch (state)
+        {
+        case 0:
+            // We're currently off.  If the new level is non-zero, switch
+            // to state 1 (initial full-power interval) and set the requested
+            // level.  If the new level is zero, we're switching from off to
+            // off, so there's no change.
+            if (level != 0)
+            {
+                // switch to state 1 (initial full-power interval)
+                state = 1;
+                
+                // set the requested output level - there's no limit during
+                // the initial full-power interval, so set the exact level
+                // requested
+                out->set(level);
+
+                // add myself to the pending timer list
+                pending[nPending++] = this;
+                
+                // note the starting time
+                t0 = timer.read_us();
+            }
+            break;
+            
+        case 1:
+            // Initial full-power interval.  If the new level is non-zero,
+            // simply apply the new level as requested, since there's no
+            // limit during this period.  If the new level is zero, shut
+            // off the output and cancel the pending timer.
+            out->set(level);
+            if (level == 0)
+            {
+                // We're switching off.  In state 1, we have a pending timer,
+                // so we need to remove it from the list.
+                for (int i = 0 ; i < nPending ; ++i)
+                {
+                    // is this us?
+                    if (pending[i] == this)
+                    {
+                        // remove myself by replacing the slot with the
+                        // last list entry
+                        pending[i] = pending[--nPending];
+                        
+                        // no need to look any further
+                        break;
+                    }
+                }
+                
+                // switch to state 0 (off)
+                state = 0;
+            }
+            break;
+            
+        case 2: 
+            // Hold interval.  If the new level is zero, switch to state
+            // 0 (off).  If the new level is non-zero, stay in the hold
+            // state, and set the new level, applying the hold power setting
+            // as the upper bound.
+            if (level == 0)
+            {
+                // switching off - turn off the physical output
+                out->set(0);
+                
+                // go to state 0 (off)
+                state = 0;
+            }
+            else
+            {
+                // staying on - set the new physical output power to the
+                // lower of the requested power and the hold power
+                uint8_t hold = holdPower();
+                out->set(level < hold ? level : hold);
+            }
+            break;
+        }
+    }
+    
+    // Class initialization
+    static void classInit(Config &cfg)
+    {
+        // Count the Flipper Logic outputs in the configuration.  We
+        // need to allocate enough pending timer list space to accommodate
+        // all of these outputs.
+        int n = 0;
+        for (int i = 0 ; i < MAX_OUT_PORTS ; ++i)
+        {
+            // if this port is active and marked as Flipper Logic, count it
+            if (cfg.outPort[i].typ != PortTypeDisabled
+                && (cfg.outPort[i].flags & PortFlagFlipperLogic) != 0)
+                ++n;
+        }
+        
+        // allocate space for the pending timer list
+        pending = new LwFlipperLogicOut*[n];
+        
+        // there's nothing in the pending list yet
+        nPending = 0;
+        
+        // Start our shared timer.  The epoch is arbitrary, since we only
+        // use it to figure elapsed times.
+        timer.start();
+    }
+
+    // Check for ports with pending timers.  The main routine should
+    // call this on each iteration to process our state transitions.
+    static void poll()
+    {
+        // note the current time
+        uint32_t t = timer.read_us();
+        
+        // go through the timer list
+        for (int i = 0 ; i < nPending ; )
+        {
+            // get the port
+            LwFlipperLogicOut *port = pending[i];
+            
+            // assume we'll keep it
+            bool remove = false;
+            
+            // check if the port is still on
+            if (port->state != 0)
+            {
+                // it's still on - check if the initial full power time has elapsed
+                if (uint32_t(t - port->t0) > port->fullPowerTime_us())
+                {
+                    // done with the full power interval - switch to hold state
+                    port->state = 2;
+
+                    // set the physical port to the hold power setting or the
+                    // client brightness setting, whichever is lower
+                    uint8_t hold = port->holdPower();
+                    uint8_t val = port->val;                    
+                    port->out->set(val < hold ? val : hold);
+                    
+                    // we're done with the timer
+                    remove = true;
+                }
+            }
+            else
+            {
+                // the port was turned off before the timer expired - remove
+                // it from the timer list
+                remove = true;
+            }
+            
+            // if desired, remove the port from the timer list
+            if (remove)
+            {
+                // Remove the list entry by overwriting the slot with
+                // the last entry in the list.
+                pending[i] = pending[--nPending];
+                
+                // Note that we don't increment the loop counter, since
+                // we now need to revisit this same slot.
+            }
+            else
+            {
+                // we're keeping this item; move on to the next one
+                ++i;
+            }
+        }
+    }
+
+protected:
+    // underlying physical output
+    LwOut *out;
+    
+    // Timestamp on 'timer' of start of full-power interval.  We set this
+    // to the current 'timer' timestamp when entering state 1.
+    uint32_t t0;
+
+    // Nominal output level (brightness) last set by the client.  During
+    // the initial full-power interval, we replicate the requested level
+    // exactly on the physical output.  During the hold interval, we limit
+    // the physical output to the hold power, but use the caller's value
+    // if it's lower.
+    uint8_t val;
+    
+    // Current port state:
+    //
+    //  0 = off
+    //  1 = on at initial full power
+    //  2 = on at hold power
+    uint8_t state;
+    
+    // Configuration parameters.  The high 4 bits encode the initial full-
+    // power time in 50ms units, starting at 0=50ms.  The low 4 bits encode
+    // the hold power (applied after the initial time expires if the output
+    // is still on) in units of 6.66%.  The resulting percentage is used
+    // for the PWM duty cycle of the physical output.
+    uint8_t params;
+    
+    // Figure the initial full-power time in microseconds
+    inline uint32_t fullPowerTime_us() const { return ((params >> 4) + 1)*50000; }
+    
+    // Figure the hold power PWM level (0-255) 
+    inline uint8_t holdPower() const { return (params & 0x0F) * 17; }
+    
+    // Timer.  This is a shared timer for all of the FL ports.  When we
+    // transition from OFF to ON, we note the current time on this timer
+    // (which runs continuously).  
+    static Timer timer;
+    
+    // Flipper logic pending timer list.  Whenever a flipper logic output
+    // transitions from OFF to ON, tis timer
+    static LwFlipperLogicOut **pending;
+    static uint8_t nPending;
+};
+
+// Flipper Logic statics
+Timer LwFlipperLogicOut::timer;
+LwFlipperLogicOut **LwFlipperLogicOut::pending;
+uint8_t LwFlipperLogicOut::nPending;
 
 //
 // The TLC5940 interface object.  We'll set this up with the port 
@@ -1275,6 +1528,11 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     int noisy = flags & PortFlagNoisemaker;
     int activeLow = flags & PortFlagActiveLow;
     int gamma = flags & PortFlagGamma;
+    int flipperLogic = flags & PortFlagFlipperLogic;
+    
+    // cancel gamma on flipper logic ports
+    if (flipperLogic)
+        gamma = false;
 
     // create the pin interface object according to the port type        
     LwOut *lwp;
@@ -1383,8 +1641,11 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     if (activeLow)
         lwp = new LwInvertedOut(lwp);
         
-    // If it's a noisemaker, layer on a night mode switch.  Note that this
-    // needs to be 
+    // Layer on Flipper Logic if desired
+    if (flipperLogic)
+        lwp = new LwFlipperLogicOut(lwp, pc.flipperLogic);
+        
+    // If it's a noisemaker, layer on a night mode switch
     if (noisy)
         lwp = new LwNoisyOut(lwp);
         
@@ -1412,6 +1673,9 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
 // initialize the output pin array
 void initLwOut(Config &cfg)
 {
+    // Initialize the Flipper Logic outputs
+    LwFlipperLogicOut::classInit(cfg);
+
     // Count the outputs.  The first disabled output determines the
     // total number of ports.
     numOutputs = MAX_OUT_PORTS;
@@ -5969,6 +6233,9 @@ int main(void)
         // update PWM outputs
         pollPwmUpdates();
         
+        // update Flipper Logic outputs
+        LwFlipperLogicOut::poll();
+        
         // poll the accelerometer
         accel.poll();
             
@@ -6319,6 +6586,9 @@ int main(void)
                 // try to recover the connection
                 js.recoverConnection();
                 
+                // update Flipper Logic outputs
+                LwFlipperLogicOut::poll();
+
                 // send TLC5940 data if necessary
                 if (tlc5940 != 0)
                     tlc5940->send();

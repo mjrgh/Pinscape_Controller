@@ -126,24 +126,25 @@ struct ButtonCfg
 const int MAX_BUTTONS = 48;
 
 // extra slots for virtual buttons (ZB Launch Ball)
-const int VIRTUAL_BUTTONS = 1;              // total number of buttons
-const int ZBL_BUTTON_CFG = MAX_BUTTONS;     // index of ZB Launch Ball slot
+const int VIRTUAL_BUTTONS = 1;             // total number of buttons
+const int ZBL_BUTTON_CFG = MAX_BUTTONS;    // index of ZB Launch Ball slot
 
 // LedWiz output port type codes
 // These values are part of the external USB interface
-const int PortTypeDisabled     = 0;      // port is disabled - not visible to LedWiz/DOF host
-const int PortTypeGPIOPWM      = 1;      // GPIO port, PWM enabled
-const int PortTypeGPIODig      = 2;      // GPIO port, digital out
-const int PortTypeTLC5940      = 3;      // TLC5940 port
-const int PortType74HC595      = 4;      // 74HC595 port
-const int PortTypeVirtual      = 5;      // Virtual port - visible to host software, but not connected 
-                                         //  to a physical output
-const int PortTypeTLC59116     = 6;      // TLC59116 port
+const int PortTypeDisabled     = 0;        // port is disabled - not visible to LedWiz/DOF host
+const int PortTypeGPIOPWM      = 1;        // GPIO port, PWM enabled
+const int PortTypeGPIODig      = 2;        // GPIO port, digital out
+const int PortTypeTLC5940      = 3;        // TLC5940 port
+const int PortType74HC595      = 4;        // 74HC595 port
+const int PortTypeVirtual      = 5;        // Virtual port - visible to host software, but not connected 
+                                           //  to a physical output
+const int PortTypeTLC59116     = 6;        // TLC59116 port
 
 // LedWiz output port flag bits
-const uint8_t PortFlagActiveLow  = 0x01; // physical output is active-low
-const uint8_t PortFlagNoisemaker = 0x02; // noisemaker device - disable when night mode is engaged
-const uint8_t PortFlagGamma      = 0x04; // apply gamma correction to this output
+const uint8_t PortFlagActiveLow    = 0x01; // physical output is active-low
+const uint8_t PortFlagNoisemaker   = 0x02; // noisemaker device - disable when night mode is engaged
+const uint8_t PortFlagGamma        = 0x04; // apply gamma correction to this output
+const uint8_t PortFlagFlipperLogic = 0x08; // enable Flipper Logic on the port (timed power limitation)
 
 // maximum number of output ports
 const int MAX_OUT_PORTS = 128;
@@ -151,30 +152,46 @@ const int MAX_OUT_PORTS = 128;
 // port configuration data
 struct LedWizPortCfg
 {
-    uint8_t typ;        // port type:  a PortTypeXxx value
-    uint8_t pin;        // physical output pin:  
-                        //
-                        //  - for a GPIO port, this is an index in the 
-                        //    USB-to-PinName mapping list
-                        //
-                        //  - for a TLC5940 or 74HC595 port, it's the output
-                        //    number in the overall daisy chain, starting 
-                        //    from 0 for OUT0 on the first chip in the chain
-                        //
-                        //  - for a TLC59116, the high 4 bits are the chip
-                        //    address (the low 4 bits of the address only),
-                        //    and the low 4 bits are the output number on
-                        //    the chip
-                        //
-                        //  - for inactive and virtual ports, this is unused
-                        //
-    uint8_t flags;      // flags:  a combination of PortFlagXxx values
+    // port type:  a PortTypeXxx value
+    uint8_t typ;        
     
-    void set(uint8_t typ, uint8_t pin, uint8_t flags = 0)
+    // physical output pin:  
+    //
+    //  - for a GPIO port, this is an index in the 
+    //    USB-to-PinName mapping list
+    //
+    //  - for a TLC5940 or 74HC595 port, it's the output
+    //    number in the overall daisy chain, starting 
+    //    from 0 for OUT0 on the first chip in the chain
+    //
+    //  - for a TLC59116, the high 4 bits are the chip
+    //    address (the low 4 bits of the address only),
+    //    and the low 4 bits are the output number on
+    //    the chip
+    //
+    //  - for inactive and virtual ports, this is unused
+    //
+    uint8_t pin;
+    
+    // flags:  a combination of PortFlagXxx values
+    uint8_t flags;
+    
+    // flipper logic properties:
+    //
+    //  - high 4 bits (0xF0) give full-power time in 50ms
+    //    intervals, starting at 0=50ms
+    //
+    //  - low 4 bits (0x0F) give reduced power level (used
+    //    after full-power time expires), in 6.66% units
+    //
+    uint8_t flipperLogic;
+    
+    void set(uint8_t typ, uint8_t pin, uint8_t flags = 0, uint8_t flipperLogic = 0)
     {
         this->typ = typ;
         this->pin = pin;
         this->flags = flags;
+        this->flipperLogic = flipperLogic;
     }
         
 } __attribute__ ((packed));
