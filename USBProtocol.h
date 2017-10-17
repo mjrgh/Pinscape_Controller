@@ -809,9 +809,10 @@
 //
 //         byte 3 -> unit number, from 1 to 16
 //
-// 3  -> Enable/disable joystick reports.  
+// 3  -> Joystick report settings.
 //
-//         byte 2 -> 1 to enable, 0 to disable
+//         byte 2 -> Enable joystick interface: 1 to enable, 0 to disable
+//         byte 3 -> Joystick axis format, as a USBJoystick::AXIS_FORMAT_XXX value
 //
 //       When joystick reports are disabled, the device registers as a generic HID 
 //       device, and only sends the private report types used by the Windows config 

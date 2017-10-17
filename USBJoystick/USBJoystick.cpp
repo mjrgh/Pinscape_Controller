@@ -526,8 +526,8 @@ static const uint8_t reportDescriptorJS[] =
     USAGE_PAGE(1), 0x01,            // Generic desktop
     USAGE(1), 0x04,                 // Joystick
     COLLECTION(1), 0x01,            // Application
+    
         // input report (device to host)
-
         USAGE_PAGE(1), 0x06,        // generic device controls - for config status
         USAGE(1), 0x00,             // undefined device control
         LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
@@ -565,6 +565,57 @@ static const uint8_t reportDescriptorJS[] =
 
     END_COLLECTION(0)
 };
+
+// Joystick report descriptor with "R" axis reports.  This version
+// uses Rx and Ry for the accelerometer readings and Rz for the
+// plunger, instead of the standard X/Y/Z axes.  This can be used
+// to avoid conflicts with other devices reporting on the normal
+// X/Y/Z axes.
+static const uint8_t reportDescriptorJS_RXRYRZ[] = 
+{         
+    USAGE_PAGE(1), 0x01,            // Generic desktop
+    USAGE(1), 0x04,                 // Joystick
+    COLLECTION(1), 0x01,            // Application
+    
+        // input report (device to host)
+        USAGE_PAGE(1), 0x06,        // generic device controls - for config status
+        USAGE(1), 0x00,             // undefined device control
+        LOGICAL_MINIMUM(1), 0x00,   // 8-bit values
+        LOGICAL_MAXIMUM(1), 0xFF,
+        REPORT_SIZE(1), 0x08,       // 8 bits per report
+        REPORT_COUNT(1), 0x04,      // 4 reports (4 bytes)
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+
+        USAGE_PAGE(1), 0x09,        // Buttons
+        USAGE_MINIMUM(1), 0x01,     // { buttons }
+        USAGE_MAXIMUM(1), 0x20,     // {  1-32   }
+        LOGICAL_MINIMUM(1), 0x00,   // 1-bit buttons - 0...
+        LOGICAL_MAXIMUM(1), 0x01,   // ...to 1
+        REPORT_SIZE(1), 0x01,       // 1 bit per report
+        REPORT_COUNT(1), 0x20,      // 32 reports
+        UNIT_EXPONENT(1), 0x00,     // Unit_Exponent (0)
+        UNIT(1), 0x00,              // Unit (None)                                           
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+       
+        USAGE_PAGE(1), 0x01,        // Generic desktop
+        USAGE(1), 0x33,             // Rx axis ("X rotation")
+        USAGE(1), 0x34,             // Ry axis
+        USAGE(1), 0x35,             // Rz axis
+        LOGICAL_MINIMUM(2), 0x00,0xF0,   // each value ranges -4096
+        LOGICAL_MAXIMUM(2), 0x00,0x10,   // ...to +4096
+        REPORT_SIZE(1), 0x10,       // 16 bits per report
+        REPORT_COUNT(1), 0x03,      // 3 reports (X, Y, Z)
+        INPUT(1), 0x02,             // Data, Variable, Absolute
+         
+        // output report (host to device)
+        REPORT_SIZE(1), 0x08,       // 8 bits per report
+        REPORT_COUNT(1), 0x08,      // output report count - 8-byte LedWiz format
+        0x09, 0x01,                 // usage
+        0x91, 0x01,                 // Output (array)
+
+    END_COLLECTION(0)
+};
+
 
 // 
 // USB HID Report Descriptor - Keyboard/Media Control
@@ -670,8 +721,17 @@ const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len)
         // Otherwise, it's the plain LedWiz control interface.
         if (enableJoystick)
         {
-            len = sizeof(reportDescriptorJS);
-            return reportDescriptorJS;
+            switch (axisFormat)
+            {
+            case AXIS_FORMAT_XYZ:
+            default:
+                len = sizeof(reportDescriptorJS);
+                return reportDescriptorJS;
+                
+            case AXIS_FORMAT_RXRYRZ:
+                len = sizeof(reportDescriptorJS_RXRYRZ);
+                return reportDescriptorJS_RXRYRZ;
+            }
         }
         else
         {
@@ -710,16 +770,19 @@ const uint8_t *USBJoystick::reportDesc(int idx, uint16_t &len)
 
 const uint8_t *USBJoystick::stringIserialDesc() 
 {
-    // set up a buffer with the length prefix and descriptor type
-    const int numChars = 3 + 16 + 1 + 3;
+    // set up a buffer with space for the length prefix byte, descriptor type
+    // byte, and serial number (as a wide-character string)
+    const int numChars = 3 + 16 + 1 + 1 + 3;
     static uint8_t buf[2 + numChars*2];
     uint8_t *dst = buf;
-    *dst++ = sizeof(buf);
+    
+    // store a placeholder for the length, followed by the descriptor type byte
+    *dst++ = 0;
     *dst++ = STRING_DESCRIPTOR;
 
     // Create an ASCII version of our unique serial number string:
     //
-    //   PSCxxxxxxxxxxxxxxxxivvv
+    //   PSCxxxxxxxxxxxxxxxxi[a]vvv
     //
     // where:
     //   
@@ -729,6 +792,9 @@ const uint8_t *USBJoystick::stringIserialDesc()
     //             J = Joystick + LedWiz
     //             K = Keyboard + LedWiz
     //             C = Joystick + Keyboard + LedWiz ("C" for combo)
+    //   a      = joystick axis types:
+    //             <empty> = X,Y,Z, or no joystick interface at all
+    //             A       = Rx,Ry,Rz
     //   vvv    = version suffix
     //
     // The suffix for the interface type resolves a problem on some Windows systems
@@ -740,10 +806,12 @@ const uint8_t *USBJoystick::stringIserialDesc()
     char xbuf[numChars + 1];
     uint32_t x = SIM->UIDML;
     static char ifcCode[] = "LJKC";
-    sprintf(xbuf, "PSC%08lX%08lX%c008",
+    static const char *axisCode[] = { "", "A" };
+    sprintf(xbuf, "PSC%08lX%08lX%c%s008",
         SIM->UIDML, 
         SIM->UIDL, 
-        ifcCode[(enableJoystick ? 0x01 : 0x00) | (useKB ? 0x02 : 0x00)]);
+        ifcCode[(enableJoystick ? 0x01 : 0x00) | (useKB ? 0x02 : 0x00)],
+        axisCode[(enableJoystick ? axisFormat : 0)]);
 
     // copy the ascii bytes into the descriptor buffer, converting to unicode
     // 16-bit little-endian characters
@@ -752,6 +820,9 @@ const uint8_t *USBJoystick::stringIserialDesc()
         *dst++ = *src++;
         *dst++ = '\0';
     }
+    
+    // store the final length (in bytes) in the length prefix byte
+    buf[0] = dst - buf;
     
     // return the buffer    
     return buf;

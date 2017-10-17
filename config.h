@@ -26,6 +26,8 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+#include "USBJoystick.h"
+
 
 // TEST SETTINGS - FOR DEBUGGING PURPOSES ONLY.  The macros below select
 // special option combinations for debugging purposes.
@@ -254,6 +256,9 @@ struct Config
         
         // enable joystick reports
         joystickEnabled = true;
+        
+        // use the XYZ axis format
+        joystickAxisFormat = USBJoystick::AXIS_FORMAT_XYZ;
         
         // assume standard orientation, with USB ports toward front of cabinet
         accel.orientation = OrientationFront;
@@ -569,6 +574,9 @@ struct Config
     // Are joystick reports enabled?  Joystick reports can be turned off, to
     // use the device as purely an output controller.
     uint8_t joystickEnabled;
+    
+    // Joystick axis report format, as a USBJoystick::AXIS_FORMAT_xxx value.
+    uint8_t joystickAxisFormat;
     
     // Timeout for rebooting the KL25Z when the connection is lost.  On some
     // hosts, the mbed USB stack has problems reconnecting after an initial

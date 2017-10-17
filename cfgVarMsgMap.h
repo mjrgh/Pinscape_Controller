@@ -69,6 +69,7 @@ void v_func
     case 3:
         // Enable/disable joystick
         v_byte(joystickEnabled, 2);
+        v_byte(joystickAxisFormat, 3);
         break;
         
     case 4:

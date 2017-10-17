@@ -89,7 +89,10 @@ public:
     // Length of our joystick reports.  Important: This must be kept in sync 
     // with the actual joystick report format sent in update().
     static const int reportLen = 14;
-
+    
+    // Joystick axis report format
+    static const int AXIS_FORMAT_XYZ    = 0;    // nudge on X/Y, plunger on Z
+    static const int AXIS_FORMAT_RXRYRZ = 1;    // nudge on Rx/Ry, plunger on Rz
 
     /**
      *   Constructor
@@ -97,14 +100,19 @@ public:
      * @param vendor_id Your vendor_id (default: 0x1234)
      * @param product_id Your product_id (default: 0x0002)
      * @param product_release Your product_release (default: 0x0001)
+     * @param waitforConnect don't return until the connection is established
+     * @param enableJoystick enable the joystick interface (if false, uses the OUT-only LedWiz-style interface)
+     * @param axisFormat an AXIS_FORMAT_xxx value specifying the joystick axis report format
+     * @param useKB enable the USB keyboard reporting interface
      */
     USBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release, 
-        int waitForConnect, bool enableJoystick, bool useKB)
+        int waitForConnect, bool enableJoystick, int axisFormat, bool useKB)
         : USBHID(16, 64, vendor_id, product_id, product_release, false)
     { 
         _init();
         this->useKB = useKB;
         this->enableJoystick = enableJoystick;
+        this->axisFormat = axisFormat;
         connect(waitForConnect);
     };
 
@@ -362,15 +370,31 @@ private:
     // Incoming LedWiz message buffer.  Each LedWiz message is exactly 8 bytes.
     CircBuf<LedWizMsg, 16> lwbuf;
      
+    // enable the joystick interface
     bool enableJoystick;
+    
+    // joystick axis reporting format
+    bool axisFormat;
+    
+    // enable the keyboard interface for button inputs
     bool useKB;
+    
+    // keyboard maximum idle time between reports
     uint8_t kbIdleTime;
+    
+    // media maximum idle time between reports
     uint8_t mediaIdleTime;
+    
+    // current X, Y, Z axis values
     int16_t _x;                       
     int16_t _y;     
     int16_t _z;
+    
+    // joystick button status bits
     uint16_t _buttonsLo;
     uint16_t _buttonsHi;
+    
+    // special status flag bits
     uint16_t _status;
 
     void _init();                 

@@ -27,8 +27,8 @@
 // precision in testing is closer to 5mm.  Sample times are around 16ms.
 // This makes the sensor acceptable but not great by Pinscape standards;
 // we generally consider 2.5ms read times and .25mm precision to be the
-// minimum standards.  However, this sensor is very inexpensive and easier
-// to set up than most of the better options, so it might be attractive to
+// minimum standards.  However, this sensor is inexpensive and easier to
+// set up than most of the better options, so it might be attractive to
 // some cab builders despite the quality tradeoffs.
 
 #ifndef _DISTANCESENSOR_H_

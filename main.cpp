@@ -3361,8 +3361,8 @@ class MyUSBJoystick: public USBJoystick
 {
 public:
     MyUSBJoystick(uint16_t vendor_id, uint16_t product_id, uint16_t product_release,
-        bool waitForConnect, bool enableJoystick, bool useKB) 
-        : USBJoystick(vendor_id, product_id, product_release, waitForConnect, enableJoystick, useKB)
+        bool waitForConnect, bool enableJoystick, int axisFormat, bool useKB) 
+        : USBJoystick(vendor_id, product_id, product_release, waitForConnect, enableJoystick, axisFormat, useKB)
     {
         sleeping_ = false;
         reconnectPending_ = false;
@@ -6065,7 +6065,7 @@ int main(void)
     // whether or not we need to present a USB keyboard interface in addition
     // to the joystick interface.
     MyUSBJoystick js(cfg.usbVendorID, cfg.usbProductID, USB_VERSION_NO, false, 
-        cfg.joystickEnabled, kbKeys);
+        cfg.joystickEnabled, cfg.joystickAxisFormat, kbKeys);
         
     // Wait for the USB connection to start up.  Show a distinctive diagnostic
     // flash pattern while waiting.

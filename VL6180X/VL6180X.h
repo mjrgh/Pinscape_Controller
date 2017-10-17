@@ -124,11 +124,14 @@ public:
     // enable the internal pullup resistors.  Set this to false if you're
     // using your own external pullup resistors on the lines.  External
     // pullups are better if you're attaching more than one device to the
-    // same I2C bus; the internal pullups are fine for a single device.
+    // same physical I2C bus; the internal pullups are fine if there's only
+    // one I2C device (in this case the VL6180X) connected to these pins.
     //
-    // Note that the power-on default I2C address is always 0x29.  The
-    // address can be changed during a session, but it's not saved 
-    // persistently; it always resets to 0x29 on the next power cycle.
+    // Note that VL6180X's I2C address is always 0x29 at power-on.  The
+    // address can be changed during a session, but there's no way to save
+    // the value persistently on the VL6180X, so it always resets to 0x29 
+    // on the next power cycle.  As a result, I see little reason to ever
+    // change it during a session.
     VL6180X(PinName sda, PinName scl, uint8_t addr, PinName gpio0,
         bool internalPullups);
     
