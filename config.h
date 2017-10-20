@@ -278,6 +278,12 @@ struct Config
         plunger.enabled = 0x00;
         plunger.sensorType = PlungerType_None;
         
+        // no jitter filter
+        plunger.jitterWindow = 0;
+        
+        // normal orientation
+        plunger.reverseOrientation = false;
+        
 #if TEST_CONFIG_EXPAN || STANDARD_CONFIG
         plunger.enabled = 0x01;
         plunger.sensorType = PlungerType_TSL1410R;
@@ -657,6 +663,20 @@ struct Config
         // units (-4095..+4095).  One joystick unit is approximately 1/10000" of
         // physical travel.  Zero disables the jitter filter.
         uint16_t jitterWindow;
+        
+        // Plunger sensor reverse orientation flags.  This is a bit mask:
+        //
+        //  0x01 = Reverse orientation enabled.  We invert the plunger sensor
+        //         readings, as though the sensor were physically flipped
+        //         around.  This can be used to correct for installing the
+        //         sensor backwards without having to change the hardware.
+        //
+        //  0x80 = READ-ONLY feature flag.  This always reads as set if the
+        //         feature is enabled.  Note that the USB data exchanger always
+        //         sets the bit on read, so it's not necessary to actually
+        //         store it.
+        //
+        uint8_t reverseOrientation;
         
         // bar code sensor parameters
         struct

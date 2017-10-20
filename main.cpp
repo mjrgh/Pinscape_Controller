@@ -5549,6 +5549,7 @@ int calBtnLit = false;
 // Handle SET messages - write configuration variables from USB message data
 #define if_msg_valid(test)  if (test)
 #define v_byte(var, ofs)    cfg.var = data[ofs]
+#define v_byte_wo(var, ofs) cfg.var = data[ofs]
 #define v_ui16(var, ofs)    cfg.var = wireUI16(data+(ofs))
 #define v_ui32(var, ofs)    cfg.var = wireUI32(data+(ofs))
 #define v_pin(var, ofs)     cfg.var = wirePinName(data[ofs])
@@ -5565,11 +5566,12 @@ int calBtnLit = false;
 #undef v_ui32
 #undef v_pin
 #undef v_byte_ro
+#undef v_byte_wo
 #undef v_ui32_ro
 #undef VAR_MODE_SET
 #undef v_func
 
-// Handle GET messages - read variable values and return in USB message daa
+// Handle GET messages - read variable values and return in USB message data
 #define if_msg_valid(test)
 #define v_byte(var, ofs)    data[ofs] = cfg.var
 #define v_ui16(var, ofs)    ui16Wire(data+(ofs), cfg.var)
@@ -5578,6 +5580,7 @@ int calBtnLit = false;
 #define v_byte_ro(val, ofs) data[ofs] = (val)
 #define v_ui32_ro(val, ofs) ui32Wire(data+(ofs), val);
 #define VAR_MODE_SET 0      // we're in GET mode
+#define v_byte_wo(var, ofs) // ignore write-only variables in GET mode
 #define v_func  configVarGet(uint8_t *data)
 #include "cfgVarMsgMap.h"
 

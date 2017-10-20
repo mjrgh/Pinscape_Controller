@@ -182,8 +182,12 @@ void v_func
         break;
         
     case 19:
-        // plunger jitter filter window size
+        // Plunger filters - jitter window size, reversed orientation.
+        // The reversed orientation byte always has bit 0x80 set to indicate
+        // that the feature is supported in this version.
         v_ui16(plunger.jitterWindow, 2);
+        v_byte_ro(cfg.plunger.reverseOrientation | 0x80, 4);
+        v_byte_wo(plunger.reverseOrientation, 4);
         break;
         
     case 20:

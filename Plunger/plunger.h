@@ -48,6 +48,9 @@ public:
         
         // initialize the jitter filter
         jfLo = jfHi = jfLast = 0;
+        
+        // presume normal orientation
+        reverseOrientation = false;
     }
 
     // ---------- Abstract sensor interface ----------
@@ -107,6 +110,9 @@ public:
         // get the raw reading
         if (readRaw(r))
         {
+            // adjust for orientation
+            r.pos = applyOrientation(r.pos);
+
             // process it through the jitter filter
             r.pos = jitterFilter(r.pos);
             
@@ -170,6 +176,9 @@ public:
         PlungerReading r;
         if (readRaw(r))
         {
+            // adjust for reverse orientation
+            r.pos = applyOrientation(r.pos);
+
             // success - apply the jitter filter
             pos = jitterFilter(r.pos);
         }
@@ -187,8 +196,16 @@ public:
     
     // Get the average sensor scan time in microseconds
     virtual uint32_t getAvgScanTime() = 0;
+    
+    // Apply the orientation filter.  The position is in unscaled
+    // native sensor units.
+    int applyOrientation(int pos)
+    {
+        return (reverseOrientation ? nativeScale - pos : pos);
+    }
         
-    // Apply the jitter filter
+    // Apply the jitter filter.  The position is in unscaled native 
+    // sensor units.
     int jitterFilter(int pos)
     {
         // Check to see where the new reading is relative to the
@@ -233,8 +250,9 @@ public:
         switch (varno)
         {
         case 19:
-            // jitter window
+            // Plunger filters - jitter window and reverse orientation.
             setJitterWindow(cfg.plunger.jitterWindow);
+            setReverseOrientation((cfg.plunger.reverseOrientation & 0x01) != 0);
             break;
         }
     }
@@ -249,12 +267,19 @@ public:
         // reset the running window
         jfHi = jfLo = jfLast;
     }
+    
+    // Set reverse orientation
+    void setReverseOrientation(bool f) { reverseOrientation = f; }
         
 protected:
     // Native scale of the device.  This is the scale used for the position
     // reading in status reports.  This lets us report the position in the
     // same units the sensor itself uses, to avoid any rounding error 
     // converting to an abstract scale.
+    //
+    // The nativeScale value is the number of units in the range of raw
+    // sensor readings returned from readRaw().  Raw readings thus have a
+    // valid range of 0 to nativeScale-1.
     //
     // Image edge detection sensors use the pixel size of the image, since
     // the position is determined by the pixel position of the shadow in
@@ -285,6 +310,12 @@ protected:
     int jfWindow;                // window size, in native sensor units
     int jfLo, jfHi;              // bounds of current window
     int jfLast;                  // last filtered reading
+    
+    // Reverse the raw reading orientation.  If set, raw readings will be
+    // switched to the opposite orientation.  This allows flipping the sensor
+    // orientation virtually to correct for installing the physical device
+    // backwards.
+    bool reverseOrientation;
 };
 
 

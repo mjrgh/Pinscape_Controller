@@ -1085,21 +1085,28 @@
 //                0x01 -> auto-zeroing enabled
 //       byte 4 = auto-zeroing time in seconds
 //
-// 19 -> Plunger jitter filter.  This sets a hysteresis window size, to
-//       reduce jitter in the plunger reading.  Most sensors aren't perfectly
-//       accurate: consecutive readings at the same physical plunger position
-//       vary slightly, wandering in a range near the true reading.  Over time,
-//       the readings will usually average the true value, but that's not much
-//       of a consolation to us because we want to display the position in
-//       real time.  To reduce the visible jitter, we can apply a hysteresis
-//       filter that hides sensor reading variations within a chosen window.
-//       This sets the window size.  The window is in joystick units; we
-//       report the joystick position on a scale of -4095..+4095, and the
-//       physical plunger travels about 3" overall, so each joystick unit
-//       represents about 1/10000" of physical travel.  Setting this to zero
-//       (the default) disables the filter.
+// 19 -> Plunger filters.  There are two filters that can be applied:
 //
-//       byte 3:4 = window size in joystick units, little-endian
+//       - Jitter filter.  This sets a hysteresis window size, to reduce jitter
+//       jitter in the plunger reading.  Most sensors aren't perfectly accurate;
+//       consecutive readings at the same physical plunger position vary 
+//       slightly, wandering in a range near the true reading.  Over time, the 
+//       readings will usually average the true value, but that's not much of a 
+//       consolation to us because we want to display the position in real time.
+//       To reduce the visible jitter, we can apply a hysteresis filter that 
+//       hides random variations within the specified window.  The window is in 
+//       the sensor's native units, so the effect of a given window size 
+//       depends on the sensor type.  A value of zero disables the filter.
+//
+//       - Reversed orientation.  If set, this inverts the sensor readings, as
+//       though the sensor were physically flipped to the opposite direction.
+//       This allows for correcting a reversed physical sensor installation in
+//       software without having to mess with the hardware.
+//
+//       byte 3:4 = jitter window size in native sensor units, little-endian
+//       byte 5   = orientation filter bit mask:
+//                  0x01  -> set if reversed orientation, clear if normal
+//                  0x80  -> Read-only: this bit is set if the feature is supported
 //
 // 20 -> Plunger bar code setup.  Sets parameters applicable only to bar code
 //       sensor types.
