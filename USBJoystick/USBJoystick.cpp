@@ -358,7 +358,8 @@ bool USBJoystick::reportConfigVar(const uint8_t *data)
 bool USBJoystick::reportConfig(
     int numOutputs, int unitNo, 
     int plungerZero, int plungerMax, int plungerRlsTime,
-    bool configured, bool sbxpbx, bool newAccelFeatures, bool flashStatusFeature,
+    bool configured, bool sbxpbx, bool newAccelFeatures, 
+    bool flashStatusFeature, bool reportTimingFeatures,
     size_t freeHeapBytes)
 {
     HID_REPORT report;
@@ -384,11 +385,15 @@ bool USBJoystick::reportConfig(
     // write the status bits: 
     //  0x01  -> configuration loaded
     //  0x02  -> SBX/PBX protocol extensions supported
+    //  0x04  -> new accelerometer features supported
+    //  0x08  -> flash status feature supported
+    //  0x10  -> joystick report timing features supported
     report.data[11] = 
         (configured ? 0x01 : 0x00)
         | (sbxpbx ? 0x02 : 0x00)
         | (newAccelFeatures ? 0x04 : 0x00)
-        | (flashStatusFeature ? 0x08 : 0x00);
+        | (flashStatusFeature ? 0x08 : 0x00)
+        | (reportTimingFeatures ? 0x10 : 0x00);
     
     // write the free heap space
     put(12, freeHeapBytes);

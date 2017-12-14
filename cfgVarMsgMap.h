@@ -67,9 +67,16 @@ void v_func
         break;
         
     case 3:
-        // Enable/disable joystick
+        // Joystick report settings
         v_byte(joystickEnabled, 2);
         v_byte(joystickAxisFormat, 3);
+        v_ui32(jsReportInterval_us, 4);
+        
+#if VAR_MODE_SET
+        // apply a default if the report interval is zero
+        if (cfg.jsReportInterval_us == 0)
+            cfg.jsReportInterval_us = 8333;
+#endif
         break;
         
     case 4:
@@ -77,6 +84,7 @@ void v_func
         v_byte(accel.orientation, 2);
         v_byte(accel.range, 3);
         v_byte(accel.autoCenterTime, 4);
+        v_byte(accel.stutter, 5);
         break;
 
     case 5:

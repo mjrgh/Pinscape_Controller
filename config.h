@@ -260,6 +260,10 @@ struct Config
         // use the XYZ axis format
         joystickAxisFormat = USBJoystick::AXIS_FORMAT_XYZ;
         
+        // send reports every 8.33ms by default (120 Hz, 2X the typical video
+        // refresh rate)
+        jsReportInterval_us = 8333;
+        
         // assume standard orientation, with USB ports toward front of cabinet
         accel.orientation = OrientationFront;
         
@@ -268,6 +272,9 @@ struct Config
         
         // default auto-centering time
         accel.autoCenterTime = 0;
+        
+        // take a new accelerometer reading on every other joystick report
+        accel.stutter = 2;
 
         // assume a basic setup with no expansion boards
         expan.typ = 0;
@@ -584,6 +591,10 @@ struct Config
     // Joystick axis report format, as a USBJoystick::AXIS_FORMAT_xxx value.
     uint8_t joystickAxisFormat;
     
+    // Joystick report timing.  This is the minimum time between joystick
+    // reports, in microseconds. 
+    uint32_t jsReportInterval_us;
+    
     // Timeout for rebooting the KL25Z when the connection is lost.  On some
     // hosts, the mbed USB stack has problems reconnecting after an initial
     // connection is dropped.  As a workaround, we can automatically reboot
@@ -606,6 +617,19 @@ struct Config
         //   1-60 = auto-centering on with the given timer in seconds
         //   255 = auto-centering off
         uint8_t autoCenterTime;
+        
+        // Accelerometer report "stuttering".  This is the number of times 
+        // that each accelerometer reading is repeated in the joystick 
+        // reports.  If this is set to 1 (or 0), a new accelerometer reading 
+        // is taken on every joystick report.  If set to 2, a new reading 
+        // is taken on every other report, and the previous reading is 
+        // repeated on the alternating reports.  If set to 3, we take a 
+        // new  reading on each third report, and so on.  The purpose is 
+        // to slow down accelerometer readings for the benefit of Visual
+        // Pinball, which will miss readings if taken faster than the 
+        // video refresh rate, while sending joystick reports at a
+        // faster rate for lower button input latency.
+        uint8_t stutter;
     
     } accel;
     

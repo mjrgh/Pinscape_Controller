@@ -245,6 +245,9 @@
 //                         auto-centering time)
 //                 0x08 -> flash write status flag supported (see flag 0x40
 //                         in normal joystick status report)
+//                 0x10 -> joystick report timing features supports
+//                         (configurable joystick report interval, acceler-
+//                         ometer stutter counter)
 //    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
 //                of unused heap (malloc'able) memory.  The firmware generally
 //                allocates all of the dynamic memory it needs during startup,
@@ -811,8 +814,9 @@
 //
 // 3  -> Joystick report settings.
 //
-//         byte 2 -> Enable joystick interface: 1 to enable, 0 to disable
-//         byte 3 -> Joystick axis format, as a USBJoystick::AXIS_FORMAT_XXX value
+//         byte 3 -> Enable joystick interface: 1 to enable, 0 to disable
+//         byte 4 -> Joystick axis format, as a USBJoystick::AXIS_FORMAT_XXX value
+//         bytes 5:8 -> Reporting interval in microseconds
 //
 //       When joystick reports are disabled, the device registers as a generic HID 
 //       device, and only sends the private report types used by the Windows config 
@@ -842,6 +846,10 @@
 //           1-60   = auto-centering on with the given time in seconds
 //           61-245 = reserved
 //           255    = auto-centering off; manual centering only
+//        byte 6 -> joystick report stutter count: 1 (or 0) means that we
+//           take a fresh accelerometer on every joystick report; 2 means
+//           that we take a new reading on every other report, and repeat
+//           the prior readings on alternate reports; etc
 //
 // 5  -> Plunger sensor type.
 //

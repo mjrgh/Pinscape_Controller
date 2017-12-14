@@ -1312,11 +1312,12 @@ static const float dof_to_pwm[] = {
 };
 
 
-// Conversion table for 8-bit DOF level to pulse width in microseconds,
-// with gamma correction.  We could use the layered gamma output on top 
-// of the regular LwPwmOut class for this, but we get better precision
-// with a dedicated table, because we apply gamma correction to the
-// 32-bit microsecond values rather than the 8-bit DOF levels.
+// Conversion table for 8-bit DOF level to pulse width, with gamma correction
+// pre-calculated.  The values are normalized duty cycles from 0.0 to 1.0.
+// Note that we could use the layered gamma output on top of the regular 
+// LwPwmOut class for this instead of a separate table, but we get much better 
+// precision with a dedicated table, because we apply gamma correction to the
+// actual duty cycle values (as 'float') rather than the 8-bit DOF values.
 static const float dof_to_gamma_pwm[] = {
     0.000000f, 0.000000f, 0.000001f, 0.000004f, 0.000009f, 0.000017f, 0.000028f, 0.000042f,
     0.000062f, 0.000086f, 0.000115f, 0.000151f, 0.000192f, 0.000240f, 0.000296f, 0.000359f,
@@ -1360,43 +1361,60 @@ static const float dof_to_gamma_pwm[] = {
 // The value register controls the duty cycle, so it's what you have to write
 // if you want to update the brightness of an output.
 //
-// Our solution is to simply repeat all PWM updates periodically.  If a write
-// is lost on one cycle, it'll eventually be applied on a subseuqent periodic
-// update.  For low overhead, we do these repeat updates periodically during
-// the main loop.
+// The symptom of the problem, if it's not worked around somehow, is that 
+// an output will get "stuck" due to a missed write.  This is especially
+// noticeable during a series of updates such as a fade.  If the last
+// couple of updates in a fade are lost, the output will get stuck at some
+// value above or below the desired final value.  The stuck setting will
+// persist until the output is deliberately changed again later.
 //
-// The mbed library has its own solution to this bug, but it creates a 
-// separate problem of its own.  The mbed solution is to write the value
-// register immediately, and then also reset the "count" register in the 
-// TPM unit containing the output.  The count reset truncates the current
-// PWM cycle, which avoids the hardware problem with more than one write per
-// cycle.  The problem is that the truncated cycle causes visible flicker if
-// the output is connected to an LED.  This is particularly noticeable during
-// fades, when we're updating the value register repeatedly and rapidly: an
-// attempt to fade from fully on to fully off causes rapid fluttering and 
-// flashing rather than a smooth brightness fade.
+// Our solution:  Simply repeat all PWM updates periodically.  This way, any
+// lost write will *eventually* take hold on one of the repeats.  Repeats of
+// the same value won't change anything and thus won't be noticeable.  We do
+// these periodic updates during the main loop, which makes them very low 
+// overhead (there's no interrupt overhead; we just do them when convenient 
+// in the main loop), and also makes them very frequent.  The frequency 
+// is crucial because it ensures that updates will never be lost for long 
+// enough to become noticeable.
 //
-// The hardware bug is a case of good intentions gone bad.  The hardware is
-// *supposed* to make it easy for software to avoid glitching during PWM
-// updates, by providing a staging register in front of the real value
-// register.  The software actually writes to the staging register, which
-// holds updates until the end of the cycle, at which point the hardware
-// automatically moves the value from the staging register into the real
-// register.  This ensures that the real register is always updated exactly
-// at a cycle boundary, which in turn ensures that there's no flicker when
-// values are updated.  A great design - except that it doesn't quite work.
-// The problem is that the staging register actually seems to be implemented
-// as a one-element FIFO in "stop when full" mode.  That is, when you write
-// the FIFO, it becomes full.  When the cycle ends and the hardware reads it
-// to move the staged value into the real register, the FIFO becomes empty.
-// But if you try to write the FIFO twice before the hardware reads it and
-// empties it, the second write fails, leaving the first value in the queue.
-// There doesn't seem to be any way to clear the FIFO from software, so you
-// just have to wait for the cycle to end before writing another update.
-// That more or less defeats the purpose of the staging register, whose whole
-// point is to free software from worrying about timing considerations with
-// updates.  It frees us of the need to align our timing on cycle boundaries,
-// but it leaves us with the need to limit writes to once per cycle.
+// The mbed library has its own, different solution to this bug, but the
+// mbed solution isn't really a solution at all because it creates a separate 
+// problem of its own.  The mbed approach is reset the TPM "count" register
+// on every value register write.   The count reset truncates the current
+// PWM cycle, which bypasses the hardware problem.  Remember, the hardware
+// problem is that you can only write once per cycle; the mbed "solution" gets
+// around that by making sure the cycle ends immediately after the write.
+// The problem with this approach is that the truncated cycle causes visible 
+// flicker if the output is connected to an LED.  This is particularly 
+// noticeable during fades, when we're updating the value register repeatedly 
+// and rapidly: an attempt to fade from fully on to fully off causes rapid 
+// fluttering and flashing rather than a smooth brightness fade.  That's why
+// I had to come up with something different - the mbed solution just trades
+// one annoying bug for another that's just as bad.
+//
+// The hardware bug, by the way, is a case of good intentions gone bad.  
+// The whole point of the staging register is to make things easier for
+// us software writers.  In most PWM hardware, software has to coordinate
+// with the PWM duty cycle when updating registers to avoid a glitch that
+// you'd get by scribbling to the duty cycle register mid-cycle.  The
+// staging register solves this by letting the software write an update at
+// any time, knowing that the hardware will apply the update at exactly the
+// end of the cycle, ensuring glitch-free updates.  It's a great design,
+// except that it doesn't quite work.  The problem is that they implemented
+// this clever staging register as a one-element FIFO that refuses any more
+// writes when full.  That is, writing a value to the FIFO fills it; once
+// full, it ignores writes until it gets emptied out.  How's it emptied out?
+// By the hardware moving the staged value to the real register.  Sadly, they
+// didn't provide any way for the software to clear the register, and no way
+// to even tell that it's full.  So we don't have glitches on write, but we're
+// back to the original problem that the software has to be aware of the PWM
+// cycle timing, because the only way for the software to know that a write
+// actually worked is to know that it's been at least one PWM cycle since the
+// last write.  That largely defeats the whole purpose of the staging register,
+// since the whole point was to free software writers of these timing
+// considerations.  It's still an improvement over no staging register at
+// all, since we at least don't have to worry about glitches, but it leaves
+// us with this somewhat similar hassle.
 //
 // So here we have our list of PWM outputs that need to be polled for updates.
 // The KL25Z hardware only has 10 PWM channels, so we only need a fixed set
@@ -1997,14 +2015,13 @@ static void updateLwPort(int port)
 }
 
 // Turn off all outputs and restore everything to the default LedWiz
-// state.  This sets outputs #1-32 to LedWiz profile value 48 (full
-// brightness) and switch state Off, sets all extended outputs (#33
-// and above) to zero brightness, and sets the LedWiz flash rate to 2.
-// This effectively restores the power-on conditions.
+// state.  This sets all outputs to LedWiz profile value 48 (full
+// brightness) and switch state Off, and sets the LedWiz flash rate 
+// to 2.  This effectively restores the power-on conditions.
 //
 void allOutputsOff()
 {
-    // reset all LedWiz outputs to OFF/48
+    // reset all outputs to OFF/48
     for (int i = 0 ; i < numOutputs ; ++i)
     {
         outLevel[i] = 0;
@@ -5690,6 +5707,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 true,               // we support sbx/pbx extensions
                 true,               // we support the new accelerometer settings
                 true,               // we support the "flash write ok" status bit in joystick reports
+                true,               // we support the configurable joystick report timing features
                 mallocBytesFree()); // remaining memory size
             break;
             
@@ -6106,26 +6124,40 @@ int main(void)
     // we're now connected to the host
     connected = true;
     
-    // Last report timer for the joytick interface.  We use this timer to
-    // throttle the report rate to a pace that's suitable for VP.  Without
-    // any artificial delays, we could generate data to send on the joystick
-    // interface on every loop iteration.  The loop iteration time depends
-    // on which devices are attached, since most of the work in our main 
-    // loop is simply polling our devices.  For typical setups, the loop
-    // time ranges from about 0.25ms to 2.5ms; the biggest factor is the
-    // plunger sensor.  But VP polls for input about every 10ms, so there's 
-    // no benefit in sending data faster than that, and there's some harm,
-    // in that it creates USB overhead (both on the wire and on the host 
-    // CPU).  We therefore use this timer to pace our reports to roughly
-    // the VP input polling rate.  Note that there's no way to actually
-    // synchronize with VP's polling, but there's also no need to, as the
-    // input model is designed to reflect the overall current state at any
-    // given time rather than events or deltas.  If VP polls twice between
-    // two updates, it simply sees no state change; if we send two updates
-    // between VP polls, VP simply sees the latest state when it does get
-    // around to polling.
+    // Set up a timer for keeping track of how long it's been since we
+    // sent the last joystick report.  We use this to determine when it's
+    // time to send the next joystick report.  
+    //
+    // We have to use a timer for two reasons.  The first is that our main
+    // loop runs too fast (about .25ms to 2.5ms per loop, depending on the
+    // type of plunger sensor attached and other factors) for us to send
+    // joystick reports on every iteration.  We *could*, but the PC couldn't
+    // digest them at that pace.  So we need to slow down the reports to a
+    // reasonable pace.  The second is that VP has some complicated timing
+    // issues of its own, so we not only need to slow down the reports from
+    // our "natural" pace, but also time them to sync up with VP's input
+    // sampling rate as best we can.
     Timer jsReportTimer;
     jsReportTimer.start();
+    
+    // Accelerometer sample "stutter" counter.  Each time we send a joystick
+    // report, we increment this counter, and check to see if it has reached 
+    // the threshold set in the configuration.  If so, we take a new 
+    // accelerometer sample and send it with the new joystick report.  It
+    // not, we don't take a new sample, but simply repeat the last sample.
+    //
+    // This lets us send joystick reports more frequently than accelerometer
+    // samples.  The point is to let us slow down accelerometer reports to
+    // a pace that matches VP's input sampling frequency, while still sending
+    // joystick button updates more frequently, so that other programs that
+    // can read input faster will see button changes with less latency.
+    int jsAccelStutterCounter = 0;
+    
+    // Last accelerometer report, in joystick units.  We normally report the 
+    // acceleromter reading via the joystick X and Y axes, per the VP 
+    // convention.  We can alternatively report in the RX and RY axes; this
+    // can be set in the configuration.
+    int x = 0, y = 0;
     
     // Time since we successfully sent a USB report.  This is a hacky 
     // workaround to deal with any remaining sporadic problems in the USB 
@@ -6170,10 +6202,6 @@ int main(void)
     Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, 
         MMA8451_INT_PIN, cfg.accel.range, cfg.accel.autoCenterTime);
        
-    // last accelerometer report, in joystick units (we report the nudge
-    // acceleration via the joystick x & y axes, per the VP convention)
-    int x = 0, y = 0;
-    
     // initialize the plunger sensor
     plungerSensor->init();
     
@@ -6415,21 +6443,30 @@ int main(void)
         // the new report.  VP only polls for input in 10ms intervals, so
         // there's no benefit in sending reports more frequently than this.
         // More frequent reporting would only add USB I/O overhead.
-        if (cfg.joystickEnabled && jsReportTimer.read_us() > 10000UL)
+        if (cfg.joystickEnabled && jsReportTimer.read_us() > cfg.jsReportInterval_us)
         {
-            // read the accelerometer
-            int xa, ya;
-            accel.get(xa, ya);
+            // Increment the "stutter" counter.  If it has reached the
+            // stutter threshold, read a new accelerometer sample.  If 
+            // not, repeat the last sample.
+            if (++jsAccelStutterCounter >= cfg.accel.stutter)
+            {
+                // read the accelerometer
+                int xa, ya;
+                accel.get(xa, ya);
             
-            // confine the results to our joystick axis range
-            if (xa < -JOYMAX) xa = -JOYMAX;
-            if (xa > JOYMAX) xa = JOYMAX;
-            if (ya < -JOYMAX) ya = -JOYMAX;
-            if (ya > JOYMAX) ya = JOYMAX;
-            
-            // store the updated accelerometer coordinates
-            x = xa;
-            y = ya;
+                // confine the results to our joystick axis range
+                if (xa < -JOYMAX) xa = -JOYMAX;
+                if (xa > JOYMAX) xa = JOYMAX;
+                if (ya < -JOYMAX) ya = -JOYMAX;
+                if (ya > JOYMAX) ya = JOYMAX;
+                
+                // store the updated accelerometer coordinates
+                x = xa;
+                y = ya;
+                
+                // reset the stutter counter
+                jsAccelStutterCounter = 0;
+            }
             
             // Report the current plunger position unless the plunger is
             // disabled, or the ZB Launch Ball signal is on.  In either of
@@ -6438,14 +6475,14 @@ int main(void)
             // tells us that the table has a Launch Ball button instead of
             // a traditional plunger, so we don't want to confuse VP with
             // regular plunger inputs.
-            int z = plungerReader.getPosition();
-            int zrep = (!cfg.plunger.enabled || zbLaunchOn ? 0 : z);
+            int zActual = plungerReader.getPosition();
+            int zReported = (!cfg.plunger.enabled || zbLaunchOn ? 0 : zActual);
             
             // rotate X and Y according to the device orientation in the cabinet
             accelRotate(x, y);
 
             // send the joystick report
-            jsOK = js.update(x, y, zrep, jsButtons, statusFlags);
+            jsOK = js.update(x, y, zReported, jsButtons, statusFlags);
             
             // we've just started a new report interval, so reset the timer
             jsReportTimer.reset();
