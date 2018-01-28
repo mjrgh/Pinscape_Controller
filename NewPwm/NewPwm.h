@@ -110,6 +110,7 @@
 //
 // Since the KL25Z hardware has a fixed set of 3 TPM units, we have
 // a fixed array of 3 of these objects.
+//
 class NewPwmUnit
 {
 public:
@@ -140,6 +141,9 @@ public:
         }
     }
     
+    // Default PWM period, in seconds
+    static float defaultPeriod;
+    
     // enable a channel
     void enableChannel(int ch)
     {
@@ -151,8 +155,8 @@ public:
             int tpm_n = this - unit;
             SIM->SCGC6 |= 1 << (SIM_SCGC6_TPM0_SHIFT + tpm_n);
             
-            // set a default period of 20ms
-            period(20.0e-3f);
+            // set the default PWM frequency (period)
+            period(defaultPeriod);
         }
         
         // add the channel bit to our collection

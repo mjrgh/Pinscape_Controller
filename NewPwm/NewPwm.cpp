@@ -9,3 +9,6 @@ NewPwmUnit NewPwmUnit::unit[3];
 // System clock rate, in Hz
 uint32_t NewPwmUnit::sysClock;
 
+// Default PWM period for new channels, in seconds
+float NewPwmUnit::defaultPeriod;
+

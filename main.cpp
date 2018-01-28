@@ -1432,10 +1432,24 @@ public:
         if (numPolledPwm < countof(polledPwm))
             polledPwm[numPolledPwm++] = this;
             
-        // set 5ms (200Hz) cycle time
-        p.getUnit()->period(0.005f);
-
-        // set the initial value
+        // IMPORTANT:  Do not set the PWM period (frequency) here explicitly.  
+        // We instead want to accept the current setting for the TPM unit
+        // we're assigned to.  The KL25Z hardware can only set the period at
+        // the TPM unit level, not per channel, so if we changed the frequency
+        // here, we'd change it for everything attached to our TPM unit.  LW
+        // outputs don't care about frequency other than that it's fast enough
+        // that attached LEDs won't flicker.  Some other PWM users (IR remote,
+        // TLC5940) DO care about exact frequencies, because they use the PWM
+        // as a signal generator rather than merely for brightness control.
+        // If we changed the frequency here, we could clobber one of those
+        // carefully chosen frequencies and break the other subsystem.  So
+        // we need to be the "free variable" here and accept whatever setting
+        // is currently on our assigned unit.  To minimize flicker, the main()
+        // entrypoint sets a default PWM rate of 1kHz on all channels.  All
+        // of the other subsystems that might set specific frequencies will
+        // set much high frequencies, so that should only be good for us.
+            
+        // set the initial brightness value
         set(initVal);
     }
 
@@ -1489,8 +1503,20 @@ Timer polledPwmTimer;
 uint64_t polledPwmTotalTime, polledPwmRunCount;
 void pollPwmUpdates()
 {
-    // if it's been at least 7.5ms since the last update, do another update
-    if (polledPwmTimer.read_us() >= 7500)
+    // If it's been long enough since the last update, do another update.
+    // Note that the time limit is fairly arbitrary: it has to be at least
+    // 1.5X the PWM period, so that we can be sure that at least one PWM
+    // period has elapsed since the last update, but there's no hard upper
+    // bound.  Instead, it only has to be short enough that fades don't
+    // become noticeably chunky.  The competing interest is that we don't 
+    // want to do this more often than necessary to provide incremental
+    // benefit, because the polling adds overhead to the main loop and
+    // takes time away from other tasks we could be performing.  The
+    // shortest time with practical benefit is probably around 50-60Hz,
+    // since that gives us "video rate" granularity in fades.  Anything
+    // faster wouldn't probably make fades look any smoother to a human 
+    // viewer.
+    if (polledPwmTimer.read_us() >= 15000)
     {
         // time the run for statistics collection
         IF_DIAG(
@@ -5992,6 +6018,33 @@ int main(void)
 {
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
+    
+    // Set the default PWM period to 1ms.  This will be used for PWM
+    // channels on PWM units whose periods aren't changed explicitly,
+    // so it'll apply to LW outputs assigned to GPIO pins.  Note that
+    // the KL25Z only allows the period to be set at the TPM unit
+    // level, not per channel, so all channels on a given unit will
+    // necessarily use the same frequency.  We (currently) have two
+    // subsystems that need specific PWM frequencies: TLC5940NT (which
+    // uses PWM to generate the grayscale clock signal) and IR remote
+    // (which uses PWM to generate the IR carrier signal).  Since
+    // those require specific PWM frequencies, it's important to assign
+    // those to separate TPM units if both are in use simultaneously;
+    // the Config Tool includes checks to ensure that will happen when
+    // setting a config interactively.  In addition, for the greatest
+    // flexibility, we take care NOT to assign explicit PWM frequencies
+    // to pins that don't require special frequences.  That way, if a
+    // pin that doesn't need anything special happens to be sharing a
+    // TPM unit with a pin that does require a specific frequency, the
+    // two will co-exist peacefully on the TPM.
+    //
+    // We set this default first, before we create any PWM GPIOs, so
+    // that it will apply to all channels by default but won't override
+    // any channels that need specific frequences.  Currently, the only
+    // frequency-agnostic PWM user is the LW outputs, so we can choose
+    // the default to be suitable for those.  This is chosen to minimize
+    // flicker on attached LEDs.
+    NewPwmUnit::defaultPeriod = 0.0005f;
         
     // clear the I2C connection
     clear_i2c();
