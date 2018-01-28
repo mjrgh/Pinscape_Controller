@@ -6520,6 +6520,9 @@ int main(void)
                 x = xa;
                 y = ya;
                 
+                // rotate X and Y according to the device orientation in the cabinet
+                accelRotate(x, y);
+
                 // reset the stutter counter
                 jsAccelStutterCounter = 0;
             }
@@ -6534,9 +6537,6 @@ int main(void)
             int zActual = plungerReader.getPosition();
             int zReported = (!cfg.plunger.enabled || zbLaunchOn ? 0 : zActual);
             
-            // rotate X and Y according to the device orientation in the cabinet
-            accelRotate(x, y);
-
             // send the joystick report
             jsOK = js.update(x, y, zReported, jsButtons, statusFlags);
             
