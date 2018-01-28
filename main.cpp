@@ -1431,6 +1431,9 @@ public:
         // add myself to the list of polled outputs for periodic updates
         if (numPolledPwm < countof(polledPwm))
             polledPwm[numPolledPwm++] = this;
+            
+        // set 5ms (200Hz) cycle time
+        p.getUnit()->period(0.005f);
 
         // set the initial value
         set(initVal);
@@ -1486,8 +1489,8 @@ Timer polledPwmTimer;
 uint64_t polledPwmTotalTime, polledPwmRunCount;
 void pollPwmUpdates()
 {
-    // if it's been at least 25ms since the last update, do another update
-    if (polledPwmTimer.read_us() >= 25000)
+    // if it's been at least 7.5ms since the last update, do another update
+    if (polledPwmTimer.read_us() >= 7500)
     {
         // time the run for statistics collection
         IF_DIAG(

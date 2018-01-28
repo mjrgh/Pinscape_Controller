@@ -151,7 +151,7 @@ public:
             int tpm_n = this - unit;
             SIM->SCGC6 |= 1 << (SIM_SCGC6_TPM0_SHIFT + tpm_n);
             
-            // set a default period of 20us
+            // set a default period of 20ms
             period(20.0e-3f);
         }
         
