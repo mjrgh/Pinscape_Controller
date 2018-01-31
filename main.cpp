@@ -6284,7 +6284,7 @@ int main(void)
     {
         // start the main loop timer for diagnostic data collection
         IF_DIAG(mainLoopTimer.reset(); mainLoopTimer.start();)
-            
+        
         // Process incoming reports on the joystick interface.  The joystick
         // "out" (receive) endpoint is used for LedWiz commands and our 
         // extended protocol commands.  Limit processing time to 5ms to
@@ -6325,6 +6325,14 @@ int main(void)
         
         // poll the accelerometer
         accel.poll();
+            
+        // Note the "effective" plunger enabled status.  This has two
+        // components: the explicit "enabled" bit, and the plunger sensor
+        // type setting.  For most purposes, a plunger type of NONE is
+        // equivalent to disabled.  Set this to explicit 0x01 or 0x00
+        // so that we can OR the bit into status reports.
+        uint8_t effectivePlungerEnabled = (cfg.plunger.enabled
+            && cfg.plunger.sensorType != PlungerType_None) ? 0x01 : 0x00;
             
         // collect diagnostic statistics, checkpoint 0
         IF_DIAG(mainLoopIterCheckpt[0] += mainLoopTimer.read_us();)
@@ -6488,7 +6496,7 @@ int main(void)
         
         // figure the current status flags for joystick reports
         uint16_t statusFlags = 
-            cfg.plunger.enabled             // 0x01
+            effectivePlungerEnabled         // 0x01
             | nightMode                     // 0x02
             | ((psu2_state & 0x07) << 2)    // 0x04 0x08 0x10
             | saveConfigSucceededFlag;      // 0x40
@@ -6535,7 +6543,7 @@ int main(void)
             // a traditional plunger, so we don't want to confuse VP with
             // regular plunger inputs.
             int zActual = plungerReader.getPosition();
-            int zReported = (!cfg.plunger.enabled || zbLaunchOn ? 0 : zActual);
+            int zReported = (!effectivePlungerEnabled || zbLaunchOn ? 0 : zActual);
             
             // send the joystick report
             jsOK = js.update(x, y, zReported, jsButtons, statusFlags);
@@ -6786,7 +6794,7 @@ int main(void)
                 // flashes and show the TV timer flashes instead.
                 diagLED(0, 0, 0);
             }
-            else if (cfg.plunger.enabled && !cfg.plunger.cal.calibrated)
+            else if (effectivePlungerEnabled && !cfg.plunger.cal.calibrated)
             {
                 // connected, plunger calibration needed - flash yellow/green
                 hb = !hb;
