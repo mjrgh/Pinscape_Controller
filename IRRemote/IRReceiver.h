@@ -133,7 +133,7 @@
 // working on the same data at the same time, but in practice the various 
 // protocols have enough internal structure that only the "right" handler
 // will be able to do anything with a given signal, and the rest will just
-// ignore it, and bide them time until something shows up that they can make 
+// ignore it, and bide their time until something shows up that they can make 
 // sense of.  It might also sound like a lot of overhead, but in practice 
 // it's very lightweight: it takes about 4% CPU to service the decoding 
 // process while a signal is actually coming in, and essentially 0% when
@@ -195,8 +195,8 @@
 // is a PWM signal operating at a fixed, relatively high frequency; and
 // second, with a lower frequency data signal superimposed on the PWM
 // signal.  (And I suppose you could say there's a third layer of 
-// modulation in the IR light itself, since that's electromagnetic wave
-// operating at an even higher frequency of around 300 THz.)
+// modulation in the IR light itself, since that's an electromagnetic 
+// wave operating at an even higher frequency of around 300 THz.)
 //
 // Carrier: The PWM carrier uses a fixed frequency, usually around 40kHz.  
 // The carrier doesn't encode any data, since it's just constant fixed-length
@@ -204,16 +204,16 @@
 // that receivers can use to distinguish data signals from ambient light.
 // This is necessary because the IR light wavelengths are also contained
 // in sunlight and ordinary household lighting.  (Fluourescent lights even
-// has their own characteristic oscillating frequencies in the IR band, so
+// have their own characteristic oscillating frequencies in the IR band, so
 // the receiver not only has to distinguish the signal from constant
 // amgient light levels but also from other types of oscillating light
 // levels.  The PWM carrier frequencies used in remotes are chosen based
-// on the practical need to be distinguishable from these sort of 
+// on the practical need to distinguish remote control signals from the
 // common household interference sources.)  Receivers can separate the 
 // an oscillating PWM signal at a particular frequency from other signals
 // through a process known as demodulation, which is the same mechanism
-// that radio receivers use to pluck signals from the jumble of background
-// noise in the radio spectrum.
+// that radio receivers use to pluck AM or FM signals from the jumble of 
+// background noise in the radio spectrum.
 //
 // For our purposes, we don't worry about demodulation in the software,
 // since the sensor hardware does that part of the job.  Each type of sensor 
@@ -221,9 +221,14 @@
 // choose a sensor based on the types of remotes you plan to use it with.  
 // Most CE manufacturers have more or less standardized on 38kHz, which is
 // why we recommend the TSOP384xx series.  Not everyone is at exactly 38kHz,
-// but the TSOP seems perfectly happy to demodulate signals at nearby 
-// frequencies, so it's a good universal choice for most remotes you're
-// likely to find at home.
+// but most are within 2kHz plus or minus, and the TSOP seems to demodulate
+// signals within a few kHz of its nominal frequency very well.  38kHz seems
+// to be a good centerpoint for home electronics devices, which is why we
+// recommend the 38kHz part as a "universal" receiver.  If your application
+// only needs to receive from one specific remote (rather than act as a 
+// universal receiver), you might be better served with a different TSOP
+// part that's tuned to your transmitter's carrier frequency, if that's
+// something other than 38kHz.
 //
 // Data signal: The data signal is superimposed on the PWM carrier by 
 // turning the PWM'ed IR source on and off at a lower, variable frequency. 

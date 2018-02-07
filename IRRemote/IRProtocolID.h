@@ -36,6 +36,7 @@ const uint8_t IRPRO_SONY15 = 25;      // Sony 15-bit
 const uint8_t IRPRO_SONY20 = 26;      // Sony 20-bit
 const uint8_t IRPRO_ORTEKMCE = 27;    // OrtekMCE
 const uint8_t IRPRO_LUTRON = 28;      // Lutron lights, fans, and home automation
+const uint8_t IRPRO_TCLROKU = 29;     // TCL Roku models (NEC 32 with doubled code words)
 
 
 #endif

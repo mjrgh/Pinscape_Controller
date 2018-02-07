@@ -194,20 +194,31 @@ public:
     virtual void rxPulse(IRRecvProIfc *receiver, uint32_t t, bool mark) = 0;
     
     // PWM carrier frequency used for the IR signal, expressed as a PWM
-    // cycle period in seconds.  We use this to set the appropriate pWM
+    // cycle period in seconds.  We use this to set the appropriate PWM
     // frequency for transmissions.  The most common carrier is 38kHz.
     //
     // We can't use adjust the carrier frequency for receiving signals, since 
     // the TSOP sensor we use does the demodulation at a fixed frequency.
     // You can choose a frequency by choosing your sensor, since TSOP sensors
     // are available in a range of carrier frequencies, but once you choose a
-    // sensor we can't set the frequency in software.  Fortunately, the 
+    // sensor we can't change its frequency in software.  Fortunately, the 
     // TSOP384xx seems tolerant in practice of a fairly wide range around
-    // its nominal 38kHz carrier.  I've successfull tested it with remotes
-    // documented to use a few other frequencies from 36 to 40 kHz.)
+    // its nominal 38kHz carrier.  I've successfully tested it with remotes
+    // documented to use frequencies from 36 to 40 kHz.  Most CE remotes 
+    // fall within this range, so the 38kHz sensor makes a good universal
+    // receiver.
     virtual float pwmPeriod(IRTXState *state) const { return 26.31578947e-6f; } // 38kHz
     
-    // PWM duty cycle when transmitting
+    // PWM duty cycle when transmitting.  This is the proportion of On to
+    // Off time for each PWM pulse.  A few of the IR protocols that have
+    // official documentation do specify a duty cycle, so when this is laid
+    // out in the spec, it's probably a good idea to use the same value in
+    // our protocol implementation.  In practice, though, it doesn't seem 
+    // to be an important parameter as far as the receivers are concerned,
+    // and I'm not sure it actually matters for any of the protocols.  To 
+    // the extent it's specified at all, they might just be documenting the 
+    // original manufacturer's implementation rather than specifying a
+    // requirement.
     virtual float pwmDutyCycle() const { return .3f; }
     
     // Begin transmitting the given command.  Before calling, the caller
@@ -1425,20 +1436,22 @@ public:
 // variation of it.  This class handles the following variations on the
 // basic NEC code:
 //
-//   NEC-32:  32-bit payload, 9000us header mark, 4500us header space
-//   NEC-32X: 32-bit payload, 4500us header mark, 4500us header space
-//   NEC-48:  48-bit payload, 9000us header mark, 4500us header space
-//   Pioneer: NEC-32 with address A0..AF + possible "shift" prefixes
+//   NEC-32:   32-bit payload, 9000us header mark, 4500us header space
+//   NEC-32X:  32-bit payload, 4500us header mark, 4500us header space
+//   NEC-48:   48-bit payload, 9000us header mark, 4500us header space
+//   Pioneer:  NEC-32 with address A0..AF + possible "shift" prefixes
+//   TCL/Roku: NEC-32 with address EAC7 + doubled code XOR 0x8080
 //
 // Each of the three NEC-nn protocol types comes in two sub-types: one
 // that uses "ditto" codes for repeated keys, and one that simply sends
 // the same code again on repeats.  The ditto code, when used, varies with 
 // the main protocol type:
 //
-//   NEC-32:  9000us mark + 2250us space + 564us mark
-//   NEC-32x: 4500us mark + 4500us space + one data bit + 564us mark
-//   NEC-48:  9000us mark + 2250us space + 564us mark
-//   Pioneer: no dittos
+//   NEC-32:   9000us mark + 2250us space + 564us mark
+//   NEC-32x:  4500us mark + 4500us space + one data bit + 564us mark
+//   NEC-48:   9000us mark + 2250us space + 564us mark
+//   Pioneer:  no dittos
+//   TCL/Roku: no dittos
 //
 // The NEC-32 and NEC-48 dittos can be detected from the header space
 // length.  The NEC-32x dittos can be detected by the one-bit code length.
@@ -1483,6 +1496,15 @@ public:
 // command.  We sense Pioneer codes based on the address field, and use
 // special handling when we find a Pioneer address code.
 //
+// TCL's Roku models (that is, their TVs that contain embedded Roku features)
+// use yet another proprietary variant.  They use the standard low-level
+// protocol elements (PWM freq and bit timing), but they layer a high-level 
+// protocol variation where every command consists of two 32-bit code words 
+// in succession.  The second code word repeats the first code word, but with 
+// the last two bytes (the "command field") each XOR'd with 0x80.  TCL's codes 
+// are recognizable by EAC7 in the command field.  The repeated code scheme is
+// presumably a redundancy check.  Dittos aren't used in this scheme.
+//
 class IRPNEC: public IRPSpaceLength<uint64_t>
 {
 public:
@@ -1490,7 +1512,25 @@ public:
     virtual uint32_t minRxGap() const { return 3400; }
     virtual uint32_t txGap(IRTXState *state) const 
         { return 108000 - state->txTime.read_us(); }
-        
+
+    // The post-code transmit gap is special for TCL Roku for the gap between
+    // the first and second half of the code.  These appear to use a fixed
+    // 37842us gap.  The receiver interprets the normal NEC inter-code gap 
+    // of (108ms minus code transmit time) as a gap between repeats of the
+    // code rather than as half-codes.
+    virtual uint32_t txPostGap(IRTXState *state) const 
+    { 
+        // Check for TCL Roku models on even reps.  An even rep is the
+        // first half of a code pair, so we need to use the shorter
+        // post-code gap for these.
+        if (state->protocolId == IRPRO_TCLROKU
+            && (state->rep == 0 || state->rep == 2))
+            return 37842;
+    
+        // use the standard NEC timing for others
+        return txGap(state); 
+    }
+
     // space length encoding parameters
     virtual int tMark() const { return 560; }
     virtual int tZero() const { return 560; }
@@ -1502,11 +1542,14 @@ public:
         return state->protocolId == IRPRO_PIONEER ? 25.0e-6f : 26.31578947e-6f; 
     }
     
-    // for Pioneer, we have to send two codes if we have a shift field
+    // For Pioneer, we have to send two codes if we have a shift field.  
+    // For TCL Roku models, we always send two codes.
     virtual int txMinReps(IRTXState *state) const
     {
         if (state->protocolId == IRPRO_PIONEER 
             && (state->cmdCode & 0xFFFF0000) != 0)
+            return 2;
+        else if (state->protocolId == IRPRO_TCLROKU)
             return 2;
         else
             return 1;
@@ -1606,6 +1649,41 @@ public:
             // should, because that breaks the shift-code model Pioneer uses
             state->dittos = false;
         }
+        else if (state->protocolId == IRPRO_TCLROKU)
+        {
+            // TCL Roku models use doubled code words.  The second code
+            // word in the pair is always the same as the first with
+            // the two bytes of the command field XOR'd with 0x80.
+            uint32_t c;
+            if (state->rep == 0 || state->rep == 2)
+            {
+                // even rep - use the nominal command code
+                c = state->cmdCode;
+                    
+                // wrap back to rep 0 on rep 2
+                state->rep = 0;
+            }
+            else
+            {
+                // odd rep - use the code XOR'd with 0x8080
+                c = state->cmdCode ^ 0x8080;
+            }
+            
+            // use the normal NEC32 encoding, substituting the possibly
+            // modified code field 'c' we calculated above
+            uint32_t orig = uint32_t(state->cmdCode);
+            uint8_t a0 = uint8_t((orig >> 24) & 0xff);
+            uint8_t a1 = uint8_t((orig >> 16) & 0xff);
+            uint8_t c0 = uint8_t((c >> 8) & 0xff);
+            uint8_t c1 = uint8_t(c & 0xff);
+            state->bitstream = 
+                (uint64_t(c1) << 24) | (uint64_t(c0) << 16)
+                | (uint64_t(a1) << 8) | uint64_t(a0);
+            state->nbits = 32; 
+
+            // this protocol doesn't use dittos
+            state->dittos = false;
+        }
         else if (state->protocolId == IRPRO_NEC48)
         {
             // NEC 48-bit code.  We store the bytes in the universal 
@@ -1698,13 +1776,14 @@ public:
 
 };
 
-// NEC-32, NEC-48, and Pioneer
+// NEC-32, NEC-48, Pioneer, and TCL TVs with embedded Roku
 class IRPNEC_32_48: public IRPNEC
 {
 public:
     IRPNEC_32_48()
     {
         pioneerPrvCode = 0;
+        tclRokuPrvCode = 0;
     }
 
     // name and ID
@@ -1718,7 +1797,10 @@ public:
     // we encode several protocols
     virtual bool isSenderFor(int pro) const
     {
-        return pro == IRPRO_NEC32 || pro == IRPRO_NEC48 || pro == IRPRO_PIONEER;
+        return pro == IRPRO_NEC32 
+            || pro == IRPRO_NEC48 
+            || pro == IRPRO_PIONEER
+            || pro == IRPRO_TCLROKU;
     }
 
     // NEC-32 and NEC-48 use the same framing
@@ -1748,18 +1830,41 @@ public:
             pioneerPrvCode = 0;
         }
 
+        // If we're in TCL/Roku mode, use special handling
+        if (isTCLRokuCode())
+        {
+            rxCloseTCLRoku(receiver);
+            return;
+        }
+        
+        // The new code isn't a TCL/Roku code, so if we had a first half
+        // code stashed, it doesn't have a second half forthcoming.  Report
+        // it as a standalone code.
+        if (tclRokuPrvCode != 0)
+        {
+            reportTCLRokuFormat(receiver, tclRokuPrvCode);
+            tclRokuPrvCode = 0;
+        }
+        
         // use the generic NEC handling
         IRPNEC::rxClose(receiver, ditto);
     }
     
     virtual void rxIdle(IRRecvProIfc *receiver)
     {
-        // if we have a stashed prior pioneer code, close it out, since
+        // if we have a stashed prior Pioneer code, close it out, since
         // no more codes are forthcoming
         if (pioneerPrvCode != 0)
         {
             reportPioneerFormat(receiver, pioneerPrvCode);
             pioneerPrvCode = 0;
+        }
+        
+        // likewise for TCL/Roku stashed prior codes
+        if (tclRokuPrvCode != 0)
+        {
+            reportTCLRokuFormat(receiver, tclRokuPrvCode);
+            tclRokuPrvCode = 0;
         }
     }
 
@@ -1802,7 +1907,7 @@ public:
     // determine if we have Pioneer address
     bool isPioneerCode()
     {
-        // pull out the command and address fields fields
+        // pull out the command and address fields
         uint8_t c1 = uint8_t((code >> 24) & 0xff);
         uint8_t c0 = uint8_t((code >> 16) & 0xff);
         uint8_t a1 = uint8_t((code >> 8) & 0xff);
@@ -1816,7 +1921,7 @@ public:
             && a0 == uint8_t(~a1)
             && c0 == uint8_t(~c1);        
     }
-
+    
     // Report a code in Pioneer format.  This takes the first address
     // byte and combines it with the first command byte to form a 16-bit
     // code.  Pioneer writes codes in this format because the second
@@ -1849,10 +1954,74 @@ public:
              bool3::null, bool3::null);
     }
    
-    // The previous code value.  This is used in decoding Pioneer
-    // codes, since some keys in the Pioneer scheme send a "shift"
-    // prefix code plus a subcode.
+    // The previous Pioneer code value.  This is used in decoding Pioneer
+    // codes, since some keys in the Pioneer scheme send a "shift" prefix 
+    // code plus a subcode.
     uint32_t pioneerPrvCode;
+    
+    // close out a TCL/Roku code
+    virtual void rxCloseTCLRoku(IRRecvProIfc *receiver)
+    {
+        // Check to see if we have a valid previous code and/or
+        // a valid new code.
+        if (tclRokuPrvCode != 0)
+        {
+            // We have a stashed code for the TCL/Roku double-code-word
+            // scheme.  If this one matches the previous one with the
+            // "command field" bytes XOR'd with 0x80, it's the second
+            // code in the pair.  Otherwise it must be a new code.
+            if (tclRokuPrvCode == code ^ 0x80800000)
+            {
+                // it's the matching code from the pair - report it as one code
+                reportTCLRokuFormat(receiver, tclRokuPrvCode);
+            }
+            else
+            {
+                // it's not a match, so it must be a distinct code - report
+                // the two codes separately
+                reportTCLRokuFormat(receiver, tclRokuPrvCode);
+                reportTCLRokuFormat(receiver, code);
+            }
+            
+            // we've now consumed the previous code
+            tclRokuPrvCode = 0;
+        }
+        else
+        {
+            // There's no stashed code.  Don't report the new one yet, since
+            // it might be the first of a pair.
+            tclRokuPrvCode = code;
+            bit = 0;
+            code = 0;
+        }
+    }
+
+    // Report a code in TCL/Roku format.  This just uses the standard NEC
+    // reporting.
+    void reportTCLRokuFormat(IRRecvProIfc *receiver, uint32_t code)
+    {
+        // put the bytes in the reporting order for NEC: A0 A1 C0 C1
+        uint8_t c1 = uint8_t((code >> 24) & 0xff);
+        uint8_t c0 = uint8_t((code >> 16) & 0xff);
+        uint8_t a1 = uint8_t((code >> 8) & 0xff);
+        uint8_t a0 = uint8_t(code & 0xff);
+        uint64_t codeOut = (uint64_t(a0) << 24) | (uint64_t(a1) << 16)
+            | (uint64_t(c0) << 8) | uint64_t(c1);
+
+        // report it
+        reportCode(receiver, IRPRO_TCLROKU, codeOut, bool3::null, bool3::null);
+    }
+    
+    // determine if we have a TCL/Roku address
+    bool isTCLRokuCode()
+    {
+        // It's a TCL/Roku model if the address field is EA C7
+        return (code & 0xFFFF) == 0xC7EA;            
+    }
+
+    // The previous TCL/Roku code value.  All codes in this protocol use
+    // doubled code words, so we keep track of the first word here.
+    uint32_t tclRokuPrvCode;
 };
 
 // NEC-32x.  This is a minor variation on the standard NEC-32 protocol,
