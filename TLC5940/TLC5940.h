@@ -179,18 +179,21 @@
 /**
   * The rate at which the GSCLK pin is pulsed.   This also controls 
   * how often the reset function is called.   The reset function call
-  * interval is (1/GSCLK_SPEED) * 4096.  The maximum reliable rate is
-  * around 32Mhz.  It's best to keep this rate as low as possible:
-  * the higher the rate, the higher the refresh() call frequency,
-  * so the higher the CPU load.  Higher frequencies also make it more
-  * challenging to wire the chips for clean signal transmission, so
-  * minimizing the clock speed will help with signal stability.
+  * interval in seconds is (4096/GSCLK_SPEED).  The maximum reliable 
+  * rate is around 32Mhz.  It's best to keep this rate as low as 
+  * possible:  the higher the rate, the higher the refresh() call 
+  * frequency, so the higher the CPU load.  Higher frequencies also 
+  * make it more challenging to wire the chips for clean signal 
+  * transmission.  Lower clock speeds are more forgiving of wiring
+  * quality.
   *
   * The lower bound depends on the application.  For driving lights,
   * the limiting factor is flicker: the lower the rate, the more
   * noticeable the flicker.  Incandescents tend to look flicker-free
-  * at about 50 Hz (205 kHz grayscale clock).  LEDs need slightly 
-  * faster rates.
+  * at about 50 Hz (205 kHz grayscale clock).  LEDs need significantly 
+  * faster rates than incandescents, since they don't have the thermal
+  * lag of incandescents; for flicker-free LEDs, you usually need at
+  * least 200Hz (GSCLK_SPEED 819200).
   */
 #define GSCLK_SPEED    350000
 
@@ -308,7 +311,7 @@ public:
     {        
         // Set up the first call to the reset function, which asserts BLANK to
         // end the PWM cycle and handles new grayscale data output and latching.
-        // The original version of this library uses a timer to call reset
+        // The original version of this library used a timer to call reset
         // periodically, but that approach is somewhat problematic because the
         // reset function itself takes a small amount of time to run, so the
         // *actual* cycle is slightly longer than what we get from counting
@@ -413,7 +416,7 @@ public:
             // it'll take them.  Before writing the output register 
             // ("D"), we have to check the status register ("S") and see
             // that the Transmit Empty Flag (SPTEF) is set.  The 
-            // procedure is: spin until SPTEF s set in "S", write the 
+            // procedure is: spin until SPTEF is set in "S", write the 
             // next byte to "D", loop until out of bytes.
             uint8_t *p = spibuf;
             for (int i = spilen ; i > 0 ; --i) {

@@ -229,7 +229,7 @@
 //    bytes 2:3 = total number of configured outputs, little endian.  This
 //                is the number of outputs with assigned functions in the
 //                active configuration.
-//    byte  4   = Pinscape unit number (0-15), little endian
+//    byte  4   = Pinscape unit number (0-15)
 //    byte  5   = reserved (currently always zero)
 //    bytes 6:7 = plunger calibration zero point, little endian
 //    bytes 8:9 = plunger calibration maximum point, little endian
@@ -248,6 +248,9 @@
 //                 0x10 -> joystick report timing features supports
 //                         (configurable joystick report interval, acceler-
 //                         ometer stutter counter)
+//                 0x20 -> new flipper logic timing parameters: pseudo-log
+//                         scale (1,2,5,10,20,40,80,100,150,200,300,400,500,
+//                         600,700,800ms) instead of old (X+1)*50ms scale.
 //    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
 //                of unused heap (malloc'able) memory.  The firmware generally
 //                allocates all of the dynamic memory it needs during startup,
@@ -1358,15 +1361,14 @@
 //                    0x01 = active-high output (0V on output turns attached device ON)
 //                    0x02 = noisemaker device: disable this output when "night mode" is engaged
 //                    0x04 = apply gamma correction to this output (PWM outputs only)
-//                    0x08 = "Flipper Logic" enabled for this output (PWM outputs only)
+//                    0x08 = "Flipper Logic" enabled for this output
+//                    0x10 = minimum ON time enabled for this port
 //
-//          byte 7 = "Flipper Logic" parameters.  If Flipper Logic is enabled (via bit 0x08 
-//                   in the flags byte above), the software limits power to the output when
-//                   the output stays on continuously for longer than a short time.  This is 
-//                   designed to protect coils and solenoids.  Most coils are designed to
-//                   be energized only in short bursts, just long enough to complete the
-//                   mechanical stroke, and will overheat if energized continuously.  In a
-//                   pinball machine, most coils are used this way naturally: bumpers,
+//          byte 7 = Flipper Logic parameters.
+//                   Flipper logic uses PWM to reduce the power level on the port after an
+//                   initial timed interval at full power.  This is designed for pinball
+//                   coils, which are designed to be energized only in short bursts.  In
+//                   a pinball machine, most coils are used this way naturally: bumpers,
 //                   slingshots, kickers, knockers, chimes, etc. are only fired in brief
 //                   bursts.  Some coils are left on for long periods, though, particularly
 //                   the flippers.  The Flipper Logic feature is designed to handle this
@@ -1379,9 +1381,13 @@
 //                   solenoid mechanically actuated.  This is possible because solenoids 
 //                   generally need much less power to "hold" than to actuate initially.
 //
-//                   The high-order 4 bits of this byte give the initial full power time, 
-//                   in 50ms increments, starting at a minimum of 50ms: 0 = 50ms, 1 = 100ms,
-//                   2 = 150ms, ..., 15 = 800ms.
+//                   The high-order 4 bits of this byte give the initial full power time,
+//                   using the following mapping for 0..15:  1ms, 2ms, 5ms, 10ms, 20ms, 40ms
+//                   80ms, 100ms, 150ms, 200ms, 300ms, 400ms, 500ms, 600ms, 700ms, 800ms.
+//                   
+//                   Note that earlier versions prior to 3/2019 used a scale of (X+1)*50ms. 
+//                   We changed to this pseudo-logarithmic scale for finer gradations at the
+//                   low end of the time scale, for coils that need fast on/off cycling.
 //
 //                   The low-order 4 bits of the byte give the percentage power, in 6.66%
 //                   increments: 0 = 0% (off), 1 = 6.66%, ..., 15 = 100%.
@@ -1401,6 +1407,12 @@
 //                   If the coil stays cool for a minute or two, it should be safe to assume
 //                   that it's in thermal equilibrium, meaning it should be able to sustain
 //                   the power level indefinitely.
+//
+//                   Note that this feature can be used with any port, but it's only fully
+//                   functional with a PWM port.  A digital output port can only be set to
+//                   0% or 100%, so the only meaningful reduced hold power is 0%.  This
+//                   makes the feature a simple time limiter - basically a software version
+//                   of the Chime Board from the expansion board set.
 //
 //
 //        Note that the KL25Z's on-board LEDs can be used as LedWiz output ports, simply

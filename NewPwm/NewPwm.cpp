@@ -10,5 +10,5 @@ NewPwmUnit NewPwmUnit::unit[3];
 uint32_t NewPwmUnit::sysClock;
 
 // Default PWM period for new channels, in seconds
-float NewPwmUnit::defaultPeriod;
+float NewPwmUnit::defaultPeriod = 0.001f;
 

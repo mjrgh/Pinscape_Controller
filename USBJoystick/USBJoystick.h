@@ -226,13 +226,15 @@ public:
      *        success flags in the status bits
      * @param reportTimingFeatures true if this firmware version supports configurable
      *        joystick report timing
+     * @param newFlipperLogicTiming true if this firmware version uses the new flipper
+     *        logic timing parameters (psuedo-log table rather than 50ms increments)
      * @param freeHeapBytes number of free bytes in the malloc heap
      */
     bool reportConfig(int numOutputs, int unitNo, 
         int plungerZero, int plungerMax, int plunterRlsTime, 
         bool configured, bool sbxpbx, bool newAccelFeatures, 
         bool flashStatusFeature, bool reportTimingFeatures,
-        size_t freeHeapBytes);
+        bool newFlipperLogicTiming, size_t freeHeapBytes);
         
     /**
      * Write a configuration variable query report.

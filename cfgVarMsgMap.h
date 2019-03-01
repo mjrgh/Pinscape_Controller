@@ -410,6 +410,7 @@ void v_func
                 v_byte(outPort[idx].pin, 4);
                 v_byte(outPort[idx].flags, 5);
                 v_byte(outPort[idx].flipperLogic, 6);
+                v_byte(outPort[idx].minOnTime, 7);
             }
         }
         break;

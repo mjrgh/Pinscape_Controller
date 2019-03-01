@@ -360,7 +360,7 @@ bool USBJoystick::reportConfig(
     int plungerZero, int plungerMax, int plungerRlsTime,
     bool configured, bool sbxpbx, bool newAccelFeatures, 
     bool flashStatusFeature, bool reportTimingFeatures,
-    size_t freeHeapBytes)
+    bool newFlipperLogicTiming, size_t freeHeapBytes)
 {
     HID_REPORT report;
 
@@ -393,7 +393,8 @@ bool USBJoystick::reportConfig(
         | (sbxpbx ? 0x02 : 0x00)
         | (newAccelFeatures ? 0x04 : 0x00)
         | (flashStatusFeature ? 0x08 : 0x00)
-        | (reportTimingFeatures ? 0x10 : 0x00);
+        | (reportTimingFeatures ? 0x10 : 0x00)
+        | (newFlipperLogicTiming ? 0x20 : 0x00);
     
     // write the free heap space
     put(12, freeHeapBytes);

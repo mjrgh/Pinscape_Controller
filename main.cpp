@@ -869,7 +869,7 @@ public:
     
     virtual void set(uint8_t level)
     {
-        // remebmber the new nominal level set by the client
+        // remember the new nominal level set by the client
         val = level;
         
         // update the physical output according to our current timing state
@@ -1066,8 +1066,12 @@ protected:
     // for the PWM duty cycle of the physical output.
     uint8_t params;
     
+    // Full-power time mapping.  This maps from the 4-bit (0..15) time value
+    // in the parameters to the number of microseconds.
+    static const uint32_t paramToTime_us[];
+    
     // Figure the initial full-power time in microseconds
-    inline uint32_t fullPowerTime_us() const { return ((params >> 4) + 1)*50000; }
+    inline uint32_t fullPowerTime_us() const { return paramToTime_us[params >> 4]; }
     
     // Figure the hold power PWM level (0-255) 
     inline uint8_t holdPower() const { return (params & 0x0F) * 17; }
@@ -1078,7 +1082,9 @@ protected:
     static Timer timer;
     
     // Flipper logic pending timer list.  Whenever a flipper logic output
-    // transitions from OFF to ON, tis timer
+    // transitions from OFF to ON, we add it to this list.  We scan the
+    // list in our polling routine to find ports that have reached the
+    // expiration of their initial full-power intervals.
     static LwFlipperLogicOut **pending;
     static uint8_t nPending;
 };
@@ -1087,6 +1093,271 @@ protected:
 Timer LwFlipperLogicOut::timer;
 LwFlipperLogicOut **LwFlipperLogicOut::pending;
 uint8_t LwFlipperLogicOut::nPending;
+const uint32_t LwFlipperLogicOut::paramToTime_us[] = {
+    1000, 
+    2000,
+    5000, 
+    10000, 
+    20000, 
+    40000, 
+    80000, 
+    100000, 
+    150000, 
+    200000, 
+    300000, 
+    400000, 
+    500000, 
+    600000, 
+    700000, 
+    800000
+};
+
+// Minimum On Time output.  This is a filter output that we layer on
+// a physical output to force the underlying output to stay on for a
+// minimum interval.  This can be used for devices that need to be on
+// for a certain amount of time to trigger their full effect, such as
+// slower solenoids or contactors.
+class LwMinTimeOut: public LwOut
+{
+public:
+    // Set up the output.  'param' is the configuration parameter
+    // for the mininum time span.
+    LwMinTimeOut(LwOut *o, uint8_t param)
+        : out(o), param(param)
+    {
+        // initially OFF
+        state = 0;
+    }
+    
+    virtual void set(uint8_t level)
+    {
+        // update the physical output according to our current timing state
+        switch (state)
+        {
+        case 0:
+            // We're currently off.  If the new level is non-zero, switch
+            // to state 1 (initial minimum interval) and set the requested
+            // level.  If the new level is zero, we're switching from off to
+            // off, so there's no change.
+            if (level != 0)
+            {
+                // switch to state 1 (initial minimum interval, port is
+                // logically on)
+                state = 1;
+                
+                // set the requested output level
+                out->set(level);
+
+                // add myself to the pending timer list
+                pending[nPending++] = this;
+                
+                // note the starting time
+                t0 = timer.read_us();
+            }
+            break;
+            
+        case 1:   // min ON interval, port on
+        case 2:   // min ON interval, port off
+            // We're in the initial minimum ON interval.  If the new power
+            // level is non-zero, pass it through to the physical port, since
+            // the client is allowed to change the power level during the
+            // initial ON interval - they just can't turn it off entirely.
+            // Set the state to 1 to indicate that the logical port is on.
+            //
+            // If the new level is zero, leave the underlying port at its 
+            // current power level, since we're not allowed to turn it off
+            // during this period.  Set the state to 2 to indicate that the
+            // logical port is off even though the physical port has to stay
+            // on for the remainder of the interval.
+            if (level != 0)
+            {
+                // client is leaving the port on - pass through the new 
+                // power level and set state 1 (logically on)
+                out->set(level);
+                state = 1;
+            }
+            else
+            {
+                // Client is turning off the port - leave the underlying port 
+                // on at its current level and set state 2 (logically off).
+                // When the minimum ON time expires, the polling routine will
+                // see that we're logically off and will pass that through to
+                // the underlying physical port.  Until then, though, we have
+                // to leave the physical port on to satisfy the minimum ON
+                // time requirement.
+                state = 2;
+            }
+            break;
+            
+        case 3: 
+            // We're out of the minimum ON interval, so we can set any new
+            // level, including fully off.  Pass the new power level through
+            // to the port.
+            out->set(level);
+            
+            // if the port is now off, return to state 0 (OFF)
+            if (level == 0)
+                state = 0;
+            break;
+        }
+    }
+    
+    // Class initialization
+    static void classInit(Config &cfg)
+    {
+        // Count the Minimum On Time outputs in the configuration.  We
+        // need to allocate enough pending timer list space to accommodate
+        // all of these outputs.
+        int n = 0;
+        for (int i = 0 ; i < MAX_OUT_PORTS ; ++i)
+        {
+            // if this port is active and marked as Flipper Logic, count it
+            if (cfg.outPort[i].typ != PortTypeDisabled
+                && (cfg.outPort[i].flags & PortFlagMinOnTime) != 0)
+                ++n;
+        }
+        
+        // allocate space for the pending timer list
+        pending = new LwMinTimeOut*[n];
+        
+        // there's nothing in the pending list yet
+        nPending = 0;
+        
+        // Start our shared timer.  The epoch is arbitrary, since we only
+        // use it to figure elapsed times.
+        timer.start();
+    }
+
+    // Check for ports with pending timers.  The main routine should
+    // call this on each iteration to process our state transitions.
+    static void poll()
+    {
+        // note the current time
+        uint32_t t = timer.read_us();
+        
+        // go through the timer list
+        for (int i = 0 ; i < nPending ; )
+        {
+            // get the port
+            LwMinTimeOut *port = pending[i];
+            
+            // assume we'll keep it
+            bool remove = false;
+            
+            // check if we're in the minimum ON period for the port
+            if (port->state == 1 || port->state == 2)
+            {
+                // we are - check if the minimum ON time has elapsed
+                if (uint32_t(t - port->t0) > port->minOnTime_us())
+                {
+                    // This port has completed its initial ON interval, so
+                    // it advances to the next state. 
+                    if (port->state == 1)
+                    {
+                        // The port is logically on, so advance to state 3,
+                        // "on past minimum initial time".  The underlying
+                        // port is already at its proper level, since we pass
+                        // through non-zero power settings to the underlying
+                        // port throughout the initial ON interval.
+                        port->state = 3;
+                    }
+                    else
+                    {
+                        // The port was switched off by the client during the
+                        // minimum ON period.  We haven't passed the OFF state
+                        // to the underlying port yet, because the port has to
+                        // stay on throughout the minimum ON period.  So turn
+                        // the port off now.
+                        port->out->set(0);
+                        
+                        // return to state 0 (OFF)
+                        port->state = 0;
+                    }
+                    
+                    // we're done with the timer
+                    remove = true;
+                }
+            }
+            
+            // if desired, remove the port from the timer list
+            if (remove)
+            {
+                // Remove the list entry by overwriting the slot with
+                // the last entry in the list.
+                pending[i] = pending[--nPending];
+                
+                // Note that we don't increment the loop counter, since
+                // we now need to revisit this same slot.
+            }
+            else
+            {
+                // we're keeping this item; move on to the next one
+                ++i;
+            }
+        }
+    }
+
+protected:
+    // underlying physical output
+    LwOut *out;
+    
+    // Timestamp on 'timer' of start of full-power interval.  We set this
+    // to the current 'timer' timestamp when entering state 1.
+    uint32_t t0;
+
+    // Current port state:
+    //
+    //  0 = off
+    //  1 = initial minimum ON interval, logical port is ON
+    //  2 = initial minimum ON interval, logical port is OFF
+    //  3 = past the minimum ON interval
+    //
+    uint8_t state;
+    
+    // Configuration parameter.  This encodes the minimum ON time.
+    uint8_t param;
+    
+    // Timer.  This is a shared timer for all of the minimum ON time ports.
+    // When we transition from OFF to ON, we note the current time on this 
+    // timer to establish the start of our minimum ON period.
+    static Timer timer;
+
+    // translaton table from timing parameter in config to minimum ON time
+    static const uint32_t paramToTime_us[];
+    
+    // Figure the minimum ON time
+    inline uint32_t minOnTime_us() const { return paramToTime_us[param & 0x0F]; }
+
+    // Pending timer list.  Whenever one of our ports transitions from OFF
+    // to ON, we add it to this list.  We scan this list in our polling
+    // routine to find ports that have reached the ends of their initial
+    // ON intervals.
+    static LwMinTimeOut **pending;
+    static uint8_t nPending;
+};
+
+// Min Time Out statics
+Timer LwMinTimeOut::timer;
+LwMinTimeOut **LwMinTimeOut::pending;
+uint8_t LwMinTimeOut::nPending;
+const uint32_t LwMinTimeOut::paramToTime_us[] = {
+    1000, 
+    2000,
+    5000, 
+    10000, 
+    20000, 
+    40000, 
+    80000, 
+    100000, 
+    150000, 
+    200000, 
+    300000, 
+    400000, 
+    500000, 
+    600000, 
+    700000, 
+    800000
+};
 
 //
 // The TLC5940 interface object.  We'll set this up with the port 
@@ -1576,6 +1847,7 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     int activeLow = flags & PortFlagActiveLow;
     int gamma = flags & PortFlagGamma;
     int flipperLogic = flags & PortFlagFlipperLogic;
+    int hasMinOnTime = flags & PortFlagMinOnTime;
     
     // cancel gamma on flipper logic ports
     if (flipperLogic)
@@ -1692,6 +1964,10 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     if (flipperLogic)
         lwp = new LwFlipperLogicOut(lwp, pc.flipperLogic);
         
+    // Layer on the Minimum On Time if desired
+    if (hasMinOnTime)
+        lwp = new LwMinTimeOut(lwp, pc.minOnTime);
+        
     // If it's a noisemaker, layer on a night mode switch
     if (noisy)
         lwp = new LwNoisyOut(lwp);
@@ -1720,8 +1996,9 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
 // initialize the output pin array
 void initLwOut(Config &cfg)
 {
-    // Initialize the Flipper Logic outputs
+    // Initialize the Flipper Logic and Minimum On Time outputs
     LwFlipperLogicOut::classInit(cfg);
+    LwMinTimeOut::classInit(cfg);
 
     // Count the outputs.  The first disabled output determines the
     // total number of ports.
@@ -3271,7 +3548,18 @@ void processButtons(Config &cfg)
                     // assigned to the shifted or unshifted version of the
                     // button.
                     bool pressed;
-                    if ((cfg.nightMode.flags & 0x02) != 0)
+                    if (shiftButton.index == i)
+                    {
+                        // This button is both the Shift button AND the Night
+                        // Mode button.  This is a special case in that the
+                        // Shift status is irrelevant, because it's obviously
+                        // identical to the Night Mode status.  So it doesn't
+                        // matter whether or not the Night Mode button has the
+                        // shifted flags; the raw button state is all that
+                        // counts in this case.
+                        pressed = true;
+                    }
+                    else if ((cfg.nightMode.flags & 0x02) != 0)
                     {
                         // Shift bit is set - night mode is assigned to the
                         // shifted version of the button.  This is a Night
@@ -5737,6 +6025,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 true,               // we support the new accelerometer settings
                 true,               // we support the "flash write ok" status bit in joystick reports
                 true,               // we support the configurable joystick report timing features
+                true,               // we use the new flipper logic timing table
                 mallocBytesFree()); // remaining memory size
             break;
             
@@ -6019,10 +6308,10 @@ int main(void)
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
     
-    // Set the default PWM period to 1ms.  This will be used for PWM
-    // channels on PWM units whose periods aren't changed explicitly,
-    // so it'll apply to LW outputs assigned to GPIO pins.  Note that
-    // the KL25Z only allows the period to be set at the TPM unit
+    // Set the default PWM period to 0.5ms = 2 kHz.  This will be used 
+    // for PWM channels on PWM units whose periods aren't changed 
+    // explicitly, so it'll apply to LW outputs assigned to GPIO pins.
+    // The KL25Z only allows the period to be set at the TPM unit
     // level, not per channel, so all channels on a given unit will
     // necessarily use the same frequency.  We (currently) have two
     // subsystems that need specific PWM frequencies: TLC5940NT (which
@@ -6320,8 +6609,9 @@ int main(void)
         // update PWM outputs
         pollPwmUpdates();
         
-        // update Flipper Logic outputs
+        // update Flipper Logic and Min On Time outputs
         LwFlipperLogicOut::poll();
+        LwMinTimeOut::poll();
         
         // poll the accelerometer
         accel.poll();
@@ -6690,8 +6980,9 @@ int main(void)
                 // try to recover the connection
                 js.recoverConnection();
                 
-                // update Flipper Logic outputs
+                // update Flipper Logic and Min Out Time outputs
                 LwFlipperLogicOut::poll();
+                LwMinTimeOut::poll();
 
                 // send TLC5940 data if necessary
                 if (tlc5940 != 0)
