@@ -248,9 +248,7 @@
 //                 0x10 -> joystick report timing features supports
 //                         (configurable joystick report interval, acceler-
 //                         ometer stutter counter)
-//                 0x20 -> new flipper logic timing parameters: pseudo-log
-//                         scale (1,2,5,10,20,40,80,100,150,200,300,400,500,
-//                         600,700,800ms) instead of old (X+1)*50ms scale.
+//                 0x20 -> chime logic is supported
 //    bytes 12:13 = available RAM, in bytes, little endian.  This is the amount
 //                of unused heap (malloc'able) memory.  The firmware generally
 //                allocates all of the dynamic memory it needs during startup,
@@ -1362,9 +1360,15 @@
 //                    0x02 = noisemaker device: disable this output when "night mode" is engaged
 //                    0x04 = apply gamma correction to this output (PWM outputs only)
 //                    0x08 = "Flipper Logic" enabled for this output
-//                    0x10 = minimum ON time enabled for this port
+//                    0x10 = "Chime Logic" enabled for this port
 //
-//          byte 7 = Flipper Logic parameters.
+//          byte 7 = Flipper Logic OR Chime Logic parameters.  If flags bit 0x08 is set,
+//                   this is the Flipper Logic settings.  If flags bit 0x10 is is set, 
+//                   it's the Chime Logic settings.  The two are mutually exclusive.
+//
+//                   For flipper logic: (full power time << 4) | (hold power level)
+//                   For chime logic:   (max on time << 4)     | (min on time)
+//
 //                   Flipper logic uses PWM to reduce the power level on the port after an
 //                   initial timed interval at full power.  This is designed for pinball
 //                   coils, which are designed to be energized only in short bursts.  In
@@ -1413,6 +1417,15 @@
 //                   0% or 100%, so the only meaningful reduced hold power is 0%.  This
 //                   makes the feature a simple time limiter - basically a software version
 //                   of the Chime Board from the expansion board set.
+//
+//                   Chime Logic encodes a minimum and maximum ON time for the port.  It
+//                   doesn't use PWM; it simply forces the port on or off in specified
+//                   durations.  The low 4 bits encode the minimum ON time, as an index
+//                   into the table below.  The high 4 bits encode the maximum ON time,
+//                   with the special case that 0 means "infinite".
+//
+//                   Chime logic time table: 0ms, 1ms, 2ms, 5ms, 10ms, 20ms, 40ms, 80ms,
+//                   100ms, 200ms, 300ms, 400ms, 500ms, 600ms, 700ms, 800ms.
 //
 //
 //        Note that the KL25Z's on-board LEDs can be used as LedWiz output ports, simply

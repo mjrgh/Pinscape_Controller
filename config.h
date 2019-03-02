@@ -147,7 +147,7 @@ const uint8_t PortFlagActiveLow    = 0x01; // physical output is active-low
 const uint8_t PortFlagNoisemaker   = 0x02; // noisemaker device - disable when night mode is engaged
 const uint8_t PortFlagGamma        = 0x04; // apply gamma correction to this output
 const uint8_t PortFlagFlipperLogic = 0x08; // enable Flipper Logic on the port (timed power limitation)
-const uint8_t PortFlagMinOnTime    = 0x10; // enable Minimum On Time on this port
+const uint8_t PortFlagChimeLogic   = 0x10; // enable Chime Logic on this port (min/max time limits)
 
 // maximum number of output ports
 const int MAX_OUT_PORTS = 128;
@@ -188,19 +188,12 @@ struct LedWizPortCfg
     //
     uint8_t flipperLogic;
     
-    // Minimum On Time/reserved
-    //
-    //  - high 4 bits (0xF) are reserved
-    //  - low 4 bits (0x0F) give minimum on time
-    uint8_t minOnTime;
-    
-    void set(uint8_t typ, uint8_t pin, uint8_t flags = 0, uint8_t flipperLogic = 0, uint8_t minOnTime = 0)
+    void set(uint8_t typ, uint8_t pin, uint8_t flags = 0, uint8_t flipperLogic = 0)
     {
         this->typ = typ;
         this->pin = pin;
         this->flags = flags;
         this->flipperLogic = flipperLogic;
-        this->minOnTime = minOnTime;
     }
         
 } __attribute__ ((packed));

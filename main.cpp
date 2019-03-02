@@ -10,7 +10,7 @@
 * substantial portions of the Software.
 *
 * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
-* BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILIT Y, FITNESS FOR A PARTICULAR PURPOSE AND
+* BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
 * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
 * DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
@@ -1066,12 +1066,9 @@ protected:
     // for the PWM duty cycle of the physical output.
     uint8_t params;
     
-    // Full-power time mapping.  This maps from the 4-bit (0..15) time value
-    // in the parameters to the number of microseconds.
-    static const uint32_t paramToTime_us[];
-    
-    // Figure the initial full-power time in microseconds
-    inline uint32_t fullPowerTime_us() const { return paramToTime_us[params >> 4]; }
+    // Figure the initial full-power time in microseconds: 50ms * (1+N),
+    // where N is the high 4 bits of the parameter byte.
+    inline uint32_t fullPowerTime_us() const { return 50000*(1 + ((params >> 4) & 0x0F)); }
     
     // Figure the hold power PWM level (0-255) 
     inline uint8_t holdPower() const { return (params & 0x0F) * 17; }
@@ -1093,37 +1090,15 @@ protected:
 Timer LwFlipperLogicOut::timer;
 LwFlipperLogicOut **LwFlipperLogicOut::pending;
 uint8_t LwFlipperLogicOut::nPending;
-const uint32_t LwFlipperLogicOut::paramToTime_us[] = {
-    1000, 
-    2000,
-    5000, 
-    10000, 
-    20000, 
-    40000, 
-    80000, 
-    100000, 
-    150000, 
-    200000, 
-    300000, 
-    400000, 
-    500000, 
-    600000, 
-    700000, 
-    800000
-};
 
-// Minimum On Time output.  This is a filter output that we layer on
-// a physical output to force the underlying output to stay on for a
-// minimum interval.  This can be used for devices that need to be on
-// for a certain amount of time to trigger their full effect, such as
-// slower solenoids or contactors.
-class LwMinTimeOut: public LwOut
+// Chime Logic.  This is a filter output that we layer on a physical
+// output to set a minimum and maximum ON time for the output. 
+class LwChimeLogicOut: public LwOut
 {
 public:
-    // Set up the output.  'param' is the configuration parameter
-    // for the mininum time span.
-    LwMinTimeOut(LwOut *o, uint8_t param)
-        : out(o), param(param)
+    // Set up the output.  'params' encodes the minimum and maximum time.
+    LwChimeLogicOut(LwOut *o, uint8_t params)
+        : out(o), params(params)
     {
         // initially OFF
         state = 0;
@@ -1190,12 +1165,41 @@ public:
             break;
             
         case 3: 
-            // We're out of the minimum ON interval, so we can set any new
-            // level, including fully off.  Pass the new power level through
-            // to the port.
+            // We're after the minimum ON interval and before the maximum
+            // ON time limit.  We can set any new level, including fully off.  
+            // Pass the new power level through to the port.
             out->set(level);
             
             // if the port is now off, return to state 0 (OFF)
+            if (level == 0)
+            {
+                // return to the OFF state
+                state = 0;
+                
+                // If we have a timer pending, remove it.  A timer will be
+                // pending if we have a non-infinite maximum on time for the
+                // port.
+                for (int i = 0 ; i < nPending ; ++i)
+                {
+                    // is this us?
+                    if (pending[i] == this)
+                    {
+                        // remove myself by replacing the slot with the
+                        // last list entry
+                        pending[i] = pending[--nPending];
+                        
+                        // no need to look any further
+                        break;
+                    }
+                }
+            }
+            break;
+            
+        case 4:
+            // We're after the maximum ON time.  The physical port stays off
+            // during this interval, so we don't pass any changes through to
+            // the physical port.  When the client sets the level to 0, we
+            // turn off the logical port and reset to state 0.
             if (level == 0)
                 state = 0;
             break;
@@ -1213,12 +1217,12 @@ public:
         {
             // if this port is active and marked as Flipper Logic, count it
             if (cfg.outPort[i].typ != PortTypeDisabled
-                && (cfg.outPort[i].flags & PortFlagMinOnTime) != 0)
+                && (cfg.outPort[i].flags & PortFlagChimeLogic) != 0)
                 ++n;
         }
         
         // allocate space for the pending timer list
-        pending = new LwMinTimeOut*[n];
+        pending = new LwChimeLogicOut*[n];
         
         // there's nothing in the pending list yet
         nPending = 0;
@@ -1239,27 +1243,36 @@ public:
         for (int i = 0 ; i < nPending ; )
         {
             // get the port
-            LwMinTimeOut *port = pending[i];
+            LwChimeLogicOut *port = pending[i];
             
             // assume we'll keep it
             bool remove = false;
             
-            // check if we're in the minimum ON period for the port
-            if (port->state == 1 || port->state == 2)
+            // check our state
+            switch (port->state)
             {
-                // we are - check if the minimum ON time has elapsed
+            case 1:  // initial minimum ON time, port logically on
+            case 2:  // initial minimum ON time, port logically off
+                // check if the minimum ON time has elapsed
                 if (uint32_t(t - port->t0) > port->minOnTime_us())
                 {
                     // This port has completed its initial ON interval, so
                     // it advances to the next state. 
                     if (port->state == 1)
                     {
-                        // The port is logically on, so advance to state 3,
-                        // "on past minimum initial time".  The underlying
-                        // port is already at its proper level, since we pass
-                        // through non-zero power settings to the underlying
-                        // port throughout the initial ON interval.
+                        // The port is logically on, so advance to state 3.
+                        // The underlying port is already at its proper level, 
+                        // since we pass through non-zero power settings to the 
+                        // underlying port throughout the initial minimum time.
+                        // The timer stays active into state 3.
                         port->state = 3;
+                        
+                        // Special case: maximum on time 0 means "infinite".
+                        // There's no need for a timer in this case; we'll
+                        // just stay in state 3 until the client turns the
+                        // port off.
+                        if (port->maxOnTime_us() == 0)
+                            remove = true;
                     }
                     else
                     {
@@ -1272,11 +1285,29 @@ public:
                         
                         // return to state 0 (OFF)
                         port->state = 0;
+
+                        // we're done with the timer
+                        remove = true;
                     }
+                }
+                break;
+                
+            case 3:  // between minimum ON time and maximum ON time
+                // check if the maximum ON time has expired
+                if (uint32_t(t - port->t0) > port->maxOnTime_us())
+                {
+                    // The maximum ON time has expired.  Turn off the physical
+                    // port.
+                    port->out->set(0);
                     
-                    // we're done with the timer
+                    // Switch to state 4 (logically ON past maximum time)
+                    port->state = 4;
+                    
+                    // Remove the timer on this port.  This port simply stays
+                    // in state 4 until the client turns off the port.
                     remove = true;
                 }
+                break;                
             }
             
             // if desired, remove the port from the timer list
@@ -1308,14 +1339,36 @@ protected:
     // Current port state:
     //
     //  0 = off
-    //  1 = initial minimum ON interval, logical port is ON
-    //  2 = initial minimum ON interval, logical port is OFF
-    //  3 = past the minimum ON interval
+    //  1 = in initial minimum ON interval, logical port is on
+    //  2 = in initial minimum ON interval, logical port is off
+    //  3 = in interval between minimum and maximum ON times
+    //  4 = after the maximum ON interval
+    //
+    // The "logical" on/off state of the port is the state set by the 
+    // client.  The "physical" state is the state of the underlying port.
+    // The relationships between logical and physical port state, and the 
+    // effects of updates by the client, are as follows:
+    //
+    //    State | Logical | Physical | Client set on | Client set off
+    //    -----------------------------------------------------------
+    //      0   |   Off   |   Off    | phys on, -> 1 |   no effect
+    //      1   |   On    |   On     |   no effect   |     -> 2
+    //      2   |   Off   |   On     |     -> 1      |   no effect
+    //      3   |   On    |   On     |   no effect   | phys off, -> 0
+    //      4   |   On    |   On     |   no effect   | phys off, -> 0
+    //      
+    // The polling routine makes the following transitions when the current
+    // time limit expires:
+    //
+    //   1: at end of minimum ON, -> 3 (or 4 if max == infinity)
+    //   2: at end of minimum ON, port off, -> 0
+    //   3: at end of maximum ON, port off, -> 4
     //
     uint8_t state;
     
-    // Configuration parameter.  This encodes the minimum ON time.
-    uint8_t param;
+    // Configuration parameters byte.  This encodes the minimum and maximum
+    // ON times.
+    uint8_t params;
     
     // Timer.  This is a shared timer for all of the minimum ON time ports.
     // When we transition from OFF to ON, we note the current time on this 
@@ -1325,22 +1378,30 @@ protected:
     // translaton table from timing parameter in config to minimum ON time
     static const uint32_t paramToTime_us[];
     
-    // Figure the minimum ON time
-    inline uint32_t minOnTime_us() const { return paramToTime_us[param & 0x0F]; }
+    // Figure the minimum ON time.  The minimum ON time is given by the
+    // low-order 4 bits of the parameters byte, which serves as an index
+    // into our time table.
+    inline uint32_t minOnTime_us() const { return paramToTime_us[params & 0x0F]; }
+    
+    // Figure the maximum ON time.  The maximum time is the high 4 bits
+    // of the parameters byte.  This is an index into our time table, but
+    // 0 has the special meaning "infinite".
+    inline uint32_t maxOnTime_us() const { return paramToTime_us[((params >> 4) & 0x0F)]; }
 
     // Pending timer list.  Whenever one of our ports transitions from OFF
     // to ON, we add it to this list.  We scan this list in our polling
     // routine to find ports that have reached the ends of their initial
     // ON intervals.
-    static LwMinTimeOut **pending;
+    static LwChimeLogicOut **pending;
     static uint8_t nPending;
 };
 
 // Min Time Out statics
-Timer LwMinTimeOut::timer;
-LwMinTimeOut **LwMinTimeOut::pending;
-uint8_t LwMinTimeOut::nPending;
-const uint32_t LwMinTimeOut::paramToTime_us[] = {
+Timer LwChimeLogicOut::timer;
+LwChimeLogicOut **LwChimeLogicOut::pending;
+uint8_t LwChimeLogicOut::nPending;
+const uint32_t LwChimeLogicOut::paramToTime_us[] = {
+    0,          // for the max time, this means "infinite"
     1000, 
     2000,
     5000, 
@@ -1349,7 +1410,6 @@ const uint32_t LwMinTimeOut::paramToTime_us[] = {
     40000, 
     80000, 
     100000, 
-    150000, 
     200000, 
     300000, 
     400000, 
@@ -1847,7 +1907,7 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     int activeLow = flags & PortFlagActiveLow;
     int gamma = flags & PortFlagGamma;
     int flipperLogic = flags & PortFlagFlipperLogic;
-    int hasMinOnTime = flags & PortFlagMinOnTime;
+    int chimeLogic = flags & PortFlagChimeLogic;
     
     // cancel gamma on flipper logic ports
     if (flipperLogic)
@@ -1964,9 +2024,11 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
     if (flipperLogic)
         lwp = new LwFlipperLogicOut(lwp, pc.flipperLogic);
         
-    // Layer on the Minimum On Time if desired
-    if (hasMinOnTime)
-        lwp = new LwMinTimeOut(lwp, pc.minOnTime);
+    // Layer on Chime Logic if desired.  Note that Chime Logic and
+    // Flipper Logic are mutually exclusive, and Flipper Logic takes
+    // precedence, so ignore the Chime Logic bit if both are set.
+    if (chimeLogic && !flipperLogic)
+        lwp = new LwChimeLogicOut(lwp, pc.flipperLogic);
         
     // If it's a noisemaker, layer on a night mode switch
     if (noisy)
@@ -1996,9 +2058,9 @@ LwOut *createLwPin(int portno, LedWizPortCfg &pc, Config &cfg)
 // initialize the output pin array
 void initLwOut(Config &cfg)
 {
-    // Initialize the Flipper Logic and Minimum On Time outputs
+    // Initialize the Flipper Logic and Chime Logic outputs
     LwFlipperLogicOut::classInit(cfg);
-    LwMinTimeOut::classInit(cfg);
+    LwChimeLogicOut::classInit(cfg);
 
     // Count the outputs.  The first disabled output determines the
     // total number of ports.
@@ -6025,7 +6087,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 true,               // we support the new accelerometer settings
                 true,               // we support the "flash write ok" status bit in joystick reports
                 true,               // we support the configurable joystick report timing features
-                true,               // we use the new flipper logic timing table
+                true,               // chime logic is supported
                 mallocBytesFree()); // remaining memory size
             break;
             
@@ -6609,9 +6671,9 @@ int main(void)
         // update PWM outputs
         pollPwmUpdates();
         
-        // update Flipper Logic and Min On Time outputs
+        // update Flipper Logic and Chime Logic outputs
         LwFlipperLogicOut::poll();
-        LwMinTimeOut::poll();
+        LwChimeLogicOut::poll();
         
         // poll the accelerometer
         accel.poll();
@@ -6980,9 +7042,9 @@ int main(void)
                 // try to recover the connection
                 js.recoverConnection();
                 
-                // update Flipper Logic and Min Out Time outputs
+                // update Flipper Logic and Chime Logic outputs
                 LwFlipperLogicOut::poll();
-                LwMinTimeOut::poll();
+                LwChimeLogicOut::poll();
 
                 // send TLC5940 data if necessary
                 if (tlc5940 != 0)
