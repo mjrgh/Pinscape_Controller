@@ -259,6 +259,8 @@
 #include "barCodeSensor.h"
 #include "distanceSensor.h"
 #include "tsl14xxSensor.h"
+#include "rotarySensor.h"
+#include "tcd1103Sensor.h"
 
 
 #define DECL_EXTERNS
@@ -1710,7 +1712,7 @@ static const float dof_to_gamma_pwm[] = {
 //
 // The mbed library has its own, different solution to this bug, but the
 // mbed solution isn't really a solution at all because it creates a separate 
-// problem of its own.  The mbed approach is reset the TPM "count" register
+// problem of its own.  The mbed approach is to reset the TPM "count" register
 // on every value register write.   The count reset truncates the current
 // PWM cycle, which bypasses the hardware problem.  Remember, the hardware
 // problem is that you can only write once per cycle; the mbed "solution" gets
@@ -4964,19 +4966,22 @@ bool saveConfigToFlash(int tFollowup, bool reboot)
 // stored by the host, by patching the firwmare binary (.bin) file before
 // downloading it to the device.
 //
-// Ideally, we'd use the host-loaded memory for all configuration updates,
-// because the KL25Z doesn't seem to be 100% reliable writing flash itself.
-// There seems to be a chance of memory bus contention while a write is in 
-// progress, which can either corrupt the write or cause the CPU to lock up
-// before the write is completed.  It seems more reliable to program the
-// flash externally, via the OpenSDA connection.  Unfortunately, none of
-// the available OpenSDA versions are capable of programming specific flash
-// sectors; they always erase the entire flash memory space.  We *could*
-// make the Windows config program simply re-download the entire firmware
-// for every configuration update, but I'd rather not because of the extra
-// wear this would put on the flash.  So, as a compromise, we'll use the
-// host-loaded config whenever the user explicitly updates the firmware,
-// but we'll use the on-board writer when only making a config change.
+// Ideally, we'd use the host-loaded memory for all configuration updates
+// from the host - that is, any time the host wants to update config settings,
+// such as via user input in the config tool.  In the past, I wanted to do
+// it this way because it seemed to be unreliable to write flash memory via
+// the device.  But that turned out to be due to a bug in the mbed Ticker 
+// code (of all things!), which we've fixed - since then, flash writing on
+// the device has been bulletproof.  Even so, doing host-to-device flash
+// writing for config updates would be nice just for the sake of speed, as
+// the alternative is that we send the variables one at a time by USB, which
+// takes noticeable time when reprogramming the whole config set.  But 
+// there's no way to accomplish a single-sector flash write via OpenSDA; you 
+// can only rewrite the entire flash memory as a unit.
+// 
+// We can at least use this approach to do a fast configuration restore
+// when downloading new firmware.  In that case, we're rewriting all of
+// flash memory anyway, so we might as well include the config data.
 //
 // The memory here is stored using the same format as the USB "Set Config
 // Variable" command.  These messages are 8 bytes long and start with a
@@ -5148,11 +5153,36 @@ void createPlunger()
             wirePinName(cfg.plunger.sensorPin[2]));
         break;
         
+    case PlungerType_AEAT6012:
+        // Broadcom AEAT-6012-A06 magnetic rotary encoder
+        // pins are: CS (chip select, dig out), CLK (dig out), DO (data, dig in)
+        plungerSensor = new PlungerSensorAEAT601X<12>(
+            wirePinName(cfg.plunger.sensorPin[0]),
+            wirePinName(cfg.plunger.sensorPin[1]),
+            wirePinName(cfg.plunger.sensorPin[2]));
+        break;
+        
+    case PlungerType_TCD1103:
+        // Toshiba TCD1103GFG linear CCD, optical edge detection, with
+        // inverted logic gates.
+        //
+        // Pins are: fM (master clock, PWM), OS (sample data, analog in), 
+        // ICG (integration clear gate, dig out), SH (shift gate, dig out)
+        plungerSensor = new PlungerSensorTCD1103<true>(
+            wirePinName(cfg.plunger.sensorPin[0]),
+            wirePinName(cfg.plunger.sensorPin[1]),
+            wirePinName(cfg.plunger.sensorPin[2]),
+            wirePinName(cfg.plunger.sensorPin[3]));
+        break;
+        
     case PlungerType_None:
     default:
         plungerSensor = new PlungerSensorNull();
         break;
     }
+
+    // initialize the plunger from the saved configuration
+    plungerSensor->restoreCalibration(cfg);
     
     // initialize the config variables affecting the plunger
     plungerSensor->onConfigChange(19, cfg);
@@ -5576,7 +5606,7 @@ public:
             calRlsTimeN = 0;
             
             // tell the plunger we're starting calibration
-            plungerSensor->beginCalibration();
+            plungerSensor->beginCalibration(cfg);
             
             // set the initial zero point to the current position
             PlungerReading r;
@@ -5611,8 +5641,13 @@ public:
                 // bad settings - reset to defaults
                 cfg.plunger.cal.max = 0xffff;
                 cfg.plunger.cal.zero = 0xffff/6;
-                onUpdateCal();
             }
+            
+            // finalize the configuration in the plunger object
+            plungerSensor->endCalibration(cfg);
+
+            // update our internal cached information for the new calibration
+            onUpdateCal();
         }
             
         // remember the new mode

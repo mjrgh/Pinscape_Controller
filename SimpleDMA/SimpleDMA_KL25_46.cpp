@@ -66,16 +66,33 @@ SimpleDMA::SimpleDMA(int channel)
 
 int SimpleDMA::start(uint32_t length, bool wait)
 {
+    // prepare the transfer
+    volatile uint8_t *chcfg = prepare(length, wait);
+    
+    // check for errors
+    if (chcfg == NULL)
+        return -1;
+        
+    // ready to go - set the ENBL bit in the DMAMUX channel config register
+    // to start the trnasfer
+    *chcfg |= DMAMUX_CHCFG_ENBL_MASK;
+    
+    // return success
+    return 0;
+}
+
+volatile uint8_t *SimpleDMA::prepare(uint32_t length, bool wait)
+{
     if (auto_channel)
         _channel = getFreeChannel();
     else if (!wait && isBusy())
-        return -1;
+        return NULL;
     else {
         while (isBusy());
     }
     
     if (length > DMA_DSR_BCR_BCR_MASK)
-        return -1;
+        return NULL;
 
     irq_owner[_channel] = this;
     
@@ -127,10 +144,8 @@ int SimpleDMA::start(uint32_t length, bool wait)
     dmareg->DCR = config;      
     dmareg->DSR_BCR = length;
     
-    // Start - set the ENBL bit in the DMAMUX channel config register
-    *chcfg |= DMAMUX_CHCFG_ENBL_MASK;
-
-    return 0;
+    // success - return the channel config register
+    return chcfg;
 }
 
 void SimpleDMA::link(SimpleDMA &dest, bool all)

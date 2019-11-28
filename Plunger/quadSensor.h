@@ -129,7 +129,7 @@ public:
         
     // Begin calibration.  We can assume that the plunger is at the
     // park position when calibration starts.
-    virtual void beginCalibration()
+    virtual void beginCalibration(Config &)
     {
         pos = parkPos;
     }

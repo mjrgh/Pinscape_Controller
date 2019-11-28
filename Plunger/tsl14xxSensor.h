@@ -67,7 +67,7 @@ protected:
         // transfer cycle, so this brings us to the minimum time for 
         // period B.
         //
-        // 3. Now pause for the reqeusted extra delay time.  Period B is 
+        // 3. Now pause for the requested extra delay time.  Period B is 
         // still running at this point (it keeps going until we start a 
         // new capture), so this pause adds the requested extra time to 
         // period B's total integration time.  This brings period B to
@@ -157,8 +157,7 @@ public:
         sensor.startCapture(axcTime);
 
         // get the image array from the last capture
-        sensor.getPix(pix, t);
-        
+        sensor.getPix(pix, t);        
     }
 };        
 

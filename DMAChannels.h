@@ -21,11 +21,13 @@
 // in any given system, so any channels assigned for one type of 
 // sensor can be reused by other sensor types.
 
-// TSL1410R CCD plunger sensor
-const int DMAch_CLKUP   = 1;    // Clock Up signal generator
-const int DMAch_ADC     = 2;    // ADC (analog input) sample transfer
-const int DMAch_CLKDN   = 3;    // Clock Down signal generator
+// TSL1410R linear optical array plunger sensor
+const int DMAch_TSL_CLKUP   = 1;    // Clock Up signal generator
+const int DMAch_TSL_ADC     = 2;    // ADC (analog input) sample transfer
+const int DMAch_TSL_CLKDN   = 3;    // Clock Down signal generator
 
+// TDC1103 linear CCD plunger sensor
+const int DMAch_TDC_ADC     = 2;  // ADC (analog input) sample transfer
 
 // --------------------------------------------------------------
 //

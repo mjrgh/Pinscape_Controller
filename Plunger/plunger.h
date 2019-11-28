@@ -133,11 +133,21 @@ public:
     // timestamp, without jitter filtering and without any scale adjustment.
     virtual bool readRaw(PlungerReading &r) = 0;
     
+    // Restore the saved calibration data from the configuration.  The main 
+    // loop calls this at startup to let us initialize internals from the
+    // saved calibration data.  This is called even if the plunger isn't 
+    // calibrated, which is flagged in the config.
+    virtual void restoreCalibration(Config &) { }
+    
     // Begin calibration.  The main loop calls this when the user activates
     // calibration mode.  Sensors that work in terms of relative positions,
     // such as quadrature-based sensors, can use this to set the reference
     // point for the park position internally.
-    virtual void beginCalibration() { }
+    virtual void beginCalibration(Config &) { }
+    
+    // End calibration.  The main loop calls this when calibration mode is
+    // completed.
+    virtual void endCalibration(Config &) { }
     
     // Send a sensor status report to the host, via the joystick interface.
     // This provides some common information for all sensor types, and also
@@ -512,7 +522,7 @@ public:
     
 protected:
     // process an image to read the plunger position
-    virtual bool process(const uint8_t *pix, int npix, int &rawPos, ProcessResult &res) = 0;    
+    virtual bool process(const uint8_t *pix, int npix, int &rawPos, ProcessResult &res) = 0;
     
     // send extra status headers, following the standard headers (types 0 and 1)
     virtual void extraStatusHeaders(USBJoystick &js, ProcessResult &res) { }

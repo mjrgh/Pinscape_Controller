@@ -1,3 +1,7 @@
+// This class is not currently used - it's been replaced by IRTransmitter
+// and NewPwm.
+#if 0
+
 // IRPwmOut - KL25Z ONLY
 //
 // This is a lightweight reimplementation of PwmOut for KL25Z only.
@@ -70,8 +74,7 @@ public:
         
         // default to 1ms period
         period_us(1000.0f);
-        printf("IRPwmOut,  SC=%08lx, CnSC=%08lx\r\n",
-            tpm->SC, tpm->CONTROLS[ch_n].CnSC);
+        //printf("IRPwmOut,  SC=%08lx, CnSC=%08lx\r\n", tpm->SC, tpm->CONTROLS[ch_n].CnSC);
     
         // wire the pinout
         pinmap_pinout(pin, PinMap_PWM);
@@ -120,12 +123,11 @@ public:
     
     void period_us(float us)
     {
-        if (tpm->SC == (TPM_SC_CMOD(1) | TPM_SC_PS(0))
-            && tpm->CONTROLS[ch_n].CnSC == (TPM_CnSC_MSB_MASK | TPM_CnSC_ELSB_MASK))
-            printf("period_us ok\r\n");
-        else
-            printf("period_us regs changed??? %08lx, %08lx\r\n",
-                tpm->SC, tpm->CONTROLS[ch_n].CnSC);
+        // if (tpm->SC == (TPM_SC_CMOD(1) | TPM_SC_PS(0))
+        //     && tpm->CONTROLS[ch_n].CnSC == (TPM_CnSC_MSB_MASK | TPM_CnSC_ELSB_MASK))
+        //     printf("period_us ok\r\n");
+        // else
+        //     printf("period_us regs changed??? %08lx, %08lx\r\n", tpm->SC, tpm->CONTROLS[ch_n].CnSC);
 
         float dc = read();
         tpm->MOD = (uint32_t)(pwm_clock * (float)us) - 1;
@@ -142,3 +144,5 @@ protected:
 };
 
 #endif
+
+#endif /* 0 */

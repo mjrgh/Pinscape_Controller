@@ -263,14 +263,17 @@ public:
     //  clockPin = CLK pin (GPIO, digital out)
     //  aoPin = AO pin (GPIO, analog in - must be ADC-capable)
     TSL14xx(int nPixSensor, PinName siPin, PinName clockPin, PinName aoPin)
-        : adc_dma(DMAch_ADC), 
-          clkUp_dma(DMAch_CLKUP), 
-          clkDn_dma(DMAch_CLKDN),
+        : adc_dma(DMAch_TSL_ADC), 
+          clkUp_dma(DMAch_TSL_CLKUP), 
+          clkDn_dma(DMAch_TSL_CLKDN),
           si(siPin), 
           clock(clockPin), 
-          ao(aoPin, true),
+          ao(aoPin, true, 0),  // continuous sampling, fast sampling mode
           nPixSensor(nPixSensor)
     {
+        // Calibrate the ADC for best accuracy
+        ao.calibrate();
+        
         // start the sample timer with an arbitrary zero point of 'now'
         t.start();
         
@@ -573,7 +576,7 @@ private:
     DigitalOut clock;         // GPIO pin for sensor SCLK (serial clock)
     GPIO_Type *clockPort;     // IOPORT base address for clock pin - cached for DMA writes
     uint32_t clockMask;       // IOPORT register bit mask for clock pin
-    AltAnalogIn ao;           // GPIO pin for sensor AO (analog output)
+    AltAnalogIn_8bit ao;           // GPIO pin for sensor AO (analog output)
     
     // number of pixels in the physical sensor array
     int nPixSensor;           // number of pixels in physical sensor array
@@ -585,7 +588,7 @@ private:
     uint8_t *pix2;            // pixel array 2
     
     // Timestamps of pix1 and pix2 arrays, in microseconds, in terms of the 
-    // ample timer (this->t).
+    // sample timer (this->t).
     uint32_t t1;
     uint32_t t2;
     

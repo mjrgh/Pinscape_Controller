@@ -864,16 +864,20 @@
 //          *7 = AS5304 magnetic quadrature sensor, 160 steps per 2mm
 //           8 = TSL1401CL linear image sensor, 128x1 pixel, bar code detection
 //           9 = VL6180X time-of-flight distance sensor
+//        **10 = AEAT-6012-A06 magnetic rotary encoder
+//        **11 = TCD1103GFG Toshiba linear CCD, 1500x1 pixels, edge detection
 //
 //       * The sensor types marked with asterisks (*) are reserved for types
 //       that aren't currently implemented but could be added in the future.  
-//       Selecting these types will effectively disable the plunger.  Note
-//       that sensor types 2 and 4 were formerly reserved for TSL14xx sensors
-//       in parallel wiring mode, but support for these is no longer planned,
-//       as the KL25Z's single ADC sampler makes it incapable of gaining any
-//       advantage from the parallel mode offered by the sensors.  Those slots
-//       could be reassigned in the future for other sensors, since they were
-//       never enabled in any version of the firwmare.
+//       Selecting these types will effectively disable the plunger.
+//
+//       ** Experimental
+//
+//       Sensor types 2 and 4 were formerly reserved for TSL14xx sensors in
+//       parallel wiring mode, but support for these is no longer planned, as
+//       the KL25Z's single ADC sampler negates any speed advantage from using
+//       the sensors' parallel mode.  Those slots could be reassigned for 
+//       other sensors, since they were never enabled in any release version.
 //
 // 6  -> Plunger pin assignments.
 //
@@ -886,7 +890,7 @@
 //       mappings" below).  The actual use of the four pins depends on the plunger
 //       type, as shown below.  "NC" means that the pin isn't used at all for the
 //       corresponding plunger type.  "GPIO" means that any GPIO pin will work.
-//       AnalogIn and InterruptIn means that only pins with the respective 
+//       AnalogIn, InterruptIn, and PWM mean that only pins with the respective 
 //       capabilities can be chosen.
 //
 //         Plunger Type              Pin 1            Pin 2             Pin 3           Pin 4
@@ -896,6 +900,8 @@
 //         AEDR8300                  A (InterruptIn)  B (InterruptIn)   NC              NC
 //         AS5304                    A (InterruptIn)  B (InterruptIn)   NC              NC
 //         VL6180X                   SDA (GPIO)       SCL (GPIO)        GPIO0/CE (GPIO) NC
+//         AEAT-6012-A06             CS (GPIO)        CLK (GPIO)        DO (GPIO)       NC
+//         TCD1103GFG                fM (PWM)         OS (AnalogIn)     ICG (GPIO)      SH (GPIO)
 //
 // 7  -> Plunger calibration button pin assignments.
 //
@@ -1154,6 +1160,14 @@
 //          byte 5 = SDA (any GPIO pin)
 //          byte 6 = SCL (any GPIO pin)
 //          byte 7 = RESET (any GPIO pin)
+//
+// 22 -> Plunger raw calibration data.  Some sensor types need to store
+//       additional raw calibration.  We provide three uint16 slots for
+//       use by the sensor, with the meaning defined by the sensor subclass.
+//
+//          bytes 3:4 = raw data 0
+//          bytes 5:6 = raw data 1
+//          bytes 7:8 = raw data 2
 //
 //
 // SPECIAL DIAGNOSTICS VARIABLES:  These work like the array variables below,

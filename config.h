@@ -52,8 +52,10 @@ const int PlungerType_TSL1412S  = 3;     // TSL1412S linear image sensor (1536x1
 const int PlungerType_Pot       = 5;     // potentionmeter
 const int PlungerType_OptQuad   = 6;     // AEDR8300 optical quadrature sensor
 const int PlungerType_MagQuad   = 7;     // AS5304 magnetic quadrature sensor
-const int PlungerType_TSL1401CL = 8;     // TSL1401CL linear image sensor (128x1 pixels, 400dpi), bar code sensing
+const int PlungerType_TSL1401CL = 8;     // TSL1401CL linear image sensor (128x1 pixels, 400dpi), bar code reader
 const int PlungerType_VL6180X   = 9;     // VL6180X time-of-flight distance sensor
+const int PlungerType_AEAT6012  = 10;    // AEAT-6012-A06 magnetic rotary encoder; absolute angle sensing, 12-bit precision
+const int PlungerType_TCD1103   = 11;    // Toshiba TCD1103GFG linear image sensor (1500x1 pixels, ~4600dpi), edge detection
 
 // Plunger auto-zero flags
 const int PlungerAutoZeroEnabled = 0x01; // auto-zeroing enabled
@@ -774,6 +776,15 @@ struct Config
             uint16_t zero;
             uint16_t max;
             
+            // Raw calibration data.  Some sensors need to keep track of raw
+            // sensor data for calibration, in addition to the processed
+            // range information that the generic code maintains.  We 
+            // provide three uint16 slots for the specific sensor subclass's
+            // use, with the meanings defined by the subclass.
+            uint16_t raw0;
+            uint16_t raw1;
+            uint16_t raw2;
+            
             // Measured release time, in milliseconds.
             uint8_t tRelease;
     
@@ -785,6 +796,7 @@ struct Config
                 max = 0xffff;             // ...and all the way back
                 zero = max/6;             // the rest position is usually around 1/2" back = 1/6 of total travel
                 tRelease = 65;            // standard 65ms release time
+                raw0 = raw1 = raw2 = 0;   // clear the raw sensor data items
             }
             
             // Begin calibration.  This sets each limit to the worst

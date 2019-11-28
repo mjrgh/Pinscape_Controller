@@ -90,6 +90,7 @@
 // can be up to three independently controlled periods.  The KL25Z has 10
 // channels in total (6 on unit 0, 2 on unit 1, 2 on unit 2), so the remaining
 // 7 channels have to share their periods with their TPM unit-mates.
+//
 
 
 #ifndef _NEWPWMOUT_H_
@@ -270,7 +271,7 @@ public:
 class NewPwmOut
 {
 public:
-    NewPwmOut(PinName pin)
+    NewPwmOut(PinName pin, bool invertedCycle = false)
     {
         // determine the TPM unit number and channel
         PWMName pwm = (PWMName)pinmap_peripheral(pin, PinMap_PWM);
@@ -286,13 +287,18 @@ public:
         
         // enable the channel on the TPM unit
         NewPwmUnit::unit[tpm_n].enableChannel(ch_n);
+        
+        // Figure the ELSB:ELSA mode according to whether we want the normal
+        // "high-true" cycle (high after reset, low after match) or the
+        // inverted "low-true" cycle (low after reset, high after match)        
+        uint32_t els_bits = invertedCycle ? TPM_CnSC_ELSA_MASK : TPM_CnSC_ELSB_MASK;
 
         // set the channel control register:
         //   CHIE                = 0    = interrupts disabled
-        //   MSB:MBA:ELSB:ELSA   = 1010 = edge-aligned PWM
+        //   MSB:MBA:ELSB:ELSA   = 10cc = edge-aligned PWM (cc = 10 high-true, 01 low-true = inverted cycle)
         //   DMA                 = 0    = DMA off
         TPM_Type *tpm = getUnit()->tpm;
-        tpm->CONTROLS[ch_n].CnSC = (TPM_CnSC_MSB_MASK | TPM_CnSC_ELSB_MASK);
+        tpm->CONTROLS[ch_n].CnSC = (TPM_CnSC_MSB_MASK | els_bits);
                 
         // wire the pinout
         pinmap_pinout(pin, PinMap_PWM);
@@ -346,7 +352,29 @@ public:
     void waitEndCycle() { getUnit()->waitEndCycle(); }
     
     // Get my TPM unit object.  This can be used to change the period.
+    // 
+    // (Note that it's intentional that we make you ask for the unit to
+    // modify the period.  It might seem attractive to provide a convenience
+    // method here that sets the period in the unit on the caller's behalf,
+    // but we omit that *on purpose*, to make it explicit to people calling
+    // this code that the period is an attribute of the unit, not of the
+    // channel, and to make it self-documenting in all calling code that 
+    // this is the case.  The original mbed interface makes it look like the
+    // period is abstractly an attribute of the channel, allowing a naive 
+    // developer to believe that a channel's period can be changed in
+    // isolation.  In fact, changing a channel's period in the mbed API
+    // has global side effects, in that it also changes the period for
+    // all other channels on the same unit.  Global side effects like that
+    // violate the principle of encapsulation.  This reflects a defect in the
+    // mbed API's design, not its implementation, in that the hardware forces
+    // this implementation.  For this reason, we deliberately require callers 
+    // to spell out in the code that they're operating on the unit when 
+    // changing attributes that belong in fact to the unit.)
     inline NewPwmUnit *getUnit() { return &NewPwmUnit::unit[tpm_n]; }
+    
+    // Get my TPM unit number and channel number
+    inline int getUnitNum() const { return tpm_n; }
+    inline int getChannelNum() const { return ch_n; }
     
 protected:
     // TPM unit number and channel number

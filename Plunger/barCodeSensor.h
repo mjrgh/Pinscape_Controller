@@ -560,7 +560,7 @@ protected:
         }
 #endif
         
-        // don't allow the exposure time to go over 2.5ms
+        // don't allow the exposure time to go below 0 or over 2.5ms
         if (int(axcTime) < 0)
             axcTime = 0;
         if (axcTime > 2500)

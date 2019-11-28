@@ -107,6 +107,16 @@ int getChannel() { return _channel; }
 int start(uint32_t length, bool wait);
 
 /**
+* Prepare a transfer.  This sets everything up for a transfer, but leaves it up
+* to the caller to trigger the start of the transfer.  This gives the caller
+* precise control over the timing of the transfer, for transfers that must be
+* synchronized with other functions.  To start the DMA transfer, the caller
+* must simply "OR" DMAMUX_CHCFG_ENBL_MASK into the byte at the returned 
+* address.
+*/
+volatile uint8_t *prepare(uint32_t length, bool wait);
+
+/**
 * Is the DMA channel busy
 *
 * @param channel - channel to check, -1 = current channel
