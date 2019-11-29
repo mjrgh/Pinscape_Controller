@@ -157,7 +157,7 @@ public:
         // "scan time" is exactly zero
         return 0;
     }
-        
+    
 private:
     // interrupt inputs for our channel pins
     FastInterruptIn chA, chB;

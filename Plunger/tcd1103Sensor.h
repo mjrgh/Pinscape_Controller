@@ -45,92 +45,20 @@ public:
     // is the sensor ready?
     virtual bool ready() { return sensor.ready(); }
     
-    // is a DMA transfer in progress?
-    virtual bool dmaBusy() { return sensor.dmaBusy(); }
-    
-    virtual void init()
-    {
-        sensor.clear();
-    }
+    virtual void init() { }
     
     // get the average sensor scan time
     virtual uint32_t getAvgScanTime() { return sensor.getAvgScanTime(); }
     
-protected:
-    virtual void readPix(uint8_t* &pix, uint32_t &t, int axcTime)
+    virtual void readPix(uint8_t* &pix, uint32_t &t)
     {        
-        // start reading the next pixel array (this waits for any DMA
-        // transfer in progress to finish, ensuring a stable pixel buffer)
-        sensor.startCapture(axcTime);
-
         // get the image array from the last capture
         sensor.getPix(pix, t);        
     }
-
-    virtual void getStatusReportPixels(
-        uint8_t* &pix, uint32_t &t, int axcTime, int extraTime)
-    {
-        // The sensor's internal buffering scheme makes it a little tricky
-        // to get the requested timing, and our own double-buffering adds a
-        // little complexity as well.  To get the exact timing requested, we
-        // have to work with the buffering pipeline like so:
-        //
-        // 1. Call startCapture().  This waits for any in-progress pixel
-        // transfer from the sensor to finish, then executes an SH/ICG pulse
-        // on the sensor.  The pulse takes a snapshot of the current live
-        // photo receptors to the sensor shift register.  These pixels have
-        // been integrating starting from before we were called; call this
-        // integration period A.  So the shift register contains period A.
-        // The SH/ICG then grounds the photo receptors, clearing their
-        // charge, thus starting a new integration period B.  After sending
-        // the SH/ICG pulse, startCapture() begins a DMA transfer of the
-        // shift register pixels (period A) to one of our two buffers (call
-        // it the EVEN buffer).
-        //
-        // 2. Wait for the current transfer (period A to the EVEN buffer)
-        // to finish.  The minimum integration time is the time of one
-        // transfer cycle, so this brings us to the minimum time for 
-        // period B.
-        //
-        // 3. Now pause for the requested extra delay time.  Period B is 
-        // still running at this point (it keeps going until we start a 
-        // new capture), so this pause adds the requested extra time to 
-        // period B's total integration time.  This brings period B to
-        // exactly the requested total time.
-        //
-        // 4. Call startCapture() to end period B, move period B's pixels
-        // to the sensor's shift register, and begin period C.  This 
-        // switches DMA buffers, so the EVEN buffer (with period A) is now 
-        // available, and the ODD buffer becomes the DMA target for the 
-        // period B pixels.
-        //
-        // 5. Wait for the period B pixels to become available, via
-        // waitPix().  This waits for the DMA transfer to complete and
-        // hands us the latest (ODD) transfer buffer.
-        //       
-        sensor.startCapture(axcTime);       // begin transfer of pixels from incoming period A, begin integration period B
-        sensor.wait();                      // wait for scan of A to complete, as minimum integration B time
-        wait_us(long(extraTime) * 100);     // add extraTime (0.1ms == 100us increments) to integration B time
-        sensor.startCapture(axcTime);       // begin transfer of pixels from integration period B, begin period C; period A pixels now available
-        
-        // wait for the DMA transfer of period B to finish, and get the 
-        // period B pixels
-        sensor.waitPix(pix, t);
-    }
     
-    // reset after a status report
-    virtual void resetAfterStatusReport(int axcTime)
-    {
-        // It takes us a while to send all of the pixels, since we have
-        // to break them up into many USB reports.  This delay means that
-        // the sensor has been sitting there integrating for much longer
-        // than usual, so the next frame read will be overexposed.  To
-        // mitigate this, make sure we don't have a capture running,
-        // then clear the sensor and start a new capture.
-        sensor.wait();
-        sensor.clear();
-        sensor.startCapture(axcTime);
-    }
+    virtual void releasePix() { sensor.releasePix(); }
+    
+    virtual void setMinIntTime(uint32_t us) { sensor.setMinIntTime(us); }
 
     // the low-level interface to the TSL14xx sensor
     TCD1103<invertedLogicGates> sensor;

@@ -28,6 +28,8 @@
  *  which add the image processing that analyzes the image data to 
  *  determine the plunger position.)
  *
+ *  *** Double buffering ***
+ *
  *  Our API is based on a double-buffered asynchronous read.  The caller
  *  can access a completed buffer, containing the pixels from the last image 
  *  frame, while the sensor is transferring data asynchronously (using the 
@@ -35,56 +37,46 @@
  *  new read is started, we swap buffers, making the last completed buffer 
  *  available to the client and handing the other buffer to the DMA
  *  controller to fill asynchronously.
- *  
- *  The photodiodes in these sensors gather light very rapidly, allowing
- *  for extremely short exposure times.  The "shutter" is electronic;
- *  a signal on the pulse input resets the pixels and begins an integration
- *  period, and a subsequent signal ends the integration and transfers the
- *  pixel voltages to the hold capacitors.  Minimum exposure times are less
- *  than a millisecond.  The actual timing is under software control, since
- *  we determine the start and end of the integration period via the pulse
- *  input.  Longer integration periods gather more light, like a longer
- *  exposure on a conventional camera.  For our purposes in the Pinscape
- *  Controller, we want the highest possible frame rate, as we're trying to 
- *  capture the motion of a fast-moving object (the plunger).  The KL25Z 
- *  can't actually keep up with shortest integration time the sensor can 
- *  achieve - the limiting factor is the KL25Z ADC, which needs at least
- *  2.5us to collect each sample.  The sensor transfers pixels to the MCU 
- *  serially, and each pixel is transferred as an analog voltage level, so 
- *  we have to collect one ADC sample per pixel.  Our maximum frame rate 
- *  is therefore determined by the product of the minimum ADC sample time 
- *  and the number of pixels.  
  *
- *  The fastest operating mode for the KL25Z ADC is its "continuous"
- *  mode, where it automatically starts taking a new sample every time
- *  it completes the previous one.  The fastest way to transfer the
- *  samples to memory in this mode is via the hardware DMA controller.
- *  
- *  It takes a pretty tricky setup to make this work.  I don't like tricky 
- *  setups - I prefer something easy to understand - but in this case it's
- *  justified because of the importance in this application of maximizing 
- *  the frame rate.  I'm pretty sure there's no other way to even get close 
- *  to the rate we can achieve with the continuous ADC/DMA combination.
- *  The ADC/DMA mode gives us pixel read times of about 2us, vs a minimum 
- *  of about 14us for the next best method I've found.  Using this mode, we 
- *  can read the TSL1410R's 1280 pixels at full resolution in about 2.5ms.  
- *  That's a frame rate of 400 frames per second, which is fast enough to 
- *  capture a fast-moving plunger with minimal motion blur.
+ *  In a way, there are actually THREE frames in our pipeline at any given
+ *  time:
  *
- *  Note that some of the sensors in this series (TSL1410R, TSL1412S) have
- *  a "parallel" readout mode that lets them physically deliver two pixels
- *  at once the MCU, via separate physical connections.  This could provide 
- *  a 2X speedup on an MCU equipped with two independent ADC samplers.  
- *  Unfortunately, the KL25Z is not so equipped; even though it might appear
- *  at first glance to support multiple ADC "channels", all of the channels
- *  internally connect to a single ADC sampler, so the hardware can ultimately
- *  perform only one conversion at a time.  Paradoxically, using the sensor's
- *  parallel mode is actually *slower* with a KL25Z than using its serial
- *  mode, because we can only maintain the higher throughput of the KL25Z
- *  ADC's "continuous sampling mode" by reading all samples thorugh a single
- *  channel.
+ *   - a live image integrating light on the photo receptors on the sensor
+ *   - the prior image, held in the sensor's shift register and being 
+ *     transferred via DMA into one of our buffers (the "DMA" buffer)
+ *   - the second prior image, in our other buffer (the "stable" buffer),
+ *     available for the client to process
  *
- *  Here's the tricky approach we use:
+ *  The integration process on the sensor starts when we begin the transfer
+ *  of an image via DMA.  That frame's integration period ends when the next 
+ *  transfer starts.  So the minimum integration time is also the DMA pixel
+ *  transfer time.  Longer integration times can be achieved by waiting
+ *  for an additional interval after a DMA transfer finishes, before starting
+ *  the next transfer.  We make provision for this added time to allow for
+ *  longer exposure times to optimize image quality.
+ *
+ *
+ *  *** Optimizing pixel transfer speed ***
+ *
+ *  For Pinscape purposes, we want the fastest possible frame rate, as we're
+ *  trying to accurately capture the motion of a fast-moving object (the 
+ *  plunger).  The TSL14xx sensors can achieve a frame rate up to about
+ *  1000 frames per second, if everything is clocked at the limits in the
+ *  data sheet.  The KL25Z, however, can't achieve that fast a rate.  The
+ *  limiting factor is the KL25Z's ADC.  We have to take an ADC sample for
+ *  every pixel, and the minimum sampling time for the ADC on the KL25Z is
+ *  about 2us.  With the 1280-pixel TSL1410R, that gives us a minimum
+ *  pixel transfer time of about 2.6ms.  And it's actually very difficult
+ *  to achieve that speed - my original, naive implementation took more
+ *  like 30ms (!!!) to transfer each frame.
+ *
+ *  As a rule, I don't like tricky code, because it's hard to understand
+ *  and hard to debug.  But in this case it's justified.  For good plunger
+ *  tracking, it's critical to achieve a minimum frame rate of around 200 
+ *  fps (5ms per frame).  I'm pretty sure there's no way to even get close 
+ *  to this rate without the complex setup described below.
+ *
+ *  Here's our approach for fast data transfer:
  * 
  *  First, we put the analog input port (the ADC == Analog-to-Digital 
  *  Converter) in "continuous" mode, at the highest clock speed we can 
@@ -211,6 +203,22 @@
  *  (the TLC5940 PWM controller interface), and it only needs one
  *  channel.  So the KL25Z's complement of four DMA channels is just
  *  enough for all of our needs for the moment.)
+ *
+ *  Note that some of the sensors in this series (TSL1410R, TSL1412S)
+ *  have a "parallel" readout mode that lets them physically deliver 
+ *  two pixels at once the MCU, via separate physical connections.  This 
+ *  could provide a 2X speedup on an MCU equipped with two independent 
+ *  ADC samplers.  Unfortunately, the KL25Z is not so equipped; even 
+ *  though it might appear at first glance to support multiple ADC 
+ *  "channels", all of the channels internally multiplex into a single 
+ *  converter unit, so the hardware can ultimately perform only one 
+ *  conversion at a time.  Paradoxically, using the sensor's parallel 
+ *  mode is actually *slower* with a KL25Z than using its serial mode,
+ *  because we can only maintain the higher throughput of the KL25Z ADC's
+ *  continuous sampling mode by reading all samples thorugh a single
+ *  channel.  Switching channels on alternating samples involves a
+ *  bunch of setup overhead within the ADC hardware that adds lots of
+ *  clocks compared to single-channel continuous mode.
  */
  
 #include "mbed.h"
@@ -277,13 +285,18 @@ public:
         // start the sample timer with an arbitrary zero point of 'now'
         t.start();
         
+        // start with no minimum integration time
+        tIntMin = 0;
+        
         // allocate our double pixel buffers
         pix1 = new uint8_t[nPixSensor*2];
         pix2 = pix1 + nPixSensor;
         
         // put the first DMA transfer into the first buffer (pix1)
         pixDMA = 0;
-        running = false;
+        
+        // DMA owns both buffers until the first transfer completes
+        clientOwnsStablePix = true;
 
         // remember the clock pin port base and pin mask for fast access
         clockPort = GPIO_PORT_BASE(clockPin);
@@ -337,6 +350,9 @@ public:
         // clear the timing statistics        
         totalTime = 0.0; 
         nRuns = 0;
+        
+        // start the first transfer
+        startTransfer();
     }
     
     // Get the stable pixel array.  This is the image array from the
@@ -366,7 +382,7 @@ public:
     // until the next transfer after that.
     void waitPix(uint8_t * &pix, uint32_t &t)
     {
-        // wait for the current transfer to finish
+        // wait for stable buffer ownership to transfer to the client
         wait();
         
         // Return the pixel array that IS assigned to DMA, since this
@@ -388,38 +404,61 @@ public:
         }
     }
     
-    // Start an image capture from the sensor.  Waits the previous
-    // capture to finish if it's still running, then starts a new one
-    // and returns immediately.  The new capture proceeds autonomously 
-    // via the DMA hardware, so the caller can continue with other 
-    // processing during the capture.
-    void startCapture(uint32_t minIntTime_us = 0)
+    // Set the requested minimum integration time.  If this is less than the
+    // sensor's physical minimum time, the physical minimum applies.
+    virtual void setMinIntTime(uint32_t us)
     {
-        IF_DIAG(uint32_t tDiag0 = mainLoopTimer.read_us();)
+        tIntMin = us;
+    }
+    
+    // Wait for the stable buffer ownership to transfer to the client
+    void wait() { while (!clientOwnsStablePix) ; }
+    
+    // Is a buffer available?
+    bool ready() const { return clientOwnsStablePix; }
+    
+    // Release the client DMA buffer.  The client must call this when it's
+    // done with the current image frame to release the frame back to the
+    // DMA subsystem, so that it can hand us the next frame.
+    void releasePix() { clientOwnsStablePix = false; }
         
-        // wait for the last current capture to finish
-        while (running) { }
-
-        // we're starting a new capture immediately        
-        running = true;
-
-        // collect timing diagnostics
-        IF_DIAG(mainLoopIterCheckpt[8] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
-        
-        // If the elapsed time since the start of the last integration
-        // hasn't reached the specified minimum yet, wait.  This allows
-        // the caller to control the integration time to optimize the
-        // exposure level.
-        uint32_t dt = uint32_t(t.read_us() - tInt);
-        if (dt < minIntTime_us)
+    // get the timing statistics - sum of scan time for all scans so far 
+    // in microseconds, and total number of scans so far
+    void getTimingStats(uint64_t &totalTime, uint32_t &nRuns) const
+    {
+        totalTime = this->totalTime;
+        nRuns = this->nRuns;
+    }
+    
+    // get the average scan time in microseconds
+    uint32_t getAvgScanTime() const
+    {
+        return uint32_t(totalTime / nRuns);
+    }
+    
+private:
+    // Start a new transfer.  We call this at the end of each integration
+    // cycle, in interrupt mode.  This can be called directly by the interrupt
+    // handler invoked when the DMA transfer completes, or by a timeout.  In
+    // either case, we're in interrupt mode.
+    void startTransfer()
+    {
+        // If we own the stable buffer, swap buffers: hand ownership of the
+        // old DMA buffer to the client, and take control of the old client
+        // buffer (which the client must be done with if we own it) as our
+        // new DMA buffer.
+        //
+        // If the client owns the stable buffer, we can't swap buffers,
+        // because the client is still working on the stable one.  So we
+        // must start the new transfer using the existing DMA buffer.
+        if (!clientOwnsStablePix)
         {
-            // we haven't reached the required minimum yet - wait for the 
-            // remaining interval
-            wait_us(minIntTime_us - dt);
+            // swap buffers
+            pixDMA ^= 1;
+            
+            // release the prior DMA buffer to the client
+            clientOwnsStablePix = true;
         }
-        
-        // swap to the other DMA buffer for reading the new pixel samples
-        pixDMA ^= 1;
         
         // Set up the active pixel array as the destination buffer for 
         // the ADC DMA channel. 
@@ -471,24 +510,53 @@ public:
         // setup takes about 2us, so clocking 19 pixels takes about 38us.
         // In addition, the ADC takes about 4us extra for the first read.
         tInt = t.read_us() + 19*2 + 4;
-        
-        IF_DIAG(mainLoopIterCheckpt[9] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
     }
     
-    // Wait for the current capture to finish
-    void wait()
+    // End of transfer notification.  This is called as an interrupt
+    // handler when the DMA transfer completes.
+    void transferDone()
     {
-        while (running) { }
-    }
-    
-    // Is the latest reading ready?
-    bool ready() const { return !running; }
-    
-    // Is a DMA transfer in progress?
-    bool dmaBusy() const { return running; }
+        // stop the ADC sampler
+        ao.stop();
+            
+        // clock out one extra pixel to leave the analog out pin on
+        // the sensor in the high-Z state
+        clock = 1;
+        clock = 0;
         
-    // Clock through all pixels to clear the array.  Pulses SI at the
-    // beginning of the operation, which starts a new integration cycle.
+        // add this sample to the timing statistics (for diagnostics and
+        // performance measurement)
+        uint32_t now = t.read_us();
+        totalTime += uint32_t(now - t0);
+        nRuns += 1;
+        
+        // note the ending time of the transfer
+        tDone = now;
+        
+        // Figure the time remaining to reach the minimum requested 
+        // integration time for the next cycle.  The sensor is currently
+        // working on an integration cycle that started at tInt, and that
+        // cycle will end when we start the next cycle.  We therefore want
+        // to wait to start the next cycle until we've reached the desired
+        // total integration time.
+        uint32_t dt = now - tInt;
+        if (dt < tIntMin)
+        {
+            // more time is required - set a timeout for the remaining inteval
+            integrationTimeout.attach_us(this, &TSL14xx::startTransfer, tIntMin - dt);
+        }
+        else
+        {
+            // we've already reached the minimum integration time - start
+            // the next transfer immediately
+            startTransfer();
+        }
+    }
+
+    // Clear the sensor shift register.  Clocks in all of the pixels from
+    // the sensor without bothering to read them on the ADC.  Pulses SI 
+    // at the beginning of the operation, which starts a new integration 
+    // cycle.
     void clear()
     {
         // get the clock toggle register
@@ -527,45 +595,7 @@ public:
             *ptor = clockMask;
         }
     }
-    
-    // get the timing statistics - sum of scan time for all scans so far 
-    // in microseconds, and total number of scans so far
-    void getTimingStats(uint64_t &totalTime, uint32_t &nRuns) const
-    {
-        totalTime = this->totalTime;
-        nRuns = this->nRuns;
-    }
-    
-    // get the average scan time in microseconds
-    uint32_t getAvgScanTime() const
-    {
-        return uint32_t(totalTime / nRuns);
-    }
-
-private:
-    // end of transfer notification
-    void transferDone()
-    {
-        // stop the ADC sampler
-        ao.stop();
-            
-        // clock out one extra pixel to leave A1 in the high-Z state
-        clock = 1;
-        clock = 0;
         
-        // add this sample to the timing statistics (for diagnostics and
-        // performance measurement)
-        uint32_t now = t.read_us();
-        totalTime += uint32_t(now - t0);
-        nRuns += 1;
-        
-        // the sampler is no long running
-        running = false;
-        
-        // note the ending time of the transfer
-        tDone = now;
-    }
-    
     // DMA controller interfaces
     SimpleDMA adc_dma;        // DMA channel for reading the analog input
     SimpleDMA clkUp_dma;      // "Clock Up" channel
@@ -597,9 +627,53 @@ private:
     // data from the last transfer.
     uint8_t pixDMA;
     
-    // flag: sample is running
-    volatile bool running;
-
+    // Stable buffer ownership.  At any given time, the DMA subsystem owns
+    // the buffer specified by pixDMA.  The other buffer - the "stable" buffer,
+    // which contains the most recent completed frame, can be owned by EITHER
+    // the client or by the DMA subsystem.  Each time a DMA transfer completes,
+    // the DMA subsystem looks at the stable buffer owner flag to determine 
+    // what to do:
+    //
+    // - If the DMA subsystem owns the stable buffer, it swaps buffers.  This
+    //   makes the newly completed DMA buffer the new stable buffer, and makes
+    //   the old stable buffer the new DMA buffer.  At this time, the DMA 
+    //   subsystem also changes the stable buffer ownership to CLIENT.
+    //
+    // - If the CLIENT owns the stable buffer, the DMA subsystem can't swap
+    //   buffers, because the client is still using the stable buffer.  It
+    //   simply leaves things as they are.
+    //
+    // In either case, the DMA system starts a new transfer at this point.
+    //
+    // The client, meanwhile, is free to access the stable buffer when it has
+    // ownership.  If the client *doesn't* have ownership, it must wait for
+    // the ownership to be transferred, which can only be done by the DMA
+    // subsystem on completing a transfer.
+    //
+    // When the client is done with the stable buffer, it transfers ownership
+    // back to the DMA subsystem.
+    //
+    // Transfers of ownership from DMA to CLIENT are done only by DMA.
+    // Transfers from CLIENT to DMA are done only by CLIENT.  So whoever has
+    // ownership now is responsible for transferring ownership.
+    //
+    volatile bool clientOwnsStablePix;
+    
+    // End-of-integration timeout handler.  This lets us fire an interrupt
+    // when the current integration cycle is done, so that we can start the
+    // next cycle.
+    Timeout integrationTimeout;
+    
+    // Requested minimum integration time, in micoseconds.  The client can use 
+    // this to control the exposure level, by increasing it for a longer
+    // exposure and thus more light-gathering in low-light conditions.  Note 
+    // that the physical limit on the minimum integration time is roughly equal 
+    // to the pixel file transfer time, because the integration cycle is
+    // initiated and ended by transfer starts.  It's thus impossible to make
+    // the integration time less than the time for one full pixel file 
+    // transfer.
+    uint32_t tIntMin;
+    
     // timing statistics
     Timer t;                  // sample timer
     uint32_t t0;              // start time (us) of current sample

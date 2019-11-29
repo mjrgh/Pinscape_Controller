@@ -153,8 +153,9 @@ public:
         pix2 = pix1 + nPixSensor;
         
         // put the first DMA transfer into the first buffer (pix1)
+        tIntMin = 0;
         pixDMA = 0;
-        running = false;
+        clientOwnsStablePix = false;
 
         // start the sample timer with an arbitrary epoch of "now"
         t.start();
@@ -180,6 +181,9 @@ public:
         // clear random power-up data by clocking through all pixels twice
         clear();
         clear();
+        
+        // start the first transfer
+        startTransfer();
     }
         
     // logic gate levels, based on whether or not the logic gate connections
@@ -188,13 +192,10 @@ public:
     static const bool logicHigh = invertedLogicGates ? 0 : 1;
     
     // ready to read
-    bool ready() { return !running; }
+    bool ready() { return clientOwnsStablePix; }
     
-    // is the DMA busy?
-    bool dmaBusy() { return running; }
-
-    // wait for the current DMA cycle to finish
-    void wait() { while (running) ; }
+    // wait for the DMA subsystem to release a buffer to the client
+    void wait() { while (!clientOwnsStablePix) ; }
     
     // Get the stable pixel array.  This is the image array from the
     // previous capture.  It remains valid until the next startCapture()
@@ -225,63 +226,48 @@ public:
         }
     }
     
-    // wait for pixels to become ready
-    void waitPix(uint8_t * &pix, uint32_t &t) 
+    // release the client's pixel buffer
+    void releasePix() { clientOwnsStablePix = false; }
+    
+    // figure the average scan time from the running totals
+    uint32_t getAvgScanTime() { return static_cast<uint32_t>(totalXferTime / nRuns);}
+
+    // Set the requested minimum integration time.  If this is less than the
+    // sensor's physical minimum time, the physical minimum applies.
+    virtual void setMinIntTime(uint32_t us)
     {
-        // wait for the current transfer to finish
-        wait();
+        tIntMin = us;
+    }
+    
+protected:
+    // clear the sensor pixels    
+    void clear() 
+    {
+        // send an SH/ICG pulse sequence to start an integration cycle
+        // (without initiating a DMA transfer, as we just want to discard
+        // the incoming samples for a "clear")
+        tInt = gen_SH_ICG_pulse(false);
         
-        // Return the pixel array that IS assigned to DMA, since this
-        // is the latest buffer filled.  This buffer is stable, even
-        // though it's assigned to DMA, because the last transfer is
-        // already finished and thus DMA is no longer accessing the
-        // buffer.
-        if (pixDMA)
-        {
-            // DMA owns pix2
-            pix = pix2;
-            t = t2;
-        }
-        else
-        {
-            // DMA owns pix1
-            pix = pix1;
-            t = t1;
-        }
-   }
-        
+        // wait for one full readout cycle, plus a little extra for padding
+        ::wait(nPixSensor*masterClockPeriod*2 + 4.0e-6f);
+    }
+    
     // Start an image capture from the sensor.  Waits the previous
     // capture to finish if it's still running, then starts a new one
     // and returns immediately.  The new capture proceeds autonomously 
     // via the DMA hardware, so the caller can continue with other 
     // processing during the capture.
-    void startCapture(uint32_t minIntTime_us = 0)
+    void startTransfer()
     {
-        IF_DIAG(uint32_t tDiag0 = mainLoopTimer.read_us();)
-        
-        // wait for the last current capture to finish
-        while (running) { }
-
-        // we're starting a new capture immediately        
-        running = true;
-
-        // collect timing diagnostics
-        IF_DIAG(mainLoopIterCheckpt[8] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
-        
-        // If the elapsed time since the start of the last integration
-        // hasn't reached the specified minimum yet, wait.  This allows
-        // the caller to control the integration time to optimize the
-        // exposure level.
-        uint32_t dt = uint32_t(t.read_us() - tInt);
-        if (dt < minIntTime_us)
+        // if we own the stable buffer, swap buffers
+        if (!clientOwnsStablePix)
         {
-            // we haven't reached the required minimum yet - wait for the 
-            // remaining interval
-            wait_us(minIntTime_us - dt);
+            // swap buffers
+            pixDMA ^= 1;
+            
+            // release the prior DMA buffer to the client
+            clientOwnsStablePix = true;
         }
-        
-        // swap to the other DMA buffer for reading the new pixel samples
-        pixDMA ^= 1;
         
         // Set up the active pixel array as the destination buffer for 
         // the ADC DMA channel. 
@@ -308,29 +294,40 @@ public:
 
         // Record the start time of the currently active integration period
         tInt = tNewInt;
-        
-        IF_DIAG(mainLoopIterCheckpt[9] += uint32_t(mainLoopTimer.read_us() - tDiag0);)
     }
     
-    // clear the sensor pixels    
-    void clear() 
+    // End of transfer notification.  This runs as an interrupt handler when
+    // the DMA transfer completes.
+    void transferDone()
     {
-        // make sure any DMA run is completed
-        wait();
+        // add this sample to the timing statistics (for diagnostics and
+        // performance measurement)
+        uint32_t now = t.read_us();
+        uint32_t dt = dtPixXfer = static_cast<uint32_t>(now - tXfer);
+        totalXferTime += dt;
+        nRuns += 1;
         
-        // send an SH/ICG pulse sequence to start an integration cycle
-        // (without initiating a DMA transfer, as we just want to discard
-        // the incoming samples for a "clear")
-        tInt = gen_SH_ICG_pulse(false);
+        // collect debug statistics
+        if (dt < minXferTime) minXferTime = dt;
+        if (dt > maxXferTime) maxXferTime = dt;
         
-        // wait for one full readout cycle, plus a little extra for padding
-        ::wait(nPixSensor*masterClockPeriod*2 + 4.0e-6f);
+        // check if there's still time left before we reach the minimum 
+        // requested integration period
+        uint32_t dtInt = now - tInt;
+        if (tIntMin > dtInt)
+        {
+            // wait for the remaining interval before starting the next
+            // integration
+            integrationTimeout.attach(this, &TCD1103::startTransfer, tInt - dtInt);
+        }
+        else
+        {
+            // we've already reached the minimum integration time - start
+            // the next transfer immediately
+            startTransfer();
+        }
     }
-    
-    // figure the average scan time from the running totals
-    uint32_t getAvgScanTime() { return static_cast<uint32_t>(totalXferTime / nRuns);}
 
-protected:
     // Generate an SH/ICG pulse.  This transfers the pixel data from the live
     // sensor photoreceptors into the sensor's internal shift register, clears
     // the live pixels, and starts a new integration cycle.
@@ -529,23 +526,6 @@ protected:
         return t_sh;
     }
 
-    // end of transfer notification
-    void transferDone()
-    {
-        // add this sample to the timing statistics (for diagnostics and
-        // performance measurement)
-        uint32_t dt = dtPixXfer = static_cast<uint32_t>(t.read_us() - tXfer);
-        totalXferTime += dt;
-        nRuns += 1;
-        
-        // collect debug statistics
-        if (dt < minXferTime) minXferTime = dt;
-        if (dt > maxXferTime) maxXferTime = dt;
-        
-        // the sampler is no long running
-        running = false;
-    }
-
     // master clock
     NewPwmOut fm;
     
@@ -587,9 +567,44 @@ protected:
     // data from the last transfer.
     uint8_t pixDMA;
     
-    // flag: sample is running
-    volatile bool running;
-
+    // Stable buffer ownership.  At any given time, the DMA subsystem owns
+    // the buffer specified by pixDMA.  The other buffer - the "stable" buffer,
+    // which contains the most recent completed frame, can be owned by EITHER
+    // the client or by the DMA subsystem.  Each time a DMA transfer completes,
+    // the DMA subsystem looks at the stable buffer owner flag to determine 
+    // what to do:
+    //
+    // - If the DMA subsystem owns the stable buffer, it swaps buffers.  This
+    //   makes the newly completed DMA buffer the new stable buffer, and makes
+    //   the old stable buffer the new DMA buffer.  At this time, the DMA 
+    //   subsystem also changes the stable buffer ownership to CLIENT.
+    //
+    // - If the CLIENT owns the stable buffer, the DMA subsystem can't swap
+    //   buffers, because the client is still using the stable buffer.  It
+    //   simply leaves things as they are.
+    //
+    // In either case, the DMA system starts a new transfer at this point.
+    //
+    // The client, meanwhile, is free to access the stable buffer when it has
+    // ownership.  If the client *doesn't* have ownership, it must wait for
+    // the ownership to be transferred, which can only be done by the DMA
+    // subsystem on completing a transfer.
+    //
+    // When the client is done with the stable buffer, it transfers ownership
+    // back to the DMA subsystem.
+    //
+    // Transfers of ownership from DMA to CLIENT are done only by DMA.
+    // Transfers from CLIENT to DMA are done only by CLIENT.  So whoever has
+    // ownership now is responsible for transferring ownership.
+    //
+    volatile bool clientOwnsStablePix;
+    
+    // Minimum requested integration time, in microseconds
+    uint32_t tIntMin;
+    
+    // Timeout for generating an interrupt at the end of the integration period
+    Timeout integrationTimeout;
+        
     // timing statistics
     Timer t;                  // sample timer
     uint32_t tInt;            // start time (us) of current integration period

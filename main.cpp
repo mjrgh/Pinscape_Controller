@@ -266,8 +266,6 @@
 #define DECL_EXTERNS
 #include "config.h"
 
-// forward declarations
-static void waitPlungerIdle(void);
 
 // --------------------------------------------------------------------------
 // 
@@ -4929,14 +4927,14 @@ bool loadConfigFromFlash()
 // also schedule a reboot at the end of the followup interval.
 bool saveConfigToFlash(int tFollowup, bool reboot)
 {
-    // make sure the plunger sensor isn't busy
-    waitPlungerIdle();
-    
     // get the config block location in the flash memory
     uint32_t addr = uint32_t(configFlashAddr());
 
-    // save the data    
-    if (nvm.save(iap, addr))
+    // save the data
+    bool ok = nvm.save(iap, addr);
+
+    // if the save succeeded, do post-save work
+    if (ok)
     {
         // success - report the successful save in the status flags
         saveConfigSucceededFlag = 0x40;
@@ -4948,15 +4946,10 @@ bool saveConfigToFlash(int tFollowup, bool reboot)
         
         // if a reboot is pending, flag it
         saveConfigRebootPending = reboot;
-        
-        // return success
-        return true;
     }
-    else
-    {
-        // return failure
-        return false;
-    }        
+    
+    // return the success indication
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -5039,7 +5032,7 @@ void loadHostLoadedConfig()
 bool reportPlungerStat = false;
 uint8_t reportPlungerStatFlags; // plunger pixel report flag bits (see ccdSensor.h)
 uint8_t reportPlungerStatTime;  // extra exposure time for plunger pixel report
-
+uint8_t tReportPlungerStat;     // timestamp of most recent plunger status request
 
 
 // ---------------------------------------------------------------------------
@@ -5086,11 +5079,6 @@ static void toggleNightMode()
 // the plunger sensor interface object
 PlungerSensor *plungerSensor = 0;
 
-// wait for the plunger sensor to complete any outstanding DMA transfer
-static void waitPlungerIdle(void)
-{
-    while (plungerSensor->dmaBusy()) { }
-}
 
 // Create the plunger sensor based on the current configuration.  If 
 // there's already a sensor object, we'll delete it.
@@ -6018,6 +6006,12 @@ int calBtnLit = false;
 
 // ---------------------------------------------------------------------------
 //
+// Timer for timestamping input requests
+//
+Timer requestTimestamper;
+
+// ---------------------------------------------------------------------------
+//
 // Handle an input report from the USB host.  Input reports use our extended
 // LedWiz protocol.
 //
@@ -6105,6 +6099,12 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
             reportPlungerStat = true;
             reportPlungerStatFlags = data[2];
             reportPlungerStatTime = data[3];
+            
+            // set the extra integration time in the sensor
+            plungerSensor->setExtraIntegrationTime(reportPlungerStatTime * 100);
+            
+            // make a note of the request timestamp
+            tReportPlungerStat = requestTimestamper.read_us();
             
             // show purple until we finish sending the report
             diagLED(1, 0, 1);
@@ -6530,6 +6530,9 @@ int main(void)
     MyUSBJoystick js(cfg.usbVendorID, cfg.usbProductID, USB_VERSION_NO, false, 
         cfg.joystickEnabled, cfg.joystickAxisFormat, kbKeys);
         
+    // start the request timestamp timer
+    requestTimestamper.start();
+        
     // Wait for the USB connection to start up.  Show a distinctive diagnostic
     // flash pattern while waiting.
     Timer connTimeoutTimer, connFlashTimer;
@@ -6940,13 +6943,36 @@ int main(void)
         }
 
         // If we're in sensor status mode, report all pixel exposure values
-        if (reportPlungerStat)
+        if (reportPlungerStat && plungerSensor->ready())
         {
             // send the report            
-            plungerSensor->sendStatusReport(js, reportPlungerStatFlags, reportPlungerStatTime);
+            plungerSensor->sendStatusReport(js, reportPlungerStatFlags);
 
             // we have satisfied this request
             reportPlungerStat = false;
+        }
+        
+        // Reset the plunger status report extra timer after enough time has
+        // elapsed to satisfy the request.  We don't just do this immediately
+        // because of the complexities of the pixel frame buffer pipelines in
+        // most of the image sensors.  The pipelines delay the effect of the
+        // exposure time request by a couple of frames, so we can't be sure
+        // exactly when they're applied - meaning we can't consider the
+        // delay time to be consumed after a fixed number of frames.  Instead,
+        // we'll consider it consumed after a long enough time to be sure
+        // we've sent a few frames.  The extra time value is meant to be an
+        // interactive tool for debugging, so it's not important to reset it
+        // immediately - the user will probably want to see the effect over
+        // many frames, so they're likely to keep sending requests with the
+        // time value over and over.  They'll eventually shut down the frame
+        // viewer and return to normal operation, at which point the requests
+        // will stop.  So we just have to clear things out after we haven't
+        // seen a request with extra time for a little while.
+        if (reportPlungerStatTime != 0 
+            && static_cast<uint32_t>(requestTimestamper.read_us() - tReportPlungerStat) > 1000000)
+        {
+            reportPlungerStatTime = 0;
+            plungerSensor->setExtraIntegrationTime(0);
         }
         
         // If joystick reports are turned off, send a generic status report

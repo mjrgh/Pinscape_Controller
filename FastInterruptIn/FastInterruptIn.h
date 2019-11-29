@@ -274,7 +274,7 @@ public:
             break;
         }
     }
-
+    
 protected:
     // set a handler - the mode is PCR_IRQC_RISING or PCR_IRQC_FALLING
     void setHandler(

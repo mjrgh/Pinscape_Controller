@@ -7,7 +7,7 @@
 ; from flash in the course of the loop, which could freeze the CPU.  
 ; Empirically, it seems that this isn't truly necessary, despite the manual's
 ; warnings.  The M0+ instruction cache is big enough to hold the whole
-; execute and wait loop instruction sequence, even when written in C++, so
+; execute-and-wait loop instruction sequence, even when written in C++, so
 ; in practice this can run as flash-resident C++ code.  We're implementing
 ; it as assembler anyway to follow the best practices as laid out in the
 ; hardware manual.

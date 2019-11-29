@@ -78,9 +78,6 @@ public:
     // working on the current reading's data transfer.
     virtual bool ready() { return true; }
     
-    // Is a plunger DMA operation in progress?
-    virtual bool dmaBusy() { return false; }
-    
     // Read the sensor position, if possible.  Returns true on success,
     // false if it wasn't possible to take a reading.  On success, fills
     // in 'r' with the current reading and timestamp and returns true.
@@ -107,6 +104,10 @@ public:
     // than that to avoid aliasing during the bounce.
     bool read(PlungerReading &r)
     {
+        // fail if the hardware scan isn't ready
+        if (!ready())
+            return false;
+        
         // get the raw reading
         if (readRaw(r))
         {
@@ -173,13 +174,7 @@ public:
     // sensor like the TSL1410R, sending the full pixel array by USB takes 
     // so long that the frame rate is way below regular video rates.
     //
-    // 'exposureTime' is the amount of extra time to add to the exposure,
-    // in 100us (.1ms) increments.  For imaging sensors, the frame we report
-    // is exposed for the minimum exposure time plus this added time.  This
-    // allows the host to take readings at different exposure levels for
-    // calibration purposes.  Non-imaging sensors ignore this.
-    virtual void sendStatusReport(
-        class USBJoystick &js, uint8_t flags, uint8_t exposureTime)
+    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags)
     {
         // read the current position
         int pos = 0xFFFF;
@@ -203,6 +198,12 @@ public:
         js.sendPlungerStatus(0, pos, 0x01, getAvgScanTime(), 0);
         js.sendPlungerStatus2(nativeScale, jfLo, jfHi, r.pos, 0);
     }
+    
+    // Set extra image integration time, in microseconds.  This is only 
+    // meaningful for image-type sensors.  This allows the PC client to
+    // manually adjust the exposure time for testing and debugging
+    // purposes.
+    virtual void setExtraIntegrationTime(uint32_t us) { }
     
     // Get the average sensor scan time in microseconds
     virtual uint32_t getAvgScanTime() = 0;
@@ -331,7 +332,15 @@ protected:
 
 // --------------------------------------------------------------------------
 //
-// Generic image sensor interface for image-based plungers
+// Generic image sensor interface for image-based plungers.
+//
+// This interface is designed to allow the underlying sensor code to work
+// asynchronously to transfer pixels from the sensor into memory using
+// multiple buffers arranged in a circular list.  We have a "ready" state,
+// which lets the sensor tell us when a buffer is available, and we have
+// the notion of "ownership" of the buffer.  When the client is done with
+// a frame, it must realease the frame back to the sensor so that the sensor
+// can use it for a subsequent frame transfer.
 //
 class PlungerSensorImageInterface
 {
@@ -347,27 +356,23 @@ public:
     // is the sensor ready?
     virtual bool ready() = 0;
     
-    // is a DMA transfer in progress?
-    virtual bool dmaBusy() = 0;
-
-    // read the image
-    virtual void readPix(uint8_t* &pix, uint32_t &t, int axcTime) = 0;
+    // Read the image.  This retrieves a pointer to the current frame
+    // buffer, which is in memory space managed by the sensor.  This
+    // MUST only be called when ready() returns true.  The buffer is
+    // locked for the client's use until the client calls releasePix().
+    // The client MUST call releasePix() when done with the buffer, so
+    // that the sensor can reuse it for another frame.
+    virtual void readPix(uint8_t* &pix, uint32_t &t) = 0;
     
-    // Get an image for a pixel status report.  't' is the timestamp of
-    // the image.  'extraTime' is extra exposure time for the image, in
-    // 0.1ms increments.
-    virtual void getStatusReportPixels(
-        uint8_t* &pix, uint32_t &t, int axcTime, int extraTime) = 0;
-    
-    // Reset the sensor after a status report.  Status reports take a long
-    // time to send, so sensors that use continuous integration cycling may
-    // need to reset after a status report so that they aren't overexposed
-    // by the long delay of sending the status report.
-    virtual void resetAfterStatusReport(int axcTime) = 0;
+    // Release the current frame buffer back to the sensor.  
+    virtual void releasePix() = 0;
     
     // get the average sensor pixel scan time (the time it takes on average
     // to read one image frame from the sensor)
     virtual uint32_t getAvgScanTime() = 0;
+    
+    // Set the minimum integration time (microseconds)
+    virtual void setMinIntTime(uint32_t us) = 0;
     
 protected:
     // number of pixels on sensor
@@ -387,6 +392,7 @@ public:
         : PlungerSensor(nativeScale), sensor(sensor)
     {
         axcTime = 0;
+        extraIntTime = 0;
         native_npix = npix;
     }
     
@@ -396,46 +402,50 @@ public:
     // is the sensor ready?
     virtual bool ready() { return sensor.ready(); }
     
-    // is a DMA transfer in progress?
-    virtual bool dmaBusy() { return sensor.dmaBusy(); }
-    
     // get the pixel transfer time
     virtual uint32_t getAvgScanTime() { return sensor.getAvgScanTime(); }
 
+    // set extra integration time
+    virtual void setExtraIntegrationTime(uint32_t us) { extraIntTime = us; }
+    
     // read the plunger position
     virtual bool readRaw(PlungerReading &r)
     {
         // read pixels from the sensor
         uint8_t *pix;
         uint32_t tpix;
-        sensor.readPix(pix, tpix, axcTime);
+        sensor.readPix(pix, tpix);
         
         // process the pixels
         int pixpos;
         ProcessResult res;
-        if (process(pix, native_npix, pixpos, res))
+        bool ok = process(pix, native_npix, pixpos, res);
+        
+        // release the buffer back to the sensor
+        sensor.releasePix();
+        
+        // adjust the exposure time
+        sensor.setMinIntTime(axcTime + extraIntTime);
+
+        // if we successfully processed the frame, read the position
+        if (ok)
         {            
             r.pos = pixpos;
             r.t = tpix;
-            
-            // success
-            return true;
         }
-        else
-        {
-            // no position found
-            return false;
-        }
+        
+        // return the result
+        return ok;
     }
 
     // Send a status report to the joystick interface.
     // See plunger.h for details on the arguments.
-    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, uint8_t extraTime)
+    virtual void sendStatusReport(USBJoystick &js, uint8_t flags)
     {
         // get pixels
         uint8_t *pix;
         uint32_t t;
-        sensor.getStatusReportPixels(pix, t, axcTime, extraTime);
+        sensor.readPix(pix, t);
 
         // start a timer to measure the processing time
         Timer pt;
@@ -457,6 +467,9 @@ public:
             rawPos = 0xFFFF;
         }
         
+        // adjust the exposure time
+        sensor.setMinIntTime(axcTime + extraIntTime);
+
         // note the processing time
         uint32_t processTime = pt.read_us();
         
@@ -516,8 +529,8 @@ public:
                 js.sendPlungerPix(idx, n, pix);
         }
         
-        // reset the sensor, if necessary
-        sensor.resetAfterStatusReport(axcTime);
+        // release the pixel buffer
+        sensor.releasePix();
     }
     
 protected:
@@ -536,8 +549,15 @@ protected:
     // number of pixels
     int native_npix;
     
-    // auto-exposure time
+    // Auto-exposure time.  This is for use by process() in the subclass.
+    // On each frame processing iteration, it can adjust this to optimize
+    // the image quality.
     uint32_t axcTime;
+    
+    // Extra exposure time.  This is for use by the PC side, mostly for
+    // debugging use to allow the PC user to manually adjust the exposure
+    // when inspecting captured frames.
+    uint32_t extraIntTime;
 };
 
 
