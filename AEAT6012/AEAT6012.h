@@ -97,6 +97,10 @@ public:
         // done - leave CS high between readings
         cs = 1;
         
+        // The orientation in our mounting design reads the angle in the
+        // reverse of the direction we want, so flip it.
+        result = 4095 - result;
+        
         // return the result
         return result;
     }

@@ -194,8 +194,8 @@
 // keep things straight, let's give each scale a name:
 //
 // * "Raw" refers to the readings directly from the sensor.  These are
-//   unsigned ints in the range 0..scaleMax, and represent angles in a
-//   unit system where one increment equals 360/scaleMax degrees.  The
+//   unsigned ints in the range 0..maRawxAngle, and represent angles in a
+//   unit system where one increment equals 360/maxRawAngle degrees.  The
 //   zero point is arbitrary, determined by the physical orientation
 //   of the sensor.
 //
@@ -215,9 +215,9 @@
 class PlungerSensorRotary: public PlungerSensor
 {
 public:
-    PlungerSensorRotary(int scaleMax, float radiansPerSensorUnit) : 
+    PlungerSensorRotary(int maxRawAngle, float radiansPerSensorUnit) : 
         PlungerSensor(65535),
-        scaleMax(scaleMax),
+        maxRawAngle(maxRawAngle),
         radiansPerSensorUnit(radiansPerSensorUnit)
     {   
         // start our sample timer with an arbitrary zero point of now
@@ -235,8 +235,8 @@ public:
         // conservative, allow for about 3X that, so allow 1/12 of scale
         // as the maximum forward excursion.  For wrapping purposes, we'll
         // consider any reading outside of the range from -(excursion)
-        // to +(scaleMax - excursion) to be wrapped.
-        maxForwardExcursion = scaleMax/12;
+        // to +(maxRawAngle - excursion) to be wrapped.
+        maxForwardExcursionRaw = maxRawAngle/12;
                 
         // reset the calibration counters
         biasedMinObserved = biasedMaxObserved = 0;
@@ -268,8 +268,8 @@ public:
             // Set an initial wild guess at a range equal to +/-35 degrees.
             // Note that this is in the "biased" coordinate system - raw
             // units, but relative to the park angle.  The park angle is
-            // about 25 degrees in this setup.
-            biasedMax = (35 + 25) * scaleMax/360;        
+            // about -25 degrees in this setup.
+            biasedMax = (35 + 25) * maxRawAngle/360;        
         }
             
         // recalculate the vertical angle
@@ -323,7 +323,7 @@ public:
         int angle;
         if (!readSensor(angle))
             return false;
-        
+
         // Refigure the angle relative to the raw park position.  This
         // is the "biased" angle.
         angle -= rawParkAngle;
@@ -340,10 +340,10 @@ public:
         // forward exclusion to be wrapped on the low side, and consider
         // anything outside of the complementary range on the high side to
         // be wrapped on the high side.
-        if (angle < -maxForwardExcursion)
-            angle += scaleMax;
-        else if (angle >= scaleMax - maxForwardExcursion)
-            angle -= scaleMax;
+        if (angle < -maxForwardExcursionRaw)
+            angle += maxRawAngle;
+        else if (angle >= maxRawAngle - maxForwardExcursionRaw)
+            angle -= maxRawAngle;
             
         // Note if this is the highest/lowest observed reading on the biased 
         // scale since the last calibration started.
@@ -354,7 +354,7 @@ public:
             
         // figure the linear result
         r.pos = biasedAngleToLinear(angle);
-        
+                
         // Set the timestamp on the reading to right now
         uint32_t now = timer.read_us();
         r.t = now;
@@ -377,13 +377,18 @@ private:
     int biasedAngleToLinear(int angle)
     {
         // Translate to an angle relative to the vertical, in sensor units
-        int angleFromVert = angle - alpha;
+        float theta = static_cast<float>(angle)*radiansPerSensorUnit - alpha;
         
-        // Translate the angle in sensor units to radians
-        float theta = static_cast<float>(angleFromVert) * radiansPerSensorUnit;
+        // Calculate the linear position relative to the vertical.  Zero
+        // is right at the intersection of the vertical line from the
+        // sensor rotation center to the plunger axis; positive numbers
+        // are behind the vertical (more retracted).
+        int linearPos = static_cast<int>(tanf(theta) * linearScaleFactor);
         
-        // Calculate the linear position
-        return static_cast<int>(tanf(theta) * linearScaleFactor);
+        // Finally, figure the offset.  The vertical is the halfway point
+        // of the plunger motion, so we want to put it at half of the raw
+        // scale of 0..65535.
+        return linearPos + 32767;
     }
 
     // Update the estimation of the vertical angle, based on the angle
@@ -397,31 +402,31 @@ private:
         // and the requirement that the rotation axis be placed at
         // roughly the midpoint of the plunger travel.
         const float C = 1.4848489f; // 1-17/32" / 1-1/32"
-        float T = tanf(biasedMax * radiansPerSensorUnit);
-        float a = atanf((sqrtf(4*T*T*C + C*C + 2*C + 1) - C - 1)/(2*T*C));
-        
-        // Convert back to sensor units.  Note that alpha represents
-        // a relative angle between two specific points, so it's not
-        // further biased to any absolute point.
-        alpha = static_cast<int>(a / radiansPerSensorUnit);
-        
-        // While we're at it, figure the linear conversion factor.  The
-        // goal is to use most of the abstract axis range, 0..65535.
-        // To avoid overflow, though, leave a little headroom.
+        float maxInRadians = static_cast<float>(biasedMax) * radiansPerSensorUnit;
+        float T = tanf(maxInRadians);
+        alpha = atanf((sqrtf(4*T*T*C + C*C + 2*C + 1) - C - 1)/(2*T*C));
+
+        // While we're at it, figure the linear conversion factor.  Alpha
+        // represents the angle from the park position to the midpoint,
+        // which in the real world represents about 31/32", or just less
+        // then 1/3 of the overall travel.  We want to normalize this to
+        // the corresponding fraction of our 0..65535 abstract linear unit
+        // system.  To avoid overflow, normalize to a slightly smaller
+        // scale.
         const float safeMax = 60000.0f;
-        linearScaleFactor = static_cast<int>(safeMax /
-            tanf(static_cast<float>(biasedMax - alpha) * radiansPerSensorUnit));
+        const float alphaInLinearUnits = safeMax * .316327f; // 31/22" / 3-1/16"
+        linearScaleFactor = static_cast<int>(alphaInLinearUnits / tanf(alpha));
     }
 
     // Maximum raw angular reading from the sensor.  The sensor's readings
-    // will always be on a scale from 0..maxAngle.
-    int scaleMax;
+    // will always be on a scale from 0..maxRawAngle.
+    int maxRawAngle;
     
     // Radians per sensor unit.  This is a constant for the sensor.
     float radiansPerSensorUnit;
     
     // Pre-calculated value of the maximum forward excursion, in raw units.
-    int maxForwardExcursion;
+    int maxForwardExcursionRaw;
     
     // Raw reading at the park position.  We use this to handle "wrapping",
     // if the sensor's raw zero reading position is within the plunger travel
@@ -439,8 +444,8 @@ private:
     
     // The "alpha" angle - the angle between the park position and the
     // vertical line between the rotation axis and the plunger.  This is
-    // represented in sensor units.
-    int alpha;
+    // represented in radians.
+    float alpha;
     
     // The linear scaling factor, applied in our trig calculation from
     // angle to linear position.  This corresponds to the distance from
