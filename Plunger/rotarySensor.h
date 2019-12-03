@@ -49,10 +49,13 @@
 // ensure that readings wrap properly, regardless of where the raw zero
 // point lies.
 //
-// 2. Going back to the original diagram, you can see that the angle doesn't
-// vary linearly with the plunger position.  It actually varies sinusoidally.
-// Let's use the vertical line between the plunger and the rotation point as
-// the zero-degree reference point.  To figure the plunger position, then,
+// 2. Going back to the original diagram, you can see that there's some
+// trigonometry required to interpret the sensor's angular reading as a
+// linear position on the plunger axis, which is of course what we need
+// to report to the PC software.
+//
+// Let's use the vertical line between the plunger and the rotation point
+// as the zero-degree reference point.  To figure the plunger position, 
 // we need to figure the difference between the raw angle reading and the
 // zero-degree point; call this theta.  Let L be the position of the plunger
 // relative to the vertical reference point, let D be the length of the 
@@ -68,18 +71,22 @@
 // a value that gives us the desired range and resolution for the final
 // result.
 //
-// Note that the tangent diverges at +/-90 degrees, but that's not a problem
-// for the mechanical setup we've described, as the motion is inherently
-// limited to stay within this range.
+// Note that the tangent diverges at +/-90 degrees, but that's okay,
+// because the mechanical setup we've described is inherently constrained
+// to stay well within those limits.  This would even be true for an 
+// arbitrarily long range of motion along the travel axis, but we don't
+// even have to worry about that since we have such a well-defined range
+// of travel (of only about 3") to track.
 //
 // There's still one big piece missing here: we somehow have to know where
 // that vertical zero point lies.  That's something we can only learn by
 // calibration.  Unfortunately, we don't have a good way to detect this
 // directly.  We *could* ask the user to look inside the cabinet and press
-// a button when the needle is straight up, but that seems too cumbersome.
-// What we'll do instead is provide some mechanical installation guidelines
-// about where the rotation point should be positioned, and then use the
-// full range to deduce the vertical position. 
+// a button when the needle is straight up, but that seems too cumbersome
+// for the user, not to mention terribly imprecise.  So we'll approach this
+// from the other direction: we'll assume a particular placement of the
+// rotation point relative to the travel range, and we'll provide
+// installation instructions to achieve that assumed alignment.
 //
 // The full range we actually have after calibration consists of the park
 // position and the maximum retracted position.  We could in principle also
@@ -90,8 +97,8 @@
 // it's better to rely on those alone and not ask for information that the
 // user can't as easily provide.  Given these positions, AND the assumption
 // that the rotation point is at the midpoint of the plunger travel range,
-// we can do some rather grungy trig work to come up with a formula for the
-// angle between the park position and the vertical:
+// we can do some grungy trig work to come up with a formula for the angle 
+// between the park position and the vertical:
 //
 //    let C1 = 1 1/32" (distance from midpoint to park),
 //        C2 = 1 17/32" (distance from midpoint to max retract),
@@ -104,12 +111,17 @@
 //    then
 //        alpha = atan(sqrt(4*T*T*C + C^2 + 2*C + 1) - C - 1)/(2*T*C))
 //
-// Did I mention this was grungy?  At any rate, everything going into this
-// formula is either constant or known from the calibration, so we can 
-// pre-compute alpha and store it after each calibration operation.  And
-// knowing alpha, we can translate an angle reading from the sensor to an 
-// angle relative to the vertical, which we can plug into D*tan(angle) to
-// get a linear reading.  
+// Did I mention this was grungy?  At any rate, everything going into that
+// last equation is either constant or known from the calibration, so we 
+// can pre-compute alpha and store it after each calibration operation.
+// And once we've computed alpha, we can easily translate an angle reading 
+// from the sensor to an angle relative to the vertical, which we can plug 
+// into D*tan(angle) to convert to a linear position on the plunger axis.
+//
+// The final step is to scale that linear position into joystick reporting
+// units.  Those units are arbitrary, so we don't have to relate this to any
+// real-world lengths.  We can simply figure a scaling factor that maps the
+// physical range to map to roughly the full range of the joystick units.
 //
 // If you're wondering how we derived that ugly formula, read on.  Start
 // with the basic relationships D*tan(alpha) = C1 and D*tan(beta) = C2.
@@ -134,16 +146,17 @@
 // hand, you'd like D to be as large as possible, to maximum linearity of the
 // tan function used to translate angle to linear position.  Higher linearity
 // gives us greater immunity to variations in the precise centering of the
-// rotation axis in the plunger travel range.  tan() is pretty linear within
-// about +/- 30 degrees.  On the other hand, you'd like D to be as small as 
-// possible so that we get the largest overall angle range.  Our sensor has 
-// a fixed angular resolution, so the more of the overall circle we use, the 
-// more sensor increments we have over the range, and thus the better
-// effective linear resolution.
+// rotation axis in the plunger travel range.  tan() is pretty linear (that
+// is, tan(theta) is approximately proportional to theta) for small theta, 
+// within about +/- 30 degrees.  On the other hand, you'd like D to be as 
+// small as possible so that we get the largest overall angle range.  Our 
+// sensor has a fixed angular resolution, so the more of the overall circle 
+// we use, the more sensor increments we have over the range, and thus the 
+// better effective linear resolution.
 //
 // Let's do some calculations for various "D" values (vertical distance 
-// between rotation point and plunger rod).  For the effective DPI, we'll
-// 12-bit angular resolution, per the AEAT-6012 sensor.
+// between rotation point and plunger rod).  We'll base our calculations
+// on the AEAT-6012 sensor's 12-bit angular resolution.
 //
 //     D         theta(max)   eff dpi   theta(park)
 //  -----------------------------------------------
@@ -194,13 +207,13 @@
 // keep things straight, let's give each scale a name:
 //
 // * "Raw" refers to the readings directly from the sensor.  These are
-//   unsigned ints in the range 0..maRawxAngle, and represent angles in a
+//   unsigned ints in the range 0..maxRawAngle, and represent angles in a
 //   unit system where one increment equals 360/maxRawAngle degrees.  The
 //   zero point is arbitrary, determined by the physical orientation
 //   of the sensor.
 //
 // * "Biased" refers to angular units with a zero point equal to the
-//   park position.  This uses the same units as the "raw" system, but
+//   park position.  This uses the same unit size as the "raw" system, but
 //   the zero point is adjusted so that 0 always means the park position.
 //   Negative values are forward of the park position.  This scale is
 //   also adjusted for wrapping, by ensuring that the value lies in the

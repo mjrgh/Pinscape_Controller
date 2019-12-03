@@ -107,13 +107,21 @@ public:
        sh(shPin),
        os_dma(DMAch_TDC_ADC)
     {
-        // Calibrate the ADC for best accuracy
-        os.calibrate();
-
         // Idle conditions: SH low, ICG high.
         sh = logicLow;
         icg = logicHigh;
-        
+
+        // Set a zero minimum integration time by default.  Note that tIntMin
+        // has no effect when it's less than the absolute minimum, which is
+        // the pixel transfer time for one frame (around 3ms).  tIntMin only
+        // kicks in when it goes above that absolute minimum, at which point
+        // we'll wait for any additional time needed to reach tIntMin before
+        // starting the next integration cycle.
+        tIntMin = 0;
+
+        // Calibrate the ADC for best accuracy
+        os.calibrate();
+
         // ADC sample conversion time.  This must be calculated based on the
         // combination of parameters selected for the os() initializer above.
         // See the KL25 Sub-Family Reference Manual, section 28.4.45, for the
@@ -153,7 +161,6 @@ public:
         pix2 = pix1 + nPixSensor;
         
         // put the first DMA transfer into the first buffer (pix1)
-        tIntMin = 0;
         pixDMA = 0;
         clientOwnsStablePix = false;
 
@@ -178,10 +185,6 @@ public:
         minXferTime = 0xffffffff;
         nRuns = 0;
 
-        // clear random power-up data by clocking through all pixels twice
-        clear();
-        clear();
-        
         // start the first transfer
         startTransfer();
     }
@@ -193,10 +196,7 @@ public:
     
     // ready to read
     bool ready() { return clientOwnsStablePix; }
-    
-    // wait for the DMA subsystem to release a buffer to the client
-    void wait() { while (!clientOwnsStablePix) ; }
-    
+        
     // Get the stable pixel array.  This is the image array from the
     // previous capture.  It remains valid until the next startCapture()
     // call, at which point this buffer will be reused for the new capture.
@@ -240,18 +240,6 @@ public:
     }
     
 protected:
-    // clear the sensor pixels    
-    void clear() 
-    {
-        // send an SH/ICG pulse sequence to start an integration cycle
-        // (without initiating a DMA transfer, as we just want to discard
-        // the incoming samples for a "clear")
-        tInt = gen_SH_ICG_pulse(false);
-        
-        // wait for one full readout cycle, plus a little extra for padding
-        ::wait(nPixSensor*masterClockPeriod*2 + 4.0e-6f);
-    }
-    
     // Start an image capture from the sensor.  Waits the previous
     // capture to finish if it's still running, then starts a new one
     // and returns immediately.  The new capture proceeds autonomously 
@@ -314,11 +302,11 @@ protected:
         // check if there's still time left before we reach the minimum 
         // requested integration period
         uint32_t dtInt = now - tInt;
-        if (tIntMin > dtInt)
+        if (dtInt < tIntMin)
         {
             // wait for the remaining interval before starting the next
             // integration
-            integrationTimeout.attach(this, &TCD1103::startTransfer, tInt - dtInt);
+            integrationTimeout.attach_us(this, &TCD1103::startTransfer, tIntMin - dtInt);
         }
         else
         {
@@ -426,11 +414,21 @@ protected:
         icg = logicLow;
         icg = logicLow;  // for timing, adds about 60ns
         icg = logicLow;  // ditto, another 60ns, total is now 120ns > min 100ns
-        sh = logicHigh;
+        icg = logicLow;  // one more to be safer
+
+        sh = logicHigh;  // take SH high
+        
         wait_us(1);      // >1000ns delay
-        sh = logicLow;
-        uint32_t t_sh = t.read_us();  // this is the start time of the NEXT image
-        wait_us(1);      // >1000ns delay
+        sh = logicHigh;  // a little more padding to be sure we're over the minimum
+        sh = logicHigh;  // more padding
+        
+        sh = logicLow;   // take SH low
+        
+        uint32_t t_sh = t.read_us();  // this is the start time of the NEXT integration
+        
+        wait_us(3);      // >1000ns delay, 5000ns typical; 3us should get us most
+                         // of the way there, considering that we have some more
+                         // work to do before we end the ICG pulse
         
         // Now the tricky part!  We have to end the ICG pulse (take ICG high)
         // at the start of a master clock cycle, AND at the start of an ADC 
