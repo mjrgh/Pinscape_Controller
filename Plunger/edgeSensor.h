@@ -93,8 +93,7 @@
 //
 
 // assembler routine to scan for an edge using "mode 2" (maximum slope)
-extern "C" int edgeScanMode2(
-    const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
+extern "C" int edgeScanMode2(const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
 
 // PlungerSensor interface implementation for edge detection setups.
 // This is a generic base class for image-based sensors where we detect
@@ -106,8 +105,8 @@ extern "C" int edgeScanMode2(
 class PlungerSensorEdgePos: public PlungerSensorImage<int>
 {
 public:
-    PlungerSensorEdgePos(PlungerSensorImageInterface &sensor, int npix) 
-        : PlungerSensorImage<int>(sensor, npix, npix - 1)
+    PlungerSensorEdgePos(PlungerSensorImageInterface &sensor, int npix)
+        : PlungerSensorImage(sensor, npix, npix - 1)
     {
     }
     
@@ -177,8 +176,10 @@ public:
             // sensor noise, etc.
             a = (a+b)/2;
             
-            // Check if we seem to be fully exposed or fully covered
+            // Check if we seem to be fully exposed or fully covered.
             pos = a < sum ? 0 : n;
+            
+            // stop here with a successful reading
             return true;
         }
         else

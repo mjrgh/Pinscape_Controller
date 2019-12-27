@@ -19,14 +19,9 @@
  *  (Note on the plunger sensor class hierarchy: this class is for the
  *  sensor only, not for the plunger application.  This class is meant
  *  to be reusable in other contexts that just need to read raw pixel
- *  data from the sensor.  Plunger/tslxxSensor.h implements the next
- *  level up, which is the implementation of the generic plunger sensor
- *  interface for TSL14xx sensors.  That's still an abstract class, since
- *  it only provides the plunger class specialization for these sensor
- *  types, without any image analysis component.  The final concrete 
- *  classes are in Plunger/edgeSensor.h and Plunger/barCodeSensor.h,
- *  which add the image processing that analyzes the image data to 
- *  determine the plunger position.)
+ *  data from the sensor.  Plunger/tslxxSensor.h implements the 
+ *  specializations of the plunger interface class for these sensors.)
+ *
  *
  *  *** Double buffering ***
  *
@@ -540,17 +535,17 @@ private:
         // to wait to start the next cycle until we've reached the desired
         // total integration time.
         uint32_t dt = now - tInt;
-        if (dt < tIntMin)
-        {
-            // more time is required - set a timeout for the remaining inteval
-            integrationTimeout.attach_us(this, &TSL14xx::startTransfer, tIntMin - dt);
-        }
-        else
-        {
-            // we've already reached the minimum integration time - start
-            // the next transfer immediately
-            startTransfer();
-        }
+        
+        // Figure the time to the start of the next transfer.  Wait for the
+        // remainder of the current integration period if we haven't yet
+        // reached the requested minimum, otherwise just start almost
+        // immediately.  (Not *actually* immediately: we don't want to start 
+        // the new transfer within this interrupt handler, because the DMA
+        // IRQ doesn't reliably clear if we start a new transfer immediately.)
+        uint32_t dtNext = dt < tIntMin ? tIntMin - dt : 1;
+
+        // Schedule the next transfer
+        integrationTimeout.attach_us(this, &TSL14xx::startTransfer, dtNext);
     }
 
     // Clear the sensor shift register.  Clocks in all of the pixels from

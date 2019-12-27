@@ -24,10 +24,17 @@
 // Note: even though this class is specifically for potentiometers, it
 // could also be used with any other type of sensor that represents its
 // position reading as a single analog voltage level that varies linearly
-// with the position, such as an LVDT.  Linearity is key; for example,
-// this class isn't suitable for the old Sharp reflected IR distance 
-// sensors, as those have non-linear voltage responses, and the software
-// would have to compensate for that to yield good results.
+// with the position, such as an LVDT.  Note that linearity is key here:
+// this code wouldn't work well with a sensor that produces an analog
+// voltage but has a NON-linear response curve with respect to measured
+// position.  For example, this code wouldn't work well with the old 
+// Sharp reflective IR proximity/distance sensors, since those have
+// power-law response curves.  To work with a non-linear sensor, you'd
+// have to subclass this class, override readRaw(), and add processing
+// that translates the non-linear sensor reading to a linear position
+// measurement.  Such processing is obviously a function of the physics
+// of the particular sensor, so it would have to be crafted for each
+// such sensor type.
 // 
 
 #include "plunger.h"

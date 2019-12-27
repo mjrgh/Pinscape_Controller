@@ -2,17 +2,28 @@
 #define ALTANALOGIN_H
 
 // This is a modified version of Scissors's FastAnalogIn, customized 
-// for the needs of the Pinscape TSL1410R reader.  We use 8-bit samples
-// to save memory (since we need to collect 1280 or 1536 samples,
-// depending on the sensor subtype), and we use the fastest sampling
-// parameters (determined through testing).  For maximum throughput,
-// we put the ADC in continuous mode and read samples with a DMA
-// channel.
+// for the needs of the Pinscape linear image sensor interfaces.  This
+// class has a bunch of features to make it even faster than FastAnalogIn,
+// including support for 8-bit and 12-bit resolution modes, continuous
+// sampling mode, coordination with DMA to move samples into memory
+// asynchronously, and client selection of the ADC timing modes.
 //
-// This modified version only works for the KL25Z.
+// We need all of this special ADC handling because the image sensors
+// have special timing requirements that we can only meet with the
+// fastest modes offered by the KL25Z ADC.  The image sensors all
+// operate by sending pixel data as a serial stream of analog samples,
+// so the minimum time to read a frame is approximately <number of
+// pixels in the frame> times <ADC sampling time per sample>.  The
+// sensors we currently support vary from 1280 to 1546 pixels per frame.
+// With the fastest KL25Z modes, that works out to about 3ms per frame,
+// which is just fast enough for our purposes.  Using only the default
+// modes in the mbed libraries, frame times are around 30ms, which is
+// much too slow to accurately track a fast-moving plunger.
+//
+// This class works ONLY with the KL25Z.
 //
 // Important!  This class can't coexist at run-time with the standard
-//  mbed library version of AnalogIn, or with the original version of 
+// mbed library version of AnalogIn, or with the original version of 
 // FastAnalogIn.  All of these classes program the ADC configuration 
 // registers with their own custom settings.  These registers are a 
 // global resource, and the different classes all assume they have 

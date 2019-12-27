@@ -246,7 +246,8 @@ public:
     // wait for the end of the current cycle
     void waitEndCycle()
     {
-        // clear the overflow flag
+        // clear the overflow flag (note the usual KL25Z convention for 
+        // hardware status registers like this: writing '1' clears the bit)
         tpm->SC |= TPM_SC_TOF_MASK;
         
         // The flag will be set at the next overflow
@@ -271,6 +272,18 @@ public:
 class NewPwmOut
 {
 public:
+    // Set up the output pin.
+    //
+    // 'invertedCycle' means that the output is OFF during the first phase 
+    // of each PWM period (the part between the start of the period and the
+    // duty cycle percentage) and ON during the second phase.  This makes
+    // the duty cycle setting in the write() calls the OFF duty cycle.  For
+    // example, with an inverted cycle, write(.1) means that the output will
+    // be OFF 10% of the time and ON 90% of the time.  This is primarily
+    // for complex timing situations where the caller has to be able to
+    // coordinate the alignment of up/down transitions on the output; in
+    // particularly, it allows the caller to use the waitEndCycle() to sync
+    // with the falling ege on the output.
     NewPwmOut(PinName pin, bool invertedCycle = false)
     {
         // determine the TPM unit number and channel
@@ -339,7 +352,7 @@ public:
     {
         // limit to 0..1 range
         val = (val < 0.0f ? 0.0f : val > 1.0f ? 1.0f : val);
-    
+        
         // Write the duty cycle register.  The argument value is a duty
         // cycle on a normalized 0..1 scale; for the hardware, we need to
         // renormalize to the 0..MOD scale, where MOD is the cycle length 

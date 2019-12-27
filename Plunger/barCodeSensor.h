@@ -130,7 +130,7 @@ template <int nBits, int leftBarWidth, int leftBarMaxOfs, int bitWidth>
 class PlungerSensorBarCode: public PlungerSensorImage<BarCodeProcessResult>
 {
 public:
-    PlungerSensorBarCode(PlungerSensorImageInterface &sensor, int npix) 
+    PlungerSensorBarCode(PlungerSensorImageInterface &sensor, int npix)
         : PlungerSensorImage(sensor, npix, (1 << nBits) - 1)
     {
         startOfs = 0;

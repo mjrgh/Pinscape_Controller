@@ -384,16 +384,19 @@ protected:
 //
 // Plunger base class for image-based sensors
 //
-template<class ProcessResult>
+template<typename ProcessResult>
 class PlungerSensorImage: public PlungerSensor
 {
 public:
-    PlungerSensorImage(PlungerSensorImageInterface &sensor, int npix, int nativeScale)
-        : PlungerSensor(nativeScale), sensor(sensor)
+    PlungerSensorImage(PlungerSensorImageInterface &sensor, 
+        int npix, int nativeScale, bool negativeImage = false) :
+        PlungerSensor(nativeScale), 
+        sensor(sensor),
+        native_npix(npix),
+        negativeImage(negativeImage),
+        axcTime(0),
+        extraIntTime(0)
     {
-        axcTime = 0;
-        extraIntTime = 0;
-        native_npix = npix;
     }
     
     // initialize the sensor
@@ -442,14 +445,14 @@ public:
     // See plunger.h for details on the arguments.
     virtual void sendStatusReport(USBJoystick &js, uint8_t flags)
     {
+        // start a timer to measure the processing time
+        Timer pt;
+        pt.start();
+
         // get pixels
         uint8_t *pix;
         uint32_t t;
         sensor.readPix(pix, t);
-
-        // start a timer to measure the processing time
-        Timer pt;
-        pt.start();
 
         // process the pixels and read the position
         int pos, rawPos;
@@ -515,7 +518,7 @@ public:
         // send the sensor status report headers
         js.sendPlungerStatus(n, pos, jsflags, sensor.getAvgScanTime(), processTime);
         js.sendPlungerStatus2(nativeScale, jfLo, jfHi, rawPos, axcTime);
-
+        
         // send any extra status headers for subclasses
         extraStatusHeaders(js, res);
         
@@ -523,6 +526,67 @@ public:
         extern bool plungerCalMode;
         if (!plungerCalMode)
         {
+            // If the sensor uses a negative image format (brighter pixels are
+            // represented by lower numbers in the pixel array), invert the scale
+            // back to a normal photo-positive scale, so that the client doesn't
+            // have to know these details.
+            if (negativeImage)
+            {
+                // Invert the photo-negative 255..0 scale to a normal,
+                // photo-positive 0..255 scale.  This is just a matter of
+                // calculating pos_pixel = 255 - neg_pixel for each pixel.
+                //
+                // There's a shortcut we can use here to make this loop go a
+                // lot faster than the naive approach.  Note that 255 decimal
+                // is 1111111 binary.  Subtracting any other binary number
+                // (in the range 0..255) from 255 will have the effect of 
+                // simply inverting all of the bits in the original number.  
+                // So 255 - X == ~X for any X in 0..255.  That might not sound
+                // like a big deal, but it's actually pretty great, because it
+                // means that we only have to operate on the bits individually,
+                // rather than doing arithmetic on the bytes.  And if we can
+                // operate on the bits individually, we can operate on them
+                // in the largest groups we can with the processor's native
+                // instruction set, which in the case of ARM is 32-bit DWORDs.
+                // In other words, we can iterate over the array as a DWORD
+                // array rather than a BYTE array, which cuts loop iterations
+                // by a factor of 4.
+                //
+                // One other small optimization we can apply is to notice that
+                // ~X == X ^ ~0, and X ^= ~0 happens to optimize to a single
+                // ARM instruction.  So we can make the ARM C++ compiler 
+                // translate this loop into three assembly instructions (XOR
+                // with immediate data and auto-increment pointer, decrement
+                // counter, jump if not zero), which is as fast as we could
+                // write it in assembly by hand.  (This really works in
+                // practice, too: I clocked this loop at 60us for the 
+                // 1500-pixel TCD1103 array.)
+                //
+                uint32_t *pix32 = reinterpret_cast<uint32_t*>(pix);
+                for (int i = n/4; i != 0; --i)
+                    *pix32++ ^= 0xFFFFFFFF;
+    
+                // Note!  If we ever needed to do this with a sensor where
+                // the pixel count isn't a multiple of four, we'd have to
+                // add some code here to deal with the stragglers (the one,
+                // two, or three extra pixels after the last group of four).
+                // That's not an issue with any currently supported sensor,
+                // nor is it likely to be in the future (because any large
+                // pixel array will be built out of repeated submodules, 
+                // which inherently makes power-of-two bases likely, and
+                // because engineers tend to have a bias for round numbers
+                // even when they have to choose arbitrarily).  So I'm not
+                // going to test for this possibility, to save the run-time
+                // cost.  And the worst that happens is we see a couple of
+                // glitchy-looking pixels at the end of the array in the 
+                // visualizer on the client.  But just in case, here's the
+                // code that would be needed...
+                //
+                // int extraPix = n & 3;  // remainder of n/4
+                // for (int i = 0; i < extraPix; ++i)
+                //     reinterpret_cast<uint8_t*>(pix32)[i] ^= 0xFF;
+            }            
+
             // send the pixels in report-sized chunks until we get them all
             int idx = 0;
             while (idx < n)
@@ -545,9 +609,14 @@ protected:
     
     // underlying hardware sensor interface
     PlungerSensorImageInterface &sensor;
-
+    
     // number of pixels
     int native_npix;
+    
+    // Does the sensor report a "negative" image?  This is like a photo
+    // negative, where brighter pixels are represented by lower numbers in
+    // the pixel array.
+    bool negativeImage;
     
     // Auto-exposure time.  This is for use by process() in the subclass.
     // On each frame processing iteration, it can adjust this to optimize

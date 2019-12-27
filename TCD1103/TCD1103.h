@@ -1,4 +1,4 @@
-// Toshiba TCD1103 linear CCD image sensor, 1x1500 pixels
+// Toshiba TCD1103 linear CCD image sensor, 1x1500 pixels.
 //
 // This sensor is conceptually similar to the TAOS TSL1410R (the original 
 // Pinscape sensor!).  Like the TSL1410R, it has a linear array of optical
@@ -7,32 +7,25 @@
 // electronic shutter, and a serial interface that clocks the pixels out
 // to the host in analog voltage level format.
 //
-// Mechanically, this sensor has an entirely different size scale vs the
-// TSL1410R.  The 1410R's sensor window is about the same size as a standard 
-// plunger's travel range (about 80mm), so the mechanical setup we use with
-// sensor is to situate the sensor adjacent to the plunger, with the pixel
-// window aligned with the plunger's axis of motion, so that the plunger
-// casts a shadow on the sensor at 1:1 scale.  The TCD1103, in contrast, is
-// a tiny little thing, with about an 8mm window.  That means that we have
-// to reduce the plunger shadow image by about 10X to fit the sensor, so an
-// optical lens is required.  This makes it more complicated to set up, but
-// it also adds the advantage of allowing us to focus the image, for a more
-// precise reading.  The shadow in the lens-less 1410R setup is usually about
-// four of five pixels wide, so we lose a lot of the sensor's native
-// precision to the poor optics - we only get about 1/50" resolution as a
-// result.  With a focusing lens, we could potentially get single-pixel
-// resolution, which would be about 1/500" resolution.  The reality will
-// be somewhat lower, depending on how hard we want to work at the optics,
-// but it should be possible to do much better than the unfocused 1410R.
+// The big physical difference between this sensor and the old TAOS sensors
+// is the size.  The TAOS sensors were (by some miracle) approximately the
+// same size as the plunger travel range, so we were able to take "contact"
+// images without any optics, by placing the plunger close to the sensor,
+// back-lighting it, and essentially taking a picture of its shadow.  The
+// Toshiba sensor, in contrast, has a pixel window that's only 8mm long, so
+// the contact image approach won't work.  Instead, we have to use a lens
+// to focus a reduced image (about 1:10 scale) on the sensor.  That makes
+// the physical setup more complex, but it has the great advantage that we
+// get a focused image.  The shadow was always fuzzy in  the old contact 
+// image approach, which reduced the effective resolution when determining 
+// the plunger position.  With a focused image, we can get single-pixel 
+// resolution.  With this Toshiba sensor's 1500 pixels, that's about 500 
+// dpi, which beats every other sensor we've come up with.
 //
-// The electronic interface to this sensor has some fairly tight timing
-// requirements, per the data sheet.  The sensor requires the host to 
-// provide a master clock that runs at 0.4 MHz to 4 MHz.  The data sheet's
-// timing diagrams imply that the master clock runs continuously, although
-// it's probably like the 1410R, where the clock is only needed when you 
-// want to run the shift register and can be stopped at other times.
+// The electronic interface to this sensor is similar to the TAOS, but it
+// has enough differences that we can't share the same code base.
 //
-// As with the 1410R, we'll have to use DMA for the ADC transfers in order
+// As with the 1410R, we have to use DMA for the ADC transfers in order
 // to keep up with the high data rate without overloading the KL25Z CPU.
 // With the 1410R, we're able to use the ADC itself as the clock source,
 // by running the ADC in continous mode and using its "sample ready" signal
@@ -42,14 +35,15 @@
 // sample completed.  This strategy won't work with the Toshiba sensor,
 // though, because the Toshiba sensor's timing sequence requires *two* clock
 // pulses per pixel.  I can't come up with a way to accomplish that with the
-// linked-DMA approach.  (I've tried!)
+// linked-DMA approach.  Instead, we'll have to generate a true clock signal
+// for the sensor, and drive the DMA conversions off of that clock.
 //
-// So instead, we'll have to generate a true clock signal for the sensor. 
-// The obvious way to do this (and the only way, as far as I can come up with)
-// is to use a TPM channel - that is, a PWM output.  TPM channels are designed
+// The obvious (and, as far as I can tell, only) way to generate the clock
+// signal with the KL25Z at the high frequency required is to use a TPM -
+// the KL25Z module that drives PWM outputs.  TPM channels are designed
 // precisely for this kind of work, so this is the right approach in terms of
 // suitability, but it has the downside that TPM units are an extremely scarce
-// resource on the KL25Z.  We only have three of them to work with.  Luckily
+// resource on the KL25Z.  We only have three of them to work with.  Luckily,
 // the rest of the Pinscape software only requires two of them: one for the
 // IR transmitter (which uses a TPM channel to generate the 41-48 kHz carrier
 // wave used by nearly all consumer IR remotes), and one for the TLC5940
@@ -65,7 +59,7 @@
 // generate a second clock signal at half the frequency of the master clock, 
 // and use that as the ADC trigger.  But as we just said, we only have three 
 // TPM units in the whole system, and two of them are already claimed for 
-// other uses, so we only have one unit to use here.  
+// other uses, so we only have one unit available for our use here.
 //
 // Fortunately, we can make do with one TPM unit, by taking advantage of a 
 // feature/quirk of the KL25Z ADC.  The quirk lets us take ADC samples at
@@ -83,6 +77,53 @@
 // ADC will always be ready again on the second tick.  So we'll get one ADC
 // sample for every two master clock ticks, exactly as we need.
 //
+// This is all possible because the ADC timing is deterministic, and runs on
+// the same clock as the TPM.  The KL25Z Subfamily Reference Manual explains
+// how to calculate the ADC conversion time for a given combination of mode
+// bits.  So we just have to pick an ADC mode, calculate its conversion time,
+// and then select a TPM period that's slightly more than 1/2 of the ADC
+// conversion time.
+//
+//
+// Pixel output signal
+//
+// The pixel output signal from this sensor is an analog voltage level.  It's
+// inverted from the brightness: higher brightness is represented by lower
+// voltage.  The dynamic range is only about 1V - dark pixels read at about 
+// 2V, and saturated pixels read at about 1V.  
+//
+//
+// Inverted logic signals
+//
+// The Toshiba data sheet recommends buffering the logic signal inputs from 
+// an MCU through a 74HC04 inverter, because the sensor's logic gates have
+// relatively high input capacitance that an MCU might not be able to drive 
+// fast enough directly to keep up with the sensor's timing requirements.  
+// SH in particular might be a problem because of its 150pF capacitance,
+// which implies about a 2us rise/fall time if driven directly by KL25Z
+// GPIOs, which is too slow.
+//
+// The software willo work with or without the logic inversion, in case anyone
+// wants to try implementing it with direct GPIO drive (not recommended) or 
+// with a non-inverting buffer in place of the 74HC04.  Simply instantiate the
+// class with the 'invertedLogicGates' template parameter set to false to use 
+// non-inverted logic.
+//
+//
+// How to connect to the KL25Z
+//
+// Follow the "typical drive circuit" presented in the Toshiba data sheet.
+// They leave some of the parts unspecified, so here are the specific values
+// we used for our reference implementation:
+//
+//   - 3.3V power supply
+//   - 74HC04N hex inverter for the logic gate inputs (fM, SH, ICG)
+//   - 0.1uF ceramic + 10uF electrolytic decoupling capacitors (GND to Vcc))
+//   - BC212A PNP transistor for the output drive (OS), with:
+//     - 150 ohm resistor on the base
+//     - 150 ohm resistor between collector and GND
+//     - 2.2K ohm resistor between emitter and Vcc
+//
 
 #include "config.h"
 #include "NewPwm.h"
@@ -90,12 +131,6 @@
 #include "SimpleDMA.h"
 #include "DMAChannels.h"
 
-
-// Logic Gate Inverters:  if invertedLogicGates is true, it means that the
-// hardware is buffering all of the logic signals (fM, ICG, SH) through an
-// inverter.  The data sheet recommends using a 74HC04 between the host MCU
-// and the chip logic gates because of the high capacitive load on some of
-// the gates (particularly SH, 150pF).  
 
 template<bool invertedLogicGates> class TCD1103
 {
@@ -121,7 +156,7 @@ public:
 
         // Calibrate the ADC for best accuracy
         os.calibrate();
-
+        
         // ADC sample conversion time.  This must be calculated based on the
         // combination of parameters selected for the os() initializer above.
         // See the KL25 Sub-Family Reference Manual, section 28.4.45, for the
@@ -151,14 +186,13 @@ public:
         // results by using half of the ADC time plus a small buffer time.
         //
         fm.getUnit()->period(masterClockPeriod = ADC_TIME/2 + 0.1e-6f);
-        printf("TCD1103 master clock period = %g\r\n", masterClockPeriod);
         
         // Start the master clock running with a 50% duty cycle
         fm.write(0.5f);
 
-        // allocate our double pixel buffers
-        pix1 = new uint8_t[nPixSensor*2];
-        pix2 = pix1 + nPixSensor;
+        // Allocate our double pixel buffers.  
+        pix1 = new uint8_t[nPixAlo * 2];
+        pix2 = pix1 + nPixAlo;
         
         // put the first DMA transfer into the first buffer (pix1)
         pixDMA = 0;
@@ -202,7 +236,7 @@ public:
     // call, at which point this buffer will be reused for the new capture.
     void getPix(uint8_t * &pix, uint32_t &t)
     {
-        // return the pixel array that ISN'T assigned to the DMA
+        // Return the pixel array that ISN'T assigned to the DMA.
         if (pixDMA)
         {
             // DMA owns pix2, so the stable array is pix1
@@ -215,15 +249,12 @@ public:
             pix = pix2;
             t = t2;
         }
-
-        // debugging - print out the pixel transfer time stats periodically
-        static int n;
-        ++n;
-        if (n > 1000)
-        {
-            printf("TCD1103 scan last=%d, min=%d, max=%d (us)\r\n", dtPixXfer, minXferTime, maxXferTime);
-            n = 0;
-        }
+        
+        // The raw pixel array we transfer in from the sensor on the serial 
+        // connection consists of 32 dummy elements, followed by 1500 actual
+        // image pixels, followed by 14 dummy elements.  Skip the leading 32 
+        // dummy pixels when passing the buffer back to the client.
+        pix += 32;
     }
     
     // release the client's pixel buffer
@@ -242,8 +273,8 @@ public:
 protected:
     // Start an image capture from the sensor.  Waits the previous
     // capture to finish if it's still running, then starts a new one
-    // and returns immediately.  The new capture proceeds autonomously 
-    // via the DMA hardware, so the caller can continue with other 
+    // and returns immediately.  The new capture proceeds asynchronously 
+    // via DMA hardware transfer, so the client can continue with other 
     // processing during the capture.
     void startTransfer()
     {
@@ -257,9 +288,12 @@ protected:
             clientOwnsStablePix = true;
         }
         
+        // figure our destination buffer
+        uint8_t *dst = pixDMA ? pix2 : pix1;
+        
         // Set up the active pixel array as the destination buffer for 
         // the ADC DMA channel. 
-        os_dma.destination(pixDMA ? pix2 : pix1, true);
+        os_dma.destination(dst, true);
         
         // Start the read cycle by sending the ICG/SH pulse sequence
         uint32_t tNewInt = gen_SH_ICG_pulse(true);
@@ -288,6 +322,9 @@ protected:
     // the DMA transfer completes.
     void transferDone()
     {
+        // stop the ADC triggering
+        os.stop();
+
         // add this sample to the timing statistics (for diagnostics and
         // performance measurement)
         uint32_t now = t.read_us();
@@ -298,22 +335,20 @@ protected:
         // collect debug statistics
         if (dt < minXferTime) minXferTime = dt;
         if (dt > maxXferTime) maxXferTime = dt;
-        
-        // check if there's still time left before we reach the minimum 
-        // requested integration period
+
+        // figure how long we've been integrating so far on this cycle 
         uint32_t dtInt = now - tInt;
-        if (dtInt < tIntMin)
-        {
-            // wait for the remaining interval before starting the next
-            // integration
-            integrationTimeout.attach_us(this, &TCD1103::startTransfer, tIntMin - dtInt);
-        }
-        else
-        {
-            // we've already reached the minimum integration time - start
-            // the next transfer immediately
-            startTransfer();
-        }
+        
+        // Figure the time to the start of the next transfer.  Wait for the
+        // remainder of the current integration period if we haven't yet
+        // reached the requested minimum, otherwise just start almost
+        // immediately.  (Not *actually* immediately: we don't want to start 
+        // the new transfer within this interrupt handler, because the DMA
+        // IRQ doesn't reliably clear if we start a new transfer immediately.)
+        uint32_t dtNext = dtInt < tIntMin ? tIntMin - dtInt : 1;
+        
+        // Schedule the next transfer
+        integrationTimeout.attach_us(this, &TCD1103::startTransfer, dtNext);
     }
 
     // Generate an SH/ICG pulse.  This transfers the pixel data from the live
@@ -478,10 +513,6 @@ protected:
         //   - Wait for the new TPM cycle
         //   - End the ICG pulse
         //
-
-        // The timing is so tight here that we want to be sure we're not
-        // interrupted by other tasks - disable interrupts.
-        __disable_irq();
         
         // disable the TPM->ADC trigger and abort the current conversion
         os.stop();
@@ -505,9 +536,9 @@ protected:
         // TPM cycle 1us from now.  (This step takes about 3 instructions.)
         os.resume();
         
-        // Okay, everything is queued up!  We just have to fire the starting
-        // pistol on the sensor at the right moment.  And that right moment 
-        // is the start of the next TPM cycle.  Wait for it...
+        // Eerything is queued up!  We just have to fire the starting gun
+        // on the sensor at the right moment.  And that right moment is the 
+        // start of the next TPM cycle.  Wait for it...
         fm.waitEndCycle();
         
         // And go!
@@ -515,9 +546,6 @@ protected:
         
         // note the start time of the transfer
         tXfer = t.read_us();
-        
-        // done with the critical timing section
-        __enable_irq();
         
         // return the timestamp of the end of the SH pulse - this is the start
         // of the new integration period that we just initiated
@@ -548,6 +576,13 @@ protected:
     // file on each read cycle, including the dummies, so we have to make
     // room for the dummy pixels during each read.
     static const int nPixSensor = 1546;
+    
+    // Figure the number of pixels to allocate per pixel buffer.  Round
+    // up to the next 4-byte boundary, so that the buffers are both DWORD-
+    // aligned.  (This allows using DWORD pointers into the buffer to 
+    // operate on buffer pixels four at a time, such as in the negative 
+    // image inversion code in the generic PlungerSensorImage base class.)
+    static const int nPixAlo = (nPixSensor + 3) & ~3;
     
     // pixel buffers - we keep two buffers so that we can transfer the
     // current sensor data into one buffer via DMA while we concurrently
