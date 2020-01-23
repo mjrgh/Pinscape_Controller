@@ -1004,7 +1004,8 @@
 //                  are the only ones supported in the software.  This allows for
 //                  adding new designs or independent designs in the future.
 //                    0 = Standalone KL25Z (no expansion boards)
-//                    1 = Pinscape expansion boards
+//                    1 = Pinscape Expansion Boards
+//                    2 = Pinscape All-In-One (AIO) (Oak Micros)
 //
 //         byte 4 = board set interface revision.  This *isn't* the version number
 //                  of the board itself, but rather of its software interface.  In
@@ -1012,16 +1013,21 @@
 //                  for the board changes.  It only changes when a revision is made
 //                  that affects the software, such as a GPIO pin assignment.
 //
-//                  For Pinscape expansion boards (board set type = 1):
+//                  For Pinscape Expansion Boards (board set type = 1):
 //                    0 = first release (Feb 2016)
+//
+//                  For AIO (board set type = 2):
+//                    0 = first release (2019)
 //
 //         bytes 5:8 = additional hardware-specific data.  These slots are used
 //                  to store extra data specific to the expansion boards selected.
 //
-//                  For Pinscape expansion boards (board set type = 1):
-//                    byte 5 = number of main interface boards
+//                  For Pinscape Expansion Boards (board set type = 1) and
+//                  AIO (type = 2):
+//                    byte 5 = number of main interface or AIO boards (always 1)
 //                    byte 6 = number of MOSFET power boards
 //                    byte 7 = number of chime boards
+//                  
 //
 // 15 -> Night mode setup.  
 //

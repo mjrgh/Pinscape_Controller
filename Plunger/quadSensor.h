@@ -121,17 +121,20 @@ public:
         timer.start();
     }
     
-    // Auto-zero.  Return to the park position
+    // Auto-zero.  Return to the park position.  If we're using reverse
+    // orientation, go to the park position distance from the top end
+    // of the scale.
     virtual void autoZero()
     {
-        pos = parkPos;
+        pos = reverseOrientation ? nativeScale - parkPos : parkPos;
     }
         
     // Begin calibration.  We can assume that the plunger is at the
-    // park position when calibration starts.
+    // park position when calibration starts, so perform an explicit
+    // auto-zeroing operation.
     virtual void beginCalibration(Config &)
     {
-        pos = parkPos;
+        autoZero();
     }
     
     // read the sensor

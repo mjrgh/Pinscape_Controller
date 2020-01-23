@@ -640,7 +640,8 @@ struct Config
     struct
     {
         uint8_t typ;        // expansion board set type:
-                            //    1 -> Pinscape expansion boards
+                            //    1 -> Pinscape Expansion Boards
+                            //    2 -> Pinscape All-In-One (AIO)
         uint8_t vsn;        // board set interface version
         uint8_t ext[3];     // board set type-specific extended data
         
