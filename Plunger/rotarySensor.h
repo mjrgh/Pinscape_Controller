@@ -1,10 +1,17 @@
 // Plunger sensor implementation for rotary absolute encoders
 //
 // This implements the plunger interfaces for rotary absolute encoders.  A
-// rotary encoder measures the angle of a rotating shaft.  For plunger sensing,
-// we can convert the plunger's linear motion into angular motion using a 
-// mechanical linkage between the plunger rod and a rotating shaft positioned
-// at a fixed point, somewhere nearby, but off of the plunger's axis:
+// rotary encoder measures the angle of a rotating shaft.  An absolute encoder
+// is one where the microcontroller can ask the sensor for its current angular
+// position at any time.  (As opposed to incremental encoders, which don't have
+// any notion of their current position, but can only signal the host on each
+// change in position.)
+//
+// 
+// For plunger sensing, we can convert the plunger's linear motion into angular
+// motion using a mechanical link between the plunger rod and a rotating shaft 
+// positioned at a fixed point, somewhere nearby, but away from the plunger's 
+// axis of motion:
 //
 //    =X=======================|===   <- plunger, X = connector attachment point
 //      \
@@ -13,19 +20,20 @@
 //         *                          <- rotating shaft, at a fixed position
 //
 // As the plunger moves, the angle of the connector relative to the fixed
-// shaft position changes in a predictable way, so by measuring the rotational
-// position of the shaft at any given time, we can infer the plunger's
-// linear position.
+// shaft position changes in a predictable way, so we can infer the plunger's
+// linear position at any given time by measuring the current rotational
+// angle of the shaft.
 //
-// (Note that the mechanical diagram is simplified for ASCII art purposes.
+// The mechanical diagram above is, obviously, simplified for ASCII art's sake.
 // What's not shown is that the distance between the rotating shaft and the
 // "X" connection point on the plunger varies as the plunger moves, so the
 // mechanical linkage requires some way to accommodate that changing length.
-// One way is to use a spring as the linkage; another is to use a rigid
-// connector with a sliding coupling at one or the other end.  We leave
-// these details up to the mechanical design; the software isn't affected
-// as long as the basic relationship between linear and angular motion as
-// shown in the diagram be achieved.)
+// If the connector is a rigid rod, it has to be able to slide at one or
+// the other connection points.  Alternatively, rather than using a rigid
+// linkage, we can use a spring or elastic band.  We leave these details up 
+// to the mechanical design, since the software isn't affected by that, as 
+// long as the basic relationship between linear and angular motion as shown
+// in the diagram is achieved.
 //
 //
 // Translating the angle to a linear position
@@ -33,11 +41,15 @@
 // There are two complications to translating the angular reading back to
 // a linear plunger position.
 //
-// 1. We have to consider the sensor's zero point to be arbitrary.  That means
-// that the zero point could be somewhere within the plunger's travel range,
-// so readings might "wrap" - e.g., we might see a series of readings when
-// the plunger is moving in one direction like 4050, 4070, 4090, 14, 34 (note
-// how we've "wrapped" past the 4096 boundary).  
+// 1. We have to consider the sensor's zero point to be arbitrary, because
+// these sorts of sensors don't typically give the user a way to align the
+// zero point at a desired physical position.  The zero point will just be
+// wherever it ends up after installation.  The zero point could easily end 
+// up being somewhere in the middle of the plunger's travel range, which
+// means that readings might "wrap" - e.g., we might see a series of readings 
+// when the plunger is moving in one direction like this: 4050, 4070, 4090, 
+// 14, 34 (note how we "wrapped" past some maximum angle reading for the
+// sensor and went back to zero, then continued from there).
 //
 // To deal with this, we have to make a couple of assumptions:
 //

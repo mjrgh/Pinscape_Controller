@@ -516,29 +516,33 @@ void diagLED(void)
         (diagLEDState >> 2) & 0x01);
 }
 
-// check an output port assignment to see if it conflicts with
+// check an output port or pin assignment to see if it conflicts with
 // an on-board LED segment
 struct LedSeg 
 { 
     bool r, g, b; 
     LedSeg() { r = g = b = false; } 
 
+    // check an output port to see if it conflicts with one of the LED ports
     void check(LedWizPortCfg &pc)
     {
         // if it's a GPIO, check to see if it's assigned to one of
         // our on-board LED segments
         int t = pc.typ;
         if (t == PortTypeGPIOPWM || t == PortTypeGPIODig)
-        {
-            // it's a GPIO port - check for a matching pin assignment
-            PinName pin = wirePinName(pc.pin);
-            if (pin == LED1)
-                r = true;
-            else if (pin == LED2)
-                g = true;
-            else if (pin == LED3)
-                b = true;
-        }
+            check(pc.pin);
+    }
+
+    // check a pin to see if it conflicts with one of the diagnostic LED ports    
+    void check(uint8_t pinId)
+    {
+        PinName pin = wirePinName(pinId);
+        if (pin == LED1)
+            r = true;
+        else if (pin == LED2)
+            g = true;
+        else if (pin == LED3)
+            b = true;
     }
 };
 
@@ -555,10 +559,57 @@ void initDiagLEDs(Config &cfg)
     LedSeg l;
     for (int i = 0 ; i < MAX_OUT_PORTS && cfg.outPort[i].typ != PortTypeDisabled ; ++i)
         l.check(cfg.outPort[i]);
+        
+    // check the button inputs
+    for (int i = 0 ; i < countof(cfg.button) ; ++i)
+        l.check(cfg.button[i].pin);
+        
+    // check plunger inputs
+    if (cfg.plunger.enabled && cfg.plunger.sensorType != PlungerType_None)
+    {
+        for (int i = 0 ; i < countof(cfg.plunger.sensorPin) ; ++i)
+            l.check(cfg.plunger.sensorPin[i]);
+    }
     
-    // We now know which segments are taken for LedWiz use and which
+    // check the TV ON pin assignments
+    l.check(cfg.TVON.statusPin);
+    l.check(cfg.TVON.latchPin);
+    l.check(cfg.TVON.relayPin);
+
+    // check  the TLC5940 pins
+    if (cfg.tlc5940.nchips != 0)
+    {
+        l.check(cfg.tlc5940.sin);
+        l.check(cfg.tlc5940.sclk);
+        l.check(cfg.tlc5940.xlat);
+        l.check(cfg.tlc5940.blank);
+        l.check(cfg.tlc5940.gsclk);
+    }
+    
+    // check 74HC595 pin assignments
+    if (cfg.hc595.nchips != 0)
+    {
+        l.check(cfg.hc595.sin);
+        l.check(cfg.hc595.sclk);
+        l.check(cfg.hc595.latch);
+        l.check(cfg.hc595.ena);
+    }
+    
+    // check TLC59116 pin assignments
+    if (cfg.tlc59116.chipMask != 0)
+    {
+        l.check(cfg.tlc59116.sda);
+        l.check(cfg.tlc59116.scl);
+        l.check(cfg.tlc59116.reset);
+    }
+    
+    // check the IR remove control hardware
+    l.check(cfg.IR.sensor);
+    l.check(cfg.IR.emitter);
+    
+    // We now know which segments are taken for other uses and which
     // are free.  Create diagnostic ports for the ones not claimed for
-    // LedWiz use.
+    // other purposes.
     if (!l.r) ledR = new DigitalOut(LED1, 1);
     if (!l.g) ledG = new DigitalOut(LED2, 1);
     if (!l.b) ledB = new DigitalOut(LED3, 1);

@@ -39,12 +39,15 @@
 // effective dynamic range after quantization is about 100 steps.  That 
 // would be pretty terrible if the goal were to take pictures for an art
 // gallery, and there are things we could do in the electronic interface 
-// to improve it; in particular, we could use an op-amp to expand the 
+// to improve it.  In particular, we could use an op-amp to expand the 
 // voltage range on the ADC input and remove the DC offset, so that the
-// signal going into the ADC covers the ADC's full 0V - 3.3V range.  But 
-// there's need for that for our purposes here; 100 steps is perfectly
-// adequate for our edge sensing, especially given the sensor's low 
-// noise level.
+// signal going into the ADC covers the ADC's full 0V - 3.3V range.  That
+// technique is actually used in some other projects using this sensor
+// where the goal is to yield pictures as the end result.  But it's
+// pretty complicated to set up and fine-tune to get the voltage range
+// expansion just right, and we really don't need it; the edge detection
+// works fine with what we get directly from the sensor.
+
 
 
 #include "plunger.h"
