@@ -569,6 +569,9 @@ void initDiagLEDs(Config &cfg)
     {
         for (int i = 0 ; i < countof(cfg.plunger.sensorPin) ; ++i)
             l.check(cfg.plunger.sensorPin[i]);
+            
+        l.check(cfg.plunger.cal.btn);
+        l.check(cfg.plunger.cal.led);
     }
     
     // check the TV ON pin assignments
