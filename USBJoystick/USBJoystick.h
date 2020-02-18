@@ -196,6 +196,14 @@ public:
      */
     bool sendPlungerStatusBarcode(
         int nbits, int codetype, int startOfs, int pixPerBit, int raw, int mask);
+        
+    /**
+     * Send a quadrature sensor status report header.
+     *
+     * @param chA channel "A" reading
+     * @param chB channel "B" reading
+     */
+    bool sendPlungerStatusQuadrature(int chA, int chB);
     
     /**
      * Write an exposure report.  We'll fill out a report with as many pixels as

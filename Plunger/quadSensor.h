@@ -153,6 +153,15 @@ public:
         return true;
     }
     
+    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags)
+    {
+        // send the common status report
+        PlungerSensor::sendStatusReport(js, flags);
+
+        // send the extra quadrature sensor status report
+        js.sendPlungerStatusQuadrature((st & 0x01) != 0, (st & 0x02) != 0);
+    }
+    
     // figure the average scan time in microseconds
     virtual uint32_t getAvgScanTime() 
     { 
@@ -209,8 +218,8 @@ private:
     // lookup.
     inline void transition(int stNew)
     {
-        // Transition matrix: this gives the direction of motion
-        // when we switch from state dir[n] to state dir[n][m].
+        // Transition matrix: dir[n][m] gives the direction of 
+        // motion when we switch from state 'n' to state 'm'.
         // The state number is formed by the two-bit number B:A,
         // where each bit is 1 if the channel pulse is on and 0
         // if the channel pulse is off.  E.g., if chA is OFF and 

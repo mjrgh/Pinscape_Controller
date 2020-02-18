@@ -198,7 +198,7 @@ bool USBJoystick::sendPlungerStatusBarcode(
     memset(report.data, 0, sizeof(report.data));
     
     // Set the special status bits to indicate it's an extended
-    // exposure report.
+    // status report for barcode sensors
     put(0, 0x87FF);
     
     // start at the second byte
@@ -223,6 +223,28 @@ bool USBJoystick::sendPlungerStatusBarcode(
     ofs += 2;
     put(ofs, uint16_t(mask));
     ofs += 2;
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::sendPlungerStatusQuadrature(int chA, int chB)
+{
+    HID_REPORT report;
+    memset(report.data, 0, sizeof(report.data));
+    
+    // set the status bits to indicate that it's an extended
+    // status report for quadrature sensors
+    put(0, 0x87FF);
+    int ofs = 2;
+    
+    // write the report subtype (3)
+    report.data[ofs++] = 3;
+    
+    // write the channel "A" and channel "B" values
+    report.data[ofs++] = static_cast<uint8_t>(chA);
+    report.data[ofs++] = static_cast<uint8_t>(chB);
     
     // send the report
     report.length = reportLen;

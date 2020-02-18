@@ -187,6 +187,14 @@
 //    bytes 10:11 = mask of successfully read bar code bits; a '1' bit means
 //                that the bit was read successfully, '0' means the bit was
 //                unreadable
+//
+// An optional third message provides additional information specifically
+// for digital quadrature sensors:
+//
+//    bytes 0:1 = 0x87FF
+//    byte  2   = 3 -> digital quadrature sensor status report
+//    byte  3   = "A" channel reading (0 or 1)
+//    byte  4   = "B" channel reading (0 or 1)
 //   
 //
 // If the sensor is an imaging sensor type, this will be followed by a
