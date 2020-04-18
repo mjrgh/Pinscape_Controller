@@ -58,7 +58,7 @@ class PlungerSensorImageInterfaceTCD1103: public PlungerSensorImageInterface
 {
 public:
     PlungerSensorImageInterfaceTCD1103(PinName fm, PinName os, PinName icg, PinName sh)
-        : PlungerSensorImageInterface(1500), sensor(fm, os, icg, sh)
+        : PlungerSensorImageInterface(1546), sensor(fm, os, icg, sh)
     {
     }
 
@@ -89,7 +89,7 @@ class PlungerSensorTCD1103: public PlungerSensorImage<int>
 {
 public:
     PlungerSensorTCD1103(PinName fm, PinName os, PinName icg, PinName sh)
-        : PlungerSensorImage(sensor, 1500, 1499, true), sensor(fm, os, icg, sh)
+        : PlungerSensorImage(sensor, 1546, 1545, true), sensor(fm, os, icg, sh)
     {
     }
     
@@ -102,11 +102,41 @@ protected:
     // we see starting at the "far" end.
     virtual bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {
+        // The TCD1103's pixel file that it reports on the wire has the 
+        // following internal structure:
+        //
+        //   16 dummy elements, fixed at the dark charge level
+        //   13 light-shielded pixels (live pixels, covered with a shade in the sensor)
+        //   3 dummy "buffer" pixels (to allow for variation in shade alignment)
+        //   1500 image pixels
+        //   14 dummy elements (the data sheet doesn't say exactly what these are physically)
+        //
+        // The sensor holds the 16 dummy elements at the dark charge level,
+        // so they provide a reference point for the darkest reading possible.
+        // The light-shielded pixels serve essentially the same purpose, in
+        // that they *also* should read out at the dark charge level.  But
+        // the shaded pixels can be also used for diagnostics, to distinguish
+        // between problems in the CCD proper and problems in the interface
+        // electronics.  If the dummy elements are reading at the dark level
+        // but the shielded pixels aren't, you have a CCD problem; if the
+        // dummy pixels aren't reading at the dark level, the interface
+        // electronics are suspect.
+        //
+        // For our purposes, we can simply ignore the dummy pixels at either
+        // end.  The diagnostic status report for the Config Tool sends the
+        // full view including the dummy pixels, so any diagnostics that the
+        // user wants to do using the dummy pixels can be done on the PC side.
+        //
+        // Deduct the dummy pixels so that we only scan the true image
+        // pixels in our search for the plunger edge.
+        int startOfs = 32;
+        n -= 32 + 14;
+        
         // Scan the pixel array to determine the actual dynamic range 
         // of this image.  That will let us determine what consistutes
         // "bright" when we're looking for the bright spot.
         uint8_t pixMin = 255, pixMax = 0;
-        const uint8_t *p = pix;
+        const uint8_t *p = pix + startOfs;
         for (int i = n; i != 0; --i)
         {
             uint8_t c = *p++;
@@ -120,7 +150,7 @@ protected:
         
         // Scan for the first bright-enough pixel.  Remember that we're
         // working with a negative image, so "brighter" is "less than".
-        p = pix;
+        p = pix + startOfs;
         for (int i = n; i != 0; --i, ++p)
         {
             if (*p < threshold)

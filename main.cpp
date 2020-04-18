@@ -4780,8 +4780,11 @@ void powerStatusUpdate(Config &cfg)
                 if ((cfg.IRCommand[i].flags & IRFlagTVON) != 0)
                 {
                     // It's a TV ON command - check if it's the one we're
-                    // looking for.
-                    if (n == tvon_ir_state)
+                    // looking for.  We can match any code starting at the
+                    // current state.  (We ignore codes BEFORE the current
+                    // state, because we've already processed them on past
+                    // iterations.)
+                    if (n >= tvon_ir_state)
                     {
                         // It's the one.  Start transmitting it by
                         // pushing its virtual button.

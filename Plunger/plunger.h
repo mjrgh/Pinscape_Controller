@@ -538,53 +538,47 @@ public:
                 //
                 // There's a shortcut we can use here to make this loop go a
                 // lot faster than the naive approach.  Note that 255 decimal
-                // is 1111111 binary.  Subtracting any other binary number
-                // (in the range 0..255) from 255 will have the effect of 
-                // simply inverting all of the bits in the original number.  
-                // So 255 - X == ~X for any X in 0..255.  That might not sound
-                // like a big deal, but it's actually pretty great, because it
-                // means that we only have to operate on the bits individually,
-                // rather than doing arithmetic on the bytes.  And if we can
-                // operate on the bits individually, we can operate on them
-                // in the largest groups we can with the processor's native
-                // instruction set, which in the case of ARM is 32-bit DWORDs.
-                // In other words, we can iterate over the array as a DWORD
-                // array rather than a BYTE array, which cuts loop iterations
-                // by a factor of 4.
+                // is 1111111 binary.  Subtracting any number in (0..255) from
+                // 255 is the same as inverting the bits in the other number.
+                // That is, 255 - X == ~X for all X in 0..255.  That's useful
+                // because it means that we can compute (255-X) as a purely
+                // bitwise operation, which means that we can perform it on
+                // blocks of bytes instead of individual bytes.  On ARM, we
+                // can perform bitwise operations four bytes at a time via
+                // DWORD instructions.  This lets us compute (255-X) for N
+                // bytes using N/4 loop iterations.
                 //
                 // One other small optimization we can apply is to notice that
-                // ~X == X ^ ~0, and X ^= ~0 happens to optimize to a single
-                // ARM instruction.  So we can make the ARM C++ compiler 
-                // translate this loop into three assembly instructions (XOR
-                // with immediate data and auto-increment pointer, decrement
-                // counter, jump if not zero), which is as fast as we could
-                // write it in assembly by hand.  (This really works in
-                // practice, too: I clocked this loop at 60us for the 
-                // 1500-pixel TCD1103 array.)
+                // ~X == X ^ ~0, and that X ^= ~0 can be performed with a
+                // single ARM instruction.  So we can make the ARM C++ compiler
+                // translate the loop body into just three instructions:  XOR 
+                // with immediate data and auto-increment pointer, decrement 
+                // the counter, and jump if not zero.  That's as fast we could
+                // do it in hand-written assembly.  I clocked this loop at 
+                // 60us for the 1536-pixel TCD1103 array.
+                //
+                // Note two important constraints:
+                //
+                //  - 'pix' must be aligned on a DWORD (4-byte) boundary.
+                //    This is REQUIRED, because the XOR in the loop uses a
+                //    DWORD memory operand, which will halt the MCU with a
+                //    bus error if the pointer isn't DWORD-aligned.
+                //
+                //  - 'n' must be a multiple of 4 bytes.  This isn't strictly
+                //    required, but if it's not observed, the last (N - N/4)
+                //    bytes won't be inverted.
+                //
+                // The only sensor that uses a negative image is the TCD1103.
+                // Its buffer is DWORD-aligned because it's allocated via
+                // malloc(), which always does worst-case alignment.  Its
+                // buffer is 1546 bytes long, which violates the multiple-of-4
+                // rule, but inconsequentially, as the last 14 bytes represent
+                // dummy pixels that can be ignored (so it's okay that we'll 
+                // miss inverting the last two bytes).
                 //
                 uint32_t *pix32 = reinterpret_cast<uint32_t*>(pix);
                 for (int i = n/4; i != 0; --i)
                     *pix32++ ^= 0xFFFFFFFF;
-    
-                // Note!  If we ever needed to do this with a sensor where
-                // the pixel count isn't a multiple of four, we'd have to
-                // add some code here to deal with the stragglers (the one,
-                // two, or three extra pixels after the last group of four).
-                // That's not an issue with any currently supported sensor,
-                // nor is it likely to be in the future (because any large
-                // pixel array will be built out of repeated submodules, 
-                // which inherently makes power-of-two bases likely, and
-                // because engineers tend to have a bias for round numbers
-                // even when they have to choose arbitrarily).  So I'm not
-                // going to test for this possibility, to save the run-time
-                // cost.  And the worst that happens is we see a couple of
-                // glitchy-looking pixels at the end of the array in the 
-                // visualizer on the client.  But just in case, here's the
-                // code that would be needed...
-                //
-                // int extraPix = n & 3;  // remainder of n/4
-                // for (int i = 0; i < extraPix; ++i)
-                //     reinterpret_cast<uint8_t*>(pix32)[i] ^= 0xFF;
             }            
 
             // send the pixels in report-sized chunks until we get them all

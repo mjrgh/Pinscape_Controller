@@ -159,16 +159,18 @@ public:
         
         // ADC sample conversion time.  This must be calculated based on the
         // combination of parameters selected for the os() initializer above.
-        // See the KL25 Sub-Family Reference Manual, section 28.4.45, for the
-        // formula.
-        const float ADC_TIME = 2.2083333e-6f; // 6-cycle long sampling, no averaging
+        // See the KL25 Sub-Family Reference Manual, section 28.4.4.5, for the
+        // formula.  We operate in single-sample mode, so when you read the
+        // Reference Manual tables, the sample time value to use is the
+        // "First or Single" value.
+        const float ADC_TIME = 2.1041667e-6f; // 6-cycle long sampling, no averaging
 
         // Set the TPM cycle time to satisfy our timing constraints:
         // 
         //   Tm + epsilon1 < A < 2*Tm - epsilon2
         //
         // where A is the ADC conversion time and Tm is the master clock
-        // period, and the epsilons are a margin of safety for any 
+        // period, and the epsilons provide a margin of safety for any 
         // non-deterministic component to the timing of A and Tm.  The
         // epsilons could be zero if the timing of the ADC is perfectly
         // deterministic; this must be determined empirically.
@@ -185,7 +187,7 @@ public:
         // fast plunger motion accurately.  Empirically, we can get reliable
         // results by using half of the ADC time plus a small buffer time.
         //
-        fm.getUnit()->period(masterClockPeriod = ADC_TIME/2 + 0.1e-6f);
+        fm.getUnit()->period(masterClockPeriod = ADC_TIME/2 + 0.25e-6f);
         
         // Start the master clock running with a 50% duty cycle
         fm.write(0.5f);
@@ -249,12 +251,6 @@ public:
             pix = pix2;
             t = t2;
         }
-        
-        // The raw pixel array we transfer in from the sensor on the serial 
-        // connection consists of 32 dummy elements, followed by 1500 actual
-        // image pixels, followed by 14 dummy elements.  Skip the leading 32 
-        // dummy pixels when passing the buffer back to the client.
-        pix += 32;
     }
     
     // release the client's pixel buffer
@@ -370,6 +366,9 @@ protected:
     //
     uint32_t gen_SH_ICG_pulse(bool start_dma_xfer)
     {
+        // Make sure the ADC is stopped
+        os.stop();
+
         // If desired, prepare to start the DMA transfer for the ADC data.
         // (Set up a dummy location to write in lieu of the DMA register if
         // DMA initiation isn't required, so that we don't have to take the
@@ -436,9 +435,9 @@ protected:
         // with the start of an ADC cycle.  If we get that wrong, all of our
         // ADC samples will be off by half a clock, so every sample will be
         // the average of two adjacent pixels instead of one pixel.  That
-        // would lose half of the image resolution, which would obviously
-        // be bad.  So make certain we're at the tail end of an ADC cycle
-        // by waiting for the ADC "ready" bit to be set.
+        // would have the effect of shifting the image by half a pixel,
+        // which could make our edge detection jitter by one pixel from one
+        // frame to the next.  So we definitely want to avoid this.
         //
         // The end of the SH pulse triggers the start of a new integration 
         // cycle, so note the time of that pulse for image timestamping 
@@ -447,15 +446,12 @@ protected:
         // represent the pixels from the last time we pulsed SH.
         //
         icg = logicLow;
-        icg = logicLow;  // for timing, adds about 60ns
-        icg = logicLow;  // ditto, another 60ns, total is now 120ns > min 100ns
-        icg = logicLow;  // one more to be safer
+        icg = logicLow;  // for timing, adds about 150ns > min 100ns
 
         sh = logicHigh;  // take SH high
         
         wait_us(1);      // >1000ns delay
         sh = logicHigh;  // a little more padding to be sure we're over the minimum
-        sh = logicHigh;  // more padding
         
         sh = logicLow;   // take SH low
         
@@ -514,9 +510,6 @@ protected:
         //   - End the ICG pulse
         //
         
-        // disable the TPM->ADC trigger and abort the current conversion
-        os.stop();
-
         // Enable the DMA controller for the new transfer from the ADC.
         // The sensor will start clocking out new samples at the ICG rising
         // edge, so the next ADC sample to complete will represent the first
@@ -530,10 +523,24 @@ protected:
         // wait for the start of a new master clock cycle
         fm.waitEndCycle();
         
+        // Wait one more cycle to be sure the DMA is ready.  Empirically,
+        // this extra wait is actually required; evidently DMA startup has
+        // some non-deterministic timing element or perhaps an asynchronous
+        // external dependency.  In any case, *without* this extra wait,
+        // the DMA transfer sporadically (about 20% probability) misses the
+        // very first pixel that the sensor clocks out, so the entire image
+        // is shifted "left" by one pixel.  That makes the position sensing
+        // jitter by a pixel from one frame to the next according to whether
+        // or not we had that one-pixel delay in the DMA startup.  Happily,
+        // padding the timing by an fM cycle seems to make the DMA startup
+        // perfectly reliable.
+        fm.waitEndCycle();
+        
         // Okay, a master clock cycle just started, so we have about 1us 
         // (about 16 CPU instructions) before the next one begins.  Resume 
         // ADC sampling.  The first new sample will start with the next
-        // TPM cycle 1us from now.  (This step takes about 3 instructions.)
+        // TPM cycle 1us from now.  This step itself takes about 3 machine
+        // instructions for 180ns, so we have about 820ns left to go.
         os.resume();
         
         // Eerything is queued up!  We just have to fire the starting gun

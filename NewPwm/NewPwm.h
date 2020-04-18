@@ -244,7 +244,7 @@ public:
     }
     
     // wait for the end of the current cycle
-    void waitEndCycle()
+    inline void waitEndCycle()
     {
         // clear the overflow flag (note the usual KL25Z convention for 
         // hardware status registers like this: writing '1' clears the bit)
@@ -282,8 +282,8 @@ public:
     // be OFF 10% of the time and ON 90% of the time.  This is primarily
     // for complex timing situations where the caller has to be able to
     // coordinate the alignment of up/down transitions on the output; in
-    // particularly, it allows the caller to use the waitEndCycle() to sync
-    // with the falling ege on the output.
+    // particular, it allows the caller to use the waitEndCycle() to sync
+    // with the falling edge on the output.
     NewPwmOut(PinName pin, bool invertedCycle = false)
     {
         // determine the TPM unit number and channel
