@@ -84,13 +84,44 @@
 // and then select a TPM period that's slightly more than 1/2 of the ADC
 // conversion time.
 //
+// Note that there are several other, similar Toshiba sensors with the same
+// electrical interface and almost the same signal timing, but with a 4:1
+// ratio between the master clock ticks and the pixel outputs.  This code
+// could be adapted to those sensors using the same "trick" we use for the
+// 2:1 timing ratio, by choosing an ADC mode with a sampling rate that's
+// between 3*fM and 4*fM.  That will make the ADC ignore the first three
+// master clocks in each cycle, triggering a new sample reading on every
+// fourth master clock tick, achieving the desired 4:1 ratio.  We don't
+// provide an option for that because there are no such Toshiba sensors in
+// production that are of interest to us as plunger sensors, and because
+// the selection of a suitable fM timing and ADC mode are both dependent
+// on the constraints of your application, so it's not feasible to automate
+// the selection of either based on simple numeric parameters.  If you want
+// to adapt the code, start by figuring out the range of fM timing you can
+// accept, then look at the KL25Z manual to work out the ADC cycle timing
+// for various modes with the properties you want.  You can then adjust
+// either or both the fM timing and ADC settings until you find a suitable
+// balance in the timing.  The Toshiba sensors can generally accept a wide
+// range of fM rates, so you can count both the clock rate and ADC modes as
+// free variables, within the constraints of your application in terms of
+// required frame rate and ADC sampling quality.
+//
 //
 // Pixel output signal
 //
 // The pixel output signal from this sensor is an analog voltage level.  It's
 // inverted from the brightness: higher brightness is represented by lower
-// voltage.  The dynamic range is only about 1V - dark pixels read at about 
-// 2V, and saturated pixels read at about 1V.  
+// voltage.  The dynamic range is only about 1V, with a 1V floor.  So dark 
+// pixels read at about 2V, and saturated pixels read at about 1V.
+//
+// The output pin from the sensor connects to what is essentially a very
+// small capacitor containing a tiny amount of charge.  This isn't a good
+// source for the ADC to sample, so some additional circuitry is required
+// to convert the charge to a low-impedance voltage source suitable for
+// connecting to an ADC.  The driver circuit recommended in the Toshiba
+// data sheet consists of a high-gain PNP transistor and a few resistors.
+// See "How to connect to the KL25Z" below for the component types and
+// values we've tested successfully.
 //
 //
 // Inverted logic signals
@@ -103,7 +134,7 @@
 // which implies about a 2us rise/fall time if driven directly by KL25Z
 // GPIOs, which is too slow.
 //
-// The software willo work with or without the logic inversion, in case anyone
+// The software will work with or without the logic inversion, in case anyone
 // wants to try implementing it with direct GPIO drive (not recommended) or 
 // with a non-inverting buffer in place of the 74HC04.  Simply instantiate the
 // class with the 'invertedLogicGates' template parameter set to false to use 
