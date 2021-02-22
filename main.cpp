@@ -1,4 +1,4 @@
-/* Copyright 2014, 2016 M J Roberts, MIT License
+/* Copyright 2014, 2021 M J Roberts, MIT License
 *
 * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 * and associated documentation files (the "Software"), to deal in the Software without
@@ -66,6 +66,40 @@
 //      is, the resistance varies linearly with the position) is required.
 //      This option is cheap, easy to set up, and works well.
 //
+//    - TCD1103 optical linear imaging array.  This is a CCD-based optical
+//      imaging sensor, essentially an optical camera sensor, with a linear
+//      (single-row) pixel file.  This is similar to the venerable TSL1410R,
+//      the original Pinscape plunger sensor.  By arranging the sensor's
+//      linear pixel array parallel to the plunger's axis of travel, we can
+//      use the sensor to take pictures of the plunger, and then analyze the
+//      images in software to determine the position by looking for the edge
+//      between the tip of the plunger and the background.  The TCD1103 is
+//      produces low-noise images with 1500 pixels of resolution, and with
+//      a small focusing lens, the software can reliably determine the
+//      plunger position to a single pixel, which translates to about
+//      1/400" precision.  The sensor can take these images (and we can
+//      analyze them) at about 400 frames per second.  Between the high
+//      spatial resolution and fast update rate, this is the best sensor
+//      I've found for this job.
+//
+//    - VCNL4010 IR proximity sensor.  This is an optical distance sensor that
+//      estimates the distance to a target by measuring the intensity of a
+//      reflected IR light signal that the sensor bounces off the target.
+//      This is the sensor that's used in the commercial VirtuaPin "v3"
+//      plunger kit.  Since the VirtuaPin kit also uses a KL25Z as its
+//      microcontroller, some users of that product have asked for support
+//      for this sensor in the Pinscape code, so that they have the option
+//      to use their hardware from that kit with the Pinscape software.
+//      IR proximity sensors aren't very accurate or precise, so I don't
+//      recommend it to people setting up a new system from scratch - it's
+//      mostly for people who already have the VirtuaPin kit and don't want
+//      to change their hardware to migrate to Pinscape.  However, Adafruit
+//      makes a breakout board for the sensor that you can use to set up a
+//      new system if you want to try it - it only requires a few wires to
+//      connect to the KL25Z.  (In fact, it appears that VirtuaPin buys the
+//      Adafruit breakout board and repackages it for their kit, so you'll
+//      be using the same thing that VirtuaPin customers have.)
+//
 //    - VL6108X time-of-flight distance sensor.  This is an optical distance
 //      sensor that measures the distance to a nearby object (within about 10cm)
 //      by measuring the travel time for reflected pulses of light.  It's fairly
@@ -80,7 +114,10 @@
 //      the edge of the sahdow in the image.  The optics for this setup are very
 //      simple since we don't need any lenses.  This was the first sensor we
 //      supported, and works very well, but unfortunately the sensor is difficult
-//      to find now since it's been discontinued by the manufacturer.
+//      to find now since it's been discontinued by the manufacturer.  Happily,
+//      a good alternative is available: the Toshiba TCD1103, which is another
+//      linear imaging sensor that works on a similar principle, but produces
+//      even better results.
 //
 //    The v2 Build Guide has details on how to build and configure all of the
 //    sensor options.
@@ -5191,7 +5228,7 @@ void createPlunger()
         
     case PlungerType_VL6180X:
         // VL6180X time-of-flight IR distance sensor
-        // pins are: SDL, SCL, GPIO0/CE
+        // pins are: SDA, SCL, GPIO0/CE
         plungerSensor = new PlungerSensorVL6180X(
             wirePinName(cfg.plunger.sensorPin[0]),
             wirePinName(cfg.plunger.sensorPin[1]),
@@ -5218,6 +5255,13 @@ void createPlunger()
             wirePinName(cfg.plunger.sensorPin[1]),
             wirePinName(cfg.plunger.sensorPin[2]),
             wirePinName(cfg.plunger.sensorPin[3]));
+        break;
+        
+    case PlungerType_VCNL4010:
+        // VCNL4010 IR proximity sensor pins are: SDA, SCL
+        plungerSensor = new PlungerSensorVCNL4010(
+            wirePinName(cfg.plunger.sensorPin[0]),
+            wirePinName(cfg.plunger.sensorPin[1]));
         break;
         
     case PlungerType_None:

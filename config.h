@@ -56,6 +56,7 @@ const int PlungerType_TSL1401CL = 8;     // TSL1401CL linear image sensor (128x1
 const int PlungerType_VL6180X   = 9;     // VL6180X time-of-flight distance sensor
 const int PlungerType_AEAT6012  = 10;    // AEAT-6012-A06 magnetic rotary encoder; absolute angle sensing, 12-bit precision
 const int PlungerType_TCD1103   = 11;    // Toshiba TCD1103GFG linear image sensor (1500x1 pixels, ~4600dpi), edge detection
+const int PlungerType_VCNL4010  = 12;    // VCNL4010 IR proximity sensor
 
 // Plunger auto-zero flags
 const int PlungerAutoZeroEnabled = 0x01; // auto-zeroing enabled
@@ -663,18 +664,30 @@ struct Config
     
         // Plunger sensor pins.  To accommodate a wide range of sensor types,
         // we keep a generic list of 4 pin assignments.  The use of each pin
-        // varies by sensor.  The lists below are in order of the generic
-        // pins; NC means that the pin isn't used by the sensor.  Each pin's
-        // GPIO usage is also listed.  Certain usages limit which physical
-        // pins can be assigned (e.g., AnalogIn or PwmOut).
+        // varies by sensor.  The lists below are in order of the entries in
+        // the sensorPin[] array, which is also the order of the pin numbers
+        // passed in the USB configuration commands.  "NC" means that the pin
+        // isn't used by the sensor, so the slot is ignored.  Each pin's GPIO
+        // usage is also listed, because usages like AnalogIn and PWM mean
+        // that you have to use a GPIO pin that can multiplexed to the
+        // specified peripheral function.  If the usage is listed as simply
+        // "GPIO", it means that no special peripheral function is needed for
+        // that connection, so any GPIO pin can be used.
         //
-        // TSL1410R/1412S/1401CL:     SI (GPIO),       CLK (GPIO),       AO (AnalogIn),  NC
-        // Potentiometer:             AO (AnalogIn),   NC,               NC,             NC
-        // AEDR8300:                  A (InterruptIn), B (InterruptIn),  NC,             NC
-        // AS5304:                    A (InterruptIn), B (InterruptIn),  NC,             NC
-        // VL6180X:                   SDA (GPIO),      SCL (GPIO),       GPIO0/CE (GPIO)
+        // TSL1410R/1412S/1401CL:     SI (GPIO),       CLK (GPIO),       AO (AnalogIn),   NC
+        // Potentiometer:             AO (AnalogIn),   NC,               NC,              NC
+        // AEDR8300:                  A (InterruptIn), B (InterruptIn),  NC,              NC
+        // AS5304:                    A (InterruptIn), B (InterruptIn),  NC,              NC
+        // VL6180X:                   SDA (GPIO),      SCL (GPIO),       GPIO0/CE (GPIO), NC
+        // AEAT-6012-A06:             CS (GPIO),       CLK (GPIO),       DO (GPIO),       NC
+        // TCD1103GFG:                fM (PWM),        OS (AnalogIn),    ICG (GPIO),      SH (GPIO)
+        // VCNL4010:                  SDA (GPIO),      SCL (GPIO),       NC,              NC
         //
         // Note!  These are stored in uint8_t WIRE format, not PinName format.
+        // In other words, the values here are the byte values passed in the
+        // USB protocol to represent pin numbers.  You can translate these
+        // byte values to PinName values using wirePinName(uint8_t).
+        //
         uint8_t sensorPin[4];
         
         // Automatic zeroing.  If enabled, we'll reset the plunger position to

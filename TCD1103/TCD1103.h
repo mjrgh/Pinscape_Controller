@@ -84,6 +84,25 @@
 // and then select a TPM period that's slightly more than 1/2 of the ADC
 // conversion time.
 //
+// I know this sounds like it should be prone to unpredictable timing bugs,
+// but it's actually 100% deterministic!  It's truly deterministic because
+// the underlying clock for the TPM and ADC is shared.  Intuitively, we
+// think of time-based processes as inherently stochastic because clocks
+// are never perfect, so if you have two time-based processes based on
+// separate clocks, the two processes are never perfectly in sync because
+// their separate clocks will drift slightly relative to one another.  But
+// that's not what's going on here.  The time-based processes we're talking
+// about are tied to the same underlying clock, so there's absolutely no
+// possibility of clock drift or phase shift or anything else that feeds
+// into that intuition about stochasticness in time-based processes.  In
+// addition, the key ADC feature we're exploiting for the clock doubling -
+// that the ADC ignores hardware triggers during an active cycle - isn't
+// some accidental behavior we observed empirically.  It's by design and
+// it's documented.  We can count on it always being the case with this
+// ADC.  Between those two factors (synchronous clock, designed and
+// documented ADC behavior), we can count on the timing being EXACTLY the
+// same on EVERY sample.  We're not counting on being "lucky".
+//
 // Note that there are several other, similar Toshiba sensors with the same
 // electrical interface and almost the same signal timing, but with a 4:1
 // ratio between the master clock ticks and the pixel outputs.  This code

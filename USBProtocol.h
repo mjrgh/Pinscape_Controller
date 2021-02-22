@@ -874,6 +874,7 @@
 //           9 = VL6180X time-of-flight distance sensor
 //        **10 = AEAT-6012-A06 magnetic rotary encoder
 //        **11 = TCD1103GFG Toshiba linear CCD, 1500x1 pixels, edge detection
+//        **12 = VCNL4010 Vishay IR proximity sensor
 //
 //       * The sensor types marked with asterisks (*) are reserved for types
 //       that aren't currently implemented but could be added in the future.  
@@ -910,6 +911,7 @@
 //         VL6180X                   SDA (GPIO)       SCL (GPIO)        GPIO0/CE (GPIO) NC
 //         AEAT-6012-A06             CS (GPIO)        CLK (GPIO)        DO (GPIO)       NC
 //         TCD1103GFG                fM (PWM)         OS (AnalogIn)     ICG (GPIO)      SH (GPIO)
+//         VCNL4010                  SDA (GPIO)       SCL (GPIO)        NC              NC
 //
 // 7  -> Plunger calibration button pin assignments.
 //

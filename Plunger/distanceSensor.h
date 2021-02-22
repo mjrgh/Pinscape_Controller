@@ -30,12 +30,32 @@
 // minimum standards.  However, this sensor is inexpensive and easier to
 // set up than most of the better options, so it might be attractive to
 // some cab builders despite the quality tradeoffs.
+//
+// VCNL4010: An IR proximity sensor.  This sensor shines an IR light at a
+// target and measures the intensity of the reflected light.  This doesn't
+// measure distance per se, but since the intensity of a light source
+// falls off as the square of the distance, we can use the reflected
+// intensity as a proxy for the distance by calculating 1/sqrt(intensity).
+// The main reason to support this type of sensor is that it's used in the
+// VirtuaPin v3 plunger kit, and several people have requested support so
+// that they can move re-flash that kit using the Pinscape software and
+// continue using their existing plunger sensor.  IR proximity sensors
+// aren't very accurate, and they're also kind of slow (this one can take
+// readings at a maximum rate of 250/s, or 4ms), so I don't recommend
+// this sensor for new builds.  However, it does have a couple of virtues:
+// it's really easy to set up physically, and it's a non-contact sensor.
+// But really, the main reason to support it is for the sake of the
+// VirtuaPin legacy users, to allow migration without hardware changes.
+// 
+//
 
 #ifndef _DISTANCESENSOR_H_
 #define _DISTANCESENSOR_H_
 
 #include "plunger.h"
 #include "VL6180X.h"
+#include "VCNL4010.h"
+
 
 // Base class for distance sensors
 class PlungerSensorDistance: public PlungerSensor
@@ -144,5 +164,79 @@ protected:
     int lastErr;
 };
 
+
+// PlungerSensor interface implementation for VCNL4010 IR proximity sensors
+//
+// Our hardware interface for this sensor reports distances in abstract
+// units that fit a 16-bit int, so the native distance scale is 0..65535.
+// (The sensor itself doesn't have a native distance scale per se, since
+// it reports results in terms of the intensity of the reflected light.
+// This is related to the distance by an inverse square law, so since we
+// have to do some math on the raw readings anyway to convert them to
+// distances, we can choose whatever units we want for the conversion.
+// We choose units that are convenient for our purposes at the joystick
+// layer, given the 16-bit field we use to report the position back to
+// the PC.)
+class PlungerSensorVCNL4010: public PlungerSensorDistance
+{
+public:
+    PlungerSensorVCNL4010(PinName sda, PinName scl)
+        : PlungerSensorDistance(65535),
+          sensor(sda, scl, true)
+    {
+    }
+    
+    virtual void init()
+    {
+        // initialize the sensor
+        sensor.init();
+        
+        // start a reading
+        sensor.startProxReading();
+    }
+    
+    virtual bool ready()
+    {
+        // check if a reading is ready
+        return sensor.proxReady();
+    }
+    
+    virtual bool readRaw(PlungerReading &r)
+    {
+        // if we have a new reading ready, collect it
+        if (sensor.proxReady())
+        {
+            // Get the distance reading.  Note that we already know that the
+            // sensor has a reading ready, so it shouldn't be possible to 
+            // time out on the read.
+            uint8_t d;
+            uint32_t t, dt;
+            lastErr = sensor.getProx(d, t, dt, 100);
+            
+            // if we got a reading, update the last reading
+            if (lastErr == 0)
+            {
+                // save the new reading
+                last.pos = d;
+                last.t = t;
+            
+                // collect scan time statistics
+                collectScanTimeStats(dt);
+            }
+        }
+        
+        // return the most recent reading
+        r = last;
+        return lastErr == 0;
+    }
+    
+protected:
+    // underlying sensor interface
+    VCNL4010 sensor;
+    
+    // last reading and error status
+    PlungerReading last;
+    int lastErr;
+};
 
 #endif
