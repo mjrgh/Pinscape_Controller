@@ -306,6 +306,13 @@
 
 // --------------------------------------------------------------------------
 // 
+// placement new
+//
+void* operator new (size_t, void *p) { return p; }
+
+
+// --------------------------------------------------------------------------
+// 
 // OpenSDA module identifier.  This is for the benefit of the Windows
 // configuration tool.  When the config tool installs a .bin file onto
 // the KL25Z, it will first find the sentinel string within the .bin file,
@@ -4119,9 +4126,9 @@ protected:
 // I2C address of the accelerometer (this is a constant of the KL25Z)
 const int MMA8451_I2C_ADDRESS = (0x1d<<1);
 
-// SCL and SDA pins for the accelerometer (constant for the KL25Z)
-#define MMA8451_SCL_PIN   PTE25
-#define MMA8451_SDA_PIN   PTE24
+// I2C pins for the accelerometer (constant for the KL25Z)
+#define MMA8451_SDA_PIN   PTE25
+#define MMA8451_SCL_PIN   PTE24
 
 // Digital in pin to use for the accelerometer interrupt.  For the KL25Z,
 // this can be either PTA14 or PTA15, since those are the pins physically
@@ -4164,24 +4171,75 @@ struct AccHist
 class Accel
 {
 public:
-    Accel(PinName sda, PinName scl, int i2cAddr, PinName irqPin, 
-        int range, int autoCenterMode)
-        : mma_(sda, scl, i2cAddr)        
+    Accel(const Config &cfg) : mma_(MMA8451_SDA_PIN, MMA8451_SCL_PIN, MMA8451_I2C_ADDRESS)        
     {
-        // remember the interrupt pin assignment
-        irqPin_ = irqPin;
-        
         // remember the range
-        range_ = range;
+        range_ = cfg.accel.range;
         
         // set the auto-centering mode
-        setAutoCenterMode(autoCenterMode);
+        setAutoCenterMode(cfg.accel.autoCenterTime);
         
         // no manual centering request has been received
         manualCenterRequest_ = false;
 
         // reset and initialize
         reset();
+    }
+    
+    // Do a full reset of the object.  This tries to clear the I2C
+    // bus, and then re-creates the Accel object in place, running
+    // through all of the constructors again.  This is only a "soft"
+    // reset, since the KL25Z doesn't give us any way to do a power
+    // cycle on the MMA8451Q from software - its power connection is
+    // hardwired to the KL25Z's main board power connection, so the
+    // only way to power cycle the accelerometer is to power cycle
+    // the whole board.
+    //
+    // We use this to try to reset the accelerometer if it stops
+    // sending us new samples.  I've received a few reports from
+    // people who say their accelerometers seem to stop working even
+    // though the rest of the firmware is still functioning normally,
+    // which suggests that there's either a problem in the Accel class
+    // itself, or that the MMA8451Q can get into a non-responsive state
+    // under some circumstances.  Since the reports have been extremely
+    // rare and isolated, and since I've never myself seen this happen
+    // on any of the multiple KL25Z boards I've tested with (even after
+    // leaving them running for days at a time), my best guess is that
+    // it's actually a fault in the MMA8451Q.  The fact that everyone
+    // who's experienced the accelerometer freeze says that the rest of
+    // the firwmare is still working supports this hypothesis - given
+    // that the firmware is single-threaded, it seems unlikely that a
+    // "crash" of some kind in the accelerometer code wouldn't crash
+    // the firmware as a whole.  This soft reset code is an attempt to
+    // recover from a scenario where the MMA8451Q hardware is still
+    // functioning properly, but its internal state machine is somehow
+    // out of sync with the host in such a way that it can no longer
+    // send us samples - either its I2C state machine is stuck in the
+    // middle of a transaction, or its sample processing state machine
+    // is no longer taking samples.  The soft reset doesn't have any
+    // hope of rebooting the chip if the freeze is due to some kind
+    // of hardware fault, because our only connection to the chip is
+    // the I2C bus, and there's no reason to think its I2C state
+    // machine would even be running in the event of a hardware fault.
+    // Hopefully we can find out which it is by testing this fix on
+    // boards where the problem is known to have occurred, since it
+    // seems to be readily repeatable for the people who experience
+    // it at all.
+    static void softReset(Accel *accel, const Config &config)
+    {
+        // save the current centering position, so that the user
+        // doesn't see a jump across the reset
+        int cx = accel->cx_, cy = accel->cy_;
+        
+        // try to reset the I2C bus, in case that's 
+        accel->clear_i2c();
+        
+        // re-construct the Accel object
+        new (accel) Accel(config);
+
+        // restore the center point
+        accel->cx_ = cx;
+        accel->cy_ = cy; 
     }
     
     // Request manual centering.  This applies the trailing average
@@ -4220,6 +4278,81 @@ public:
         }
     }
     
+    // Clear the I2C bus for the MMA8451Q.  This seems necessary some of the time
+    // for reasons that aren't clear to me.  Doing a hard power cycle has the same
+    // effect, but when we do a soft reset, the hardware sometimes seems to leave
+    // the MMA's SDA line stuck low.  Presumably, the MMA8451Q's internal state
+    // machine is still in the middle of an I2C transaction, and it expects the
+    // host to clock in/out the rest of the bits for the transaction.  Forcing a
+    // series of clock pulses through SCL is the standard remedy for this type
+    // of situation, since it should force the state machine to the end of the
+    // I2C state it's stuck in so that it's ready to start a new transaction.
+    // This really shouldn't be necessary, because the mbed library I2C code that
+    // we're using in the MMA8451Q driver appears to do the same thing when it
+    // sets up the I2C pins, but it should at least be harmless.  What we really
+    // need is a way to power-cycle the MMA8451Q, but the KL25Z simply isn't
+    // wired to do that from software; the only way is to power-cycle the whole
+    // board.
+    // 
+    // If the accelerometer does get stuck, and a software reboot doesn't reset
+    // it, the only workaround is to manually power cycle the whole KL25Z by 
+    // unplugging both of its USB connections.
+    //
+    // The entire Accel object must be re-constructed after calling this,
+    // because this reconfigures the I2C SDA/SCL pins as plain digital in/out
+    // pins.  They have to be reconfigured as I2C pins again by the I2C
+    // constructor after this is called.
+    static bool clear_i2c()
+    {
+        // set up both pints as input pins
+        DigitalInOut pin_sda(MMA8451_SDA_PIN, PIN_INPUT, PullNone, 1);
+        DigitalInOut pin_scl(MMA8451_SCL_PIN, PIN_INPUT, PullNone, 1);
+
+        // if SCL is being held low, the bus is locked by another device;
+        // wait a couple of milliseconds and then give up
+        Timer t;
+        t.start();
+        while (pin_scl == 0 && t.read_us() < 2000) { }
+        if (pin_scl == 0)
+            return false;
+
+        // if SDA and SCL are both high, the bus is free
+        if (pin_sda == 1)
+            return true;
+
+        // Send a series of clock pulses to try to knock the device out
+        // of whatever I2C transaction it thinks it's in the middle of.
+        // 9 pulses should be sufficient for a device with byte commands,
+        // but do some extra for good measure, in case it's in some kind
+        // of multi-byte transaction.
+        pin_scl.mode(PullNone);
+        pin_scl.output();
+        for (int count = 0; count < 35; count++) 
+        {
+            pin_scl.mode(PullNone);
+            pin_scl = 0;
+            wait_us(5);
+            pin_scl.mode(PullUp);
+            pin_scl = 1;
+            wait_us(5);
+        }
+
+        // Send Stop
+        pin_sda.output();
+        pin_sda = 0;
+        wait_us(5);
+        pin_scl = 1;
+        wait_us(5);
+        pin_sda = 1;
+        wait_us(5);
+
+        // confirm that both SDA and SCL are now high, indicating that
+        // the bus is free
+        pin_sda.input();
+        pin_scl.input();
+        return (pin_scl != 0 && pin_sda != 0);
+    }
+
     void reset()
     {
         // clear the center point
@@ -4244,15 +4377,33 @@ public:
         
         // read the current registers to clear the data ready flag
         mma_.getAccXYZ(ax_, ay_, az_);
+        
+        // start the FIFO timer
+        fifoTimer.reset();
+        fifoTimer.start();
+        tLastSample = tLastChangedSample = fifoTimer.read_us();
     }
     
-    void poll()
+    // Poll the accelerometer.  Returns true on success, false if the
+    // device appears to be wedged (because we haven't received a unique
+    // sample in a long time).  The caller can try re-creating the Accel
+    // object if the device is wedged.
+    bool poll()
     {
         // read samples until we clear the FIFO
         while (mma_.getFIFOCount() != 0)
         {
+            // read the raw data
             int x, y, z;
             mma_.getAccXYZ(x, y, z);
+            
+            // note the time
+            tLastSample = fifoTimer.read_us();
+            
+            // note if this sample differs from the last one, to see if
+            // the accelerometer appears to be stuck
+            if (x != ax_ || y != ay_ || z != az_)
+                tLastChangedSample = tLastSample;
             
             // add the new reading to the running total for averaging
             xSum_ += (x - cx_);
@@ -4264,8 +4415,59 @@ public:
             ay_ = y;
             az_ = z;
         }
+        
+        // If we haven't seen a new sample in a while, the device
+        // might be stuck.  Some people have observed an apparent
+        // freeze in the accelerometer readings even while the
+        // pluger and key inputs continue working, which seems
+        // like it must be due to something stuck on the MMA8451Q.
+        // The caller can try a software reset in that case, by
+        // re-creating the Accel object.  That will go through
+        // all of the I2C and MMA8451Q intialization code again
+        // to try to get things back to a good state.
+        //
+        // We poll about every 2.5ms (or more often, depending on
+        // the plunger sensor type), and we have the accelerometer
+        // set to generate samples at 800 Hz = every 1.25ms, so it
+        // would definitely indicate trouble if the last samples
+        // from the device are older than 5ms.  As for *unique*
+        // samples, that's a harder call, since it depends on how
+        // much background noise there is.  Given the sensitivity
+        // of the device, though, my experience is that nearly
+        // every sample will have at least one bit of difference
+        // from the last, so it's unlikely to see more than a few
+        // identical samples in a row, and extremely unlikely to
+        // see, say, 10 or 20 consecutive identical readings.  To
+        // be conservative, we'll time out the existence of a
+        // reading at 100ms, and unique readings at 2s.  This
+        // should reset a non-responsive device well before the
+        // freeze becomes apparent to the user (unless they're
+        // deliberately looking for it), but should also ensure
+        // that we don't reset unnecessarily - 2s represents 1600
+        // consecutive identical samples, and I think the odds of
+        // that happening for real are practically zero, barring
+        // some kind of test bed with extreme vibration suppression.
+        uint32_t tNow = fifoTimer.read_us();
+        if (static_cast<uint32_t>(tNow - tLastSample) > 100000  // 100 ms
+            || static_cast<uint32_t>(tNow - tLastChangedSample) > 2000000) // 2 seconds
+        {
+            // appears to be wedged
+            return false;
+        }
+        
+        // okay
+        return true;
     }
-
+    
+    // timer, for monitoring incoming FIFO samples
+    Timer fifoTimer;
+    
+    // time of last sample from FIFO
+    uint32_t tLastSample;
+    
+    // time of last *different* sample from FIFO
+    uint32_t tLastChangedSample;
+    
     void get(int &x, int &y) 
     {
         // read the shared data and store locally for calculations
@@ -4407,7 +4609,7 @@ private:
     
     // atuo-centering timer
     Timer tCenter_;
-
+    
     // Auto-centering history.  This is a separate history list that
     // records results spaced out sparsely over time, so that we can
     // watch for long-lasting periods of rest.  When we observe nearly
@@ -4423,42 +4625,7 @@ private:
     uint8_t iAccPrv_, nAccPrv_;
     static const uint8_t maxAccPrv = 5;
     AccHist accPrv_[maxAccPrv];
-    
-    // interurupt pin name
-    PinName irqPin_;
 };
-
-// ---------------------------------------------------------------------------
-//
-// Clear the I2C bus for the MMA8451Q.  This seems necessary some of the time
-// for reasons that aren't clear to me.  Doing a hard power cycle has the same
-// effect, but when we do a soft reset, the hardware sometimes seems to leave
-// the MMA's SDA line stuck low.  Forcing a series of 9 clock pulses through
-// the SCL line is supposed to clear this condition.  I'm not convinced this
-// actually works with the way this component is wired on the KL25Z, but it
-// seems harmless, so we'll do it on reset in case it does some good.  What
-// we really seem to need is a way to power cycle the MMA8451Q if it ever 
-// gets stuck, but this is simply not possible in software on the KL25Z. 
-// 
-// If the accelerometer does get stuck, and a software reboot doesn't reset
-// it, the only workaround is to manually power cycle the whole KL25Z by 
-// unplugging both of its USB connections.
-//
-void clear_i2c()
-{
-    // set up general-purpose output pins to the I2C lines
-    DigitalOut scl(MMA8451_SCL_PIN);
-    DigitalIn sda(MMA8451_SDA_PIN);
-    
-    // clock the SCL 9 times
-    for (int i = 0 ; i < 9 ; ++i)
-    {
-        scl = 1;
-        wait_us(20);
-        scl = 0;
-        wait_us(20);
-    }
-}
 
 
 // ---------------------------------------------------------------------------
@@ -6534,7 +6701,7 @@ int main(void)
     NewPwmUnit::defaultPeriod = 0.0005f;
         
     // clear the I2C connection
-    clear_i2c();
+    Accel::clear_i2c();
     
     // Elevate GPIO pin interrupt priorities, so that they can preempt
     // other interrupts.  This is important for some external peripherals,
@@ -6745,8 +6912,7 @@ int main(void)
     acTimer.start();
     
     // create the accelerometer object
-    Accel accel(MMA8451_SCL_PIN, MMA8451_SDA_PIN, MMA8451_I2C_ADDRESS, 
-        MMA8451_INT_PIN, cfg.accel.range, cfg.accel.autoCenterTime);
+    Accel accel(cfg);
        
     // initialize the plunger sensor
     plungerSensor->init();
@@ -6815,7 +6981,8 @@ int main(void)
         LwChimeLogicOut::poll();
         
         // poll the accelerometer
-        accel.poll();
+        if (!accel.poll())
+            Accel::softReset(&accel, cfg);
             
         // Note the "effective" plunger enabled status.  This has two
         // components: the explicit "enabled" bit, and the plunger sensor
