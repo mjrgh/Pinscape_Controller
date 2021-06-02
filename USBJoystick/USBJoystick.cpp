@@ -251,6 +251,28 @@ bool USBJoystick::sendPlungerStatusQuadrature(int chA, int chB)
     return sendTO(&report, 100);
 }
 
+bool USBJoystick::sendPlungerStatusVCNL4010(int filteredProxCount, int rawProxCount)
+{
+    HID_REPORT report;
+    memset(report.data, 0, sizeof(report.data));
+    
+    // set the status bits to indicate that it's an extended
+    // status report for quadrature sensors
+    put(0, 0x87FF);
+    int ofs = 2;
+    
+    // write the report subtype (4)
+    report.data[ofs++] = 4;
+    
+    // write the filtered and raw proximity count from the sensor
+    put(ofs, static_cast<uint16_t>(filteredProxCount));
+    put(ofs + 2, static_cast<uint16_t>(rawProxCount));
+    
+    // send the report
+    report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
 
 bool USBJoystick::sendPlungerPix(int &idx, int npix, const uint8_t *pix)
 {

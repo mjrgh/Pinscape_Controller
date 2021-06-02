@@ -661,6 +661,13 @@ struct Config
 
         // plunger sensor type
         uint8_t sensorType;
+        
+        // Miscellaneous parameters; meanings defined per sensor:
+        //
+        //  Sensor       Param1
+        //  VCNL4010     IRED current
+        //
+        uint8_t param1;
     
         // Plunger sensor pins.  To accommodate a wide range of sensor types,
         // we keep a generic list of 4 pin assignments.  The use of each pin

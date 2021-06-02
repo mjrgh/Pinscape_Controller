@@ -115,7 +115,7 @@ public:
             r.pos = applyOrientation(r.pos);
 
             // process it through the jitter filter
-            r.pos = jitterFilter(r.pos);
+            r.pos = postJitterFilter(r.pos);
             
             // adjust to the abstract scale via the scaling factor
             r.pos = uint16_t(uint32_t((scalingFactor * r.pos) + 32768) >> 16);
@@ -185,7 +185,7 @@ public:
             r.pos = applyOrientation(r.pos);
 
             // success - apply the jitter filter
-            pos = jitterFilter(r.pos);
+            pos = postJitterFilter(r.pos);
         }
         
         // Send the common status information, indicating 0 pixels, standard
@@ -214,6 +214,19 @@ public:
     {
         return (reverseOrientation ? nativeScale - pos : pos);
     }
+    
+    // Post-filter a raw reading through the mitter filter.  Most plunger
+    // sensor subclasses can use this default implementation, since the
+    // jitter filter is usually applied to the raw position reading.
+    // However, for some sensor types, it might be better to apply the
+    // jitter filtering to the underlying physical sensor reading, before
+    // readRaw() translates the reading into distance units.  In that
+    // case, the subclass can override this to simply return the argument
+    // unchanged.  This allows subclasses to use jitterFilter() if desired
+    // on their physical sensor readings.  It's not either/or, though; a
+    // subclass that overrides jitter post-filtering isn't could use an
+    // entirely different noise filtering algorithm on its sensor data.
+    virtual int postJitterFilter(int pos) { return jitterFilter(pos); }
         
     // Apply the jitter filter.  The position is in unscaled native 
     // sensor units.
@@ -460,8 +473,8 @@ public:
         ProcessResult res;
         if (process(pix, n, rawPos, res))
         {
-            // success - apply the jitter filter
-            pos = jitterFilter(rawPos);
+            // success - apply the post jitter filter
+            pos = postJitterFilter(rawPos);
         }
         else
         {

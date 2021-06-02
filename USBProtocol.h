@@ -177,7 +177,7 @@
 // for bar-code sensors:
 //
 //    bytes 0:1 = 0x87FF
-//    byte  2   = 2 -> bar code status report
+//    byte  2   = 2 -> bar code sensor extra status report
 //    byte  3   = number of bits in bar code
 //    byte  4   = bar code type:
 //                  1 = Gray code/Manchester bit coding
@@ -188,17 +188,25 @@
 //                that the bit was read successfully, '0' means the bit was
 //                unreadable
 //
-// An optional third message provides additional information specifically
-// for digital quadrature sensors:
+// Another optional third message provides additional information
+// specifically for digital quadrature sensors:
 //
 //    bytes 0:1 = 0x87FF
-//    byte  2   = 3 -> digital quadrature sensor status report
+//    byte  2   = 3 -> digital quadrature sensor extra status report
 //    byte  3   = "A" channel reading (0 or 1)
 //    byte  4   = "B" channel reading (0 or 1)
-//   
 //
-// If the sensor is an imaging sensor type, this will be followed by a
-// series of pixel messages.  The imaging sensor types have too many pixels
+// Yet another optional third message provides additional information for
+// VCNL4010 sensors:
+//
+//    bytes 0:1 = 0x87FF
+//    bytes 2   = 4 -> VCNL4010 extra status report
+//    bytes 3:4 = last proximity count reading (16-bit, little-endian), jitter filtered
+//    bytes 5:6 = last proximity count reading, original unfiltered value
+//
+// If the sensor is an imaging sensor type, the first and second sensor
+// reports will be followed by a series of pixel reports giving the live
+// image view on the sensor.  The imaging sensor types have too many pixels
 // to send in a single USB transaction, so the device breaks up the array
 // into as many packets as needed and sends them in sequence.  For non-
 // imaging sensors, the "number of pixels" field in the lead packet is
@@ -876,11 +884,16 @@
 //        **11 = TCD1103GFG Toshiba linear CCD, 1500x1 pixels, edge detection
 //        **12 = VCNL4010 Vishay IR proximity sensor
 //
+//        byte 4 -> extra sensor-speicifc parameter data
+//          VCNL4010 - IRED current, in units of 10mA, valid range 1..20
+//
 //       * The sensor types marked with asterisks (*) are reserved for types
 //       that aren't currently implemented but could be added in the future.  
 //       Selecting these types will effectively disable the plunger.
 //
-//       ** Experimental
+//       ** The sensor types marked with double asterisks (**) are
+//       Experimental, meaning that the code isn't finished yet and isn't
+//       meant for use in a live pin cab.
 //
 //       Sensor types 2 and 4 were formerly reserved for TSL14xx sensors in
 //       parallel wiring mode, but support for these is no longer planned, as
@@ -892,8 +905,8 @@
 //
 //         byte 3 -> pin assignment 1
 //         byte 4 -> pin assignment 2
-//         byte 5 -> pin assignment 3
-//         byte 6 -> pin assignment 4
+//         byte 5 -> pin assignment 3/misc
+//         byte 6 -> pin assignment 4/misc
 //
 //       All of the pins use the standard GPIO port format (see "GPIO pin number
 //       mappings" below).  The actual use of the four pins depends on the plunger
@@ -902,7 +915,7 @@
 //       AnalogIn, InterruptIn, and PWM mean that only pins with the respective 
 //       capabilities can be chosen.
 //
-//         Plunger Type              Pin 1            Pin 2             Pin 3           Pin 4
+//         Plunger Type              Pin 1            Pin 2             Pin 3/Misc      Pin 4
 //
 //         TSL1410R/1412R/1401CL     SI (GPIO)        CLK (GPIO)        AO (AnalogIn)   NC
 //         Potentiometer             AO (AnalogIn)    NC                NC              NC

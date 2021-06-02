@@ -90,6 +90,7 @@ void v_func
     case 5:
         // Plunger sensor type
         v_byte(plunger.sensorType, 2);
+        v_byte(plunger.param1, 3);
         break;
         
     case 6:

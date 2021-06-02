@@ -170,7 +170,7 @@ public:
      * @param avgScanTime average sensor scan time in microseconds
      * @param processingTime time in microseconds to process the current frame
      */
-    bool sendPlungerStatus(int npix, int flags, int dir, 
+    bool sendPlungerStatus(int npix, int pos, int flags,
         uint32_t avgScanTime, uint32_t processingTime);
         
     /**
@@ -204,6 +204,13 @@ public:
      * @param chB channel "B" reading
      */
     bool sendPlungerStatusQuadrature(int chA, int chB);
+    
+    /**
+     * Send a VCNL4010 sensor extra status report
+     *
+     * @param proxCount raw proximity count reading from the sensor
+     */
+     bool sendPlungerStatusVCNL4010(int filteredProxCount, int rawProxCount);
     
     /**
      * Write an exposure report.  We'll fill out a report with as many pixels as

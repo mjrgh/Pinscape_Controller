@@ -5414,7 +5414,6 @@ void createPlunger()
     case PlungerType_TCD1103:
         // Toshiba TCD1103GFG linear CCD, optical edge detection, with
         // inverted logic gates.
-        //
         // Pins are: fM (master clock, PWM), OS (sample data, analog in), 
         // ICG (integration clear gate, dig out), SH (shift gate, dig out)
         plungerSensor = new PlungerSensorTCD1103<true>(
@@ -5428,7 +5427,8 @@ void createPlunger()
         // VCNL4010 IR proximity sensor pins are: SDA, SCL
         plungerSensor = new PlungerSensorVCNL4010(
             wirePinName(cfg.plunger.sensorPin[0]),
-            wirePinName(cfg.plunger.sensorPin[1]));
+            wirePinName(cfg.plunger.sensorPin[1]),
+            cfg.plunger.param1);
         break;
         
     case PlungerType_None:
