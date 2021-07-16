@@ -26,17 +26,75 @@
 // that the sensor reports is the intensity of light reflected from the
 // target object.  This type of sensor projects an IR light source in the
 // direction of the target, and measures the intensity of light reflected
-// from the target.  At the basic physics level, the intensity of a light
-// source varies with the inverse of the square of the distance, so assuming
-// that we can hold all other quantities constant (brightness of the light
-// source, reflectivity of the target, etc), the intensity measurement can
-// be used as a proxy for the distance.  It's obviously not possible to
+// from the target.  At the basic physics level, the apparent brightness
+// of a point light source varies with the inverse of the square of the
+// distance between source and observer.  Our setup isn't quite as simple
+// as that idealized model: we have a reflector instead of a point source,
+// so there are other factors that could vary by distance, especially the
+// cross-section of the target (the portion of the target within the spread
+// angle of the source light).  These other factors might not even have
+// simple polynomial relationships to distance.  Even so, the general idea
+// that the reflected brightness varies inversely with the distance should
+// hold, at least within a limited distance range.  Assuming we can hold
+// all of the other quantities constant (brightness of the light source,
+// reflectivity of the target, etc), then, the reflected brightness should
+// serve as a proxy for the distance.  It's obviously not possible to
 // compute an absolute distance (in millimeters from the sensor, say) from
-// this information alone, since there are many other variables involved
-// apart from the distance. But we can at least compute relative distances
-// for different intensities.  And if we can compute relative distances,
-// and we can calibrate the ends of our scale to the known geometry of a
-// pinball plunger, we can get the effective absolute distance readings.
+// the brightness reading alone, since that depends upon knowing the actual
+// values of all of the other quantities that assuming are held constant.
+// But we don't have to know those variables individually; we can roll them
+// into a proportionality constant that we can compute via calibration, by
+// taking brightness readings at known distances and then solving for the
+// constant.
+//
+// The VCNL4010 data sheet doesn't provide any specifications of how the
+// brightness reading relates to distance - it can't, for all of the reasons
+// mentioned above.  But it at least provides a rough plot of readings taken
+// for a particular test configuration.  That plot suggests that the power
+// law observed in the test configuration is roughly
+//
+//   Brightness ~ 1/Distance^3.2
+// 
+// over most of the range from 10mm to 100mm.  In my own testing, the best
+// fit was more like 1/r^2.  I suspect that the power law depends quite a
+// lot on the size and shape of the reflector.  Vishay's test setup uses a
+// 3cm x 3cm square reflector, whereas my plunger test rig has about a 2.5cm
+// circular reflector, which is about as big as you can make the reflector
+// for a pin cab plunger without conflicting with the flipper switches.  I
+// don't know if the difference in observed power law is due to the
+// reflector geometry or other factors.  We might need to revisit the
+// formula I used for the distance conversion as we gain experience from
+// different users setting up the sensor.  A possible future enhancement
+// would be to do a more detailed calibration as follows:
+//
+//   - Ask the user to pull back the plunger slowly at a very steady rate,
+//     maybe 3-5 seconds per pull
+//
+//   - Collect frequent readings throughout this period, say every 50ms
+//     (so around 60-100 readings per pull)
+//
+//   - Do a best-fit calculation on the data to solve for the exponent X
+//     and proportionality constant C in (Brightness = C/Distance^X),
+//     assuming that the distances are uniformly distributed over the
+//     pull range (because the user was pulling at constant speed).
+//
+//   - Save the exponent as config.plunger.cal.raw1 (perhaps as a 4.4 bit
+//     fixed-point value, such that X = raw1/16.0f)
+//
+// Alternatively, we could let the user provide the power law exponent
+// manually, as a configuration parameter, and add a Config Tool command
+// to collect the same calibration data described above and do the best-fit
+// analysis.  It might be preferable to do it that way - the user could
+// experiment with different values manually to find one that provides the
+// best subjective feel, and they could use the analysis tool to suggest
+// the best value based on data collection.  The reason I like the manual
+// approach is that the actual distance/brightness relationship isn't as
+// uniform as a simple power law, so even the best-fit power law will be
+// imperfect.  What looks best subjectively might not match the mathematical
+// best fit, because divergence from the fit might be more noticeable to
+// the eye in some regions than in others.  A manual fit would allow the
+// user to tweak it until it looked best in the whatever region they find
+// most noticeable.
 //
 //
 // SENSOR INTIALIZATION

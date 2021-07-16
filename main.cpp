@@ -2179,6 +2179,9 @@ void initLwOut(Config &cfg)
     // Allocate the current brightness array
     outLevel = new uint8_t[numOutputs];
     
+    // initialize all brightness levels to 0 (off)
+    memset(outLevel, 0, numOutputs);
+    
     // allocate the LedWiz output state arrays
     wizOn = new uint8_t[numOutputs];
     wizVal = new uint8_t[numOutputs];
