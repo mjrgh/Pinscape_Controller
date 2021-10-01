@@ -163,6 +163,7 @@ void v_func
         v_byte(expan.ext[0], 4);
         v_byte(expan.ext[1], 5);
         v_byte(expan.ext[2], 6);
+        v_byte(expan.ext[3], 7);
         break;
         
     case 15:

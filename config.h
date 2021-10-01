@@ -641,10 +641,11 @@ struct Config
     struct
     {
         uint8_t typ;        // expansion board set type:
+                            //    0 -> Standalone KL25Z
                             //    1 -> Pinscape Expansion Boards
                             //    2 -> Pinscape All-In-One (AIO)
         uint8_t vsn;        // board set interface version
-        uint8_t ext[3];     // board set type-specific extended data
+        uint8_t ext[4];     // extended data - varies by board set type
         
     } expan;
     
