@@ -1030,7 +1030,8 @@
 //                    1 = Pinscape Expansion Boards
 //                    2 = Oak Micros Pinscape All-In-One (AIO) Board
 //                    3 = Oak Micros Pinscape Lite Board
-//                    4 = Arnoz Mollusk Board
+//                    4 = Arnoz RigMaster board
+//                    5 = Arnoz KLShield Board
 //
 //         byte 4 = board set interface revision.  This *isn't* the version number
 //                  of the board itself, but rather of its software interface.  In
@@ -1047,7 +1048,10 @@
 //                  For Oak Micros Lite (type 3):
 //                    0 = first release
 //
-//                  For Arnoz Mollusk (type 4):
+//                  For Arnoz RigMaster (type 4):
+//                    0 = first release (2021)
+//
+//                  For Arnoz KLShield (type 5):
 //                    0 = first release (2021)
 //
 //         bytes 5:8 = additional hardware-specific data.  These slots are used
@@ -1059,7 +1063,11 @@
 //                    byte 6 = number of MOSFET power boards
 //                    byte 7 = number of chime boards
 //                    byte 8 = not used
-//                  
+//
+//                  For Arnoz RigMaster (board set type 4) and KLShield (type 5):
+//                    byte 5 = number of main baords (always 1)
+//                    byte 6 = number of Mollusk PWM add-on boards
+//
 //
 // 15 -> Night mode setup.  
 //

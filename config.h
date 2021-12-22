@@ -454,11 +454,18 @@ struct Config
             };               
             button[i].set(bp[i], 
 #if TEST_CONFIG_EXPAN
-                // For expansion board testing only, assign the inputs
-                // to keyboard keys A, B, etc.  This isn't useful; it's
-                // just for testing purposes.  Note that the USB key code
-                // for "A" is 4, "B" is 5, and so on sequentially through 
-                // the alphabet.
+                // For expansion board testing only, assign the button inputs
+                // to the alphabetic keys A, B, etc.  This isn't intended for
+                // actual deployment - for that, you'll usually want to map
+                // the buttons to the keyboard subset that the pinball
+                // simulators all use (shift keys for flippers, "1" for
+                // Start, 3/5 for Coin In, etc).  This A-B-C... mapping is
+                // purely for testing purposes; it makes it easy to remember
+                // which input is supposed to map to which key without
+                // having to consult a lookup table.  The USB HID key code
+                // for "A" is 4, "B" is 5, and so on sequentially through
+                // the alphabet.  The default configuration has 24 buttons,
+                // so we don't quite exhaust the alphabet with this setup.
                 BtnTypeKey, i+4);
 #elif STANDARD_CONFIG
                 // For the standard configuration, assign the input to
@@ -643,7 +650,10 @@ struct Config
         uint8_t typ;        // expansion board set type:
                             //    0 -> Standalone KL25Z
                             //    1 -> Pinscape Expansion Boards
-                            //    2 -> Pinscape All-In-One (AIO)
+                            //    2 -> Oak Micros Pinscape All-In-One (AIO)
+                            //    3 -> Oak Micros Pinscape Lite
+                            //    4 -> Arnoz RigMaster
+                            //    5 -> Arnoz KLShield
         uint8_t vsn;        // board set interface version
         uint8_t ext[4];     // extended data - varies by board set type
         
