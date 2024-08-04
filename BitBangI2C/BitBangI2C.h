@@ -47,11 +47,11 @@
 // is like this:
 //
 //   - take a pin low (0):   
-//        pin.input(); 
+//        pin.output(); 
 //        pin.write(0);
 //
 //   - take a pin high (1):
-//        pin.output();
+//        pin.input();
 //
 // Note that we don't actually have to write the '0' on each pull low,
 // since we just leave the port output register set with '0'.  Changing
@@ -60,11 +60,19 @@
 // register whenever the direction is changed from input to output.
 //
 // The KL25Z by default provides a built-in pull-up resistor on each GPIO
-// set to input mode.  This can optionally be used as the bus-wide pull-up
-// for each line.  Standard practice is to use external pull-up resistors
-// rather than MCU pull-ups, but the internal pull-ups are fine for ad hoc
-// setups where there's only one external device connected to a GPIO pair.
-
+// set to input mode.  The internal pull-ups can optionally be used as the
+// bus-wide pull-ups, although they're probably too weak if you want to
+// attach more than one device or run at speeds above 100 kHz, in which
+// case you should add an external pull-up resistor to each line, usually
+// somewhere around 2K to 4K.  The pull-ups interact with the cumulative
+// capacitive loads of the devices attached to the bus to determine the
+// slew rate of the high/low transitions on the lines, so the pull-up
+// resistor sizes have to be chosen such that the slew rate is fast
+// enough.  The I2C spec has a formula that determines the optimal
+// resistor size as a function of the desired bus speed and the total
+// capacitance of the attached devices.  But most devices seem to be
+// forgiving enough the 2K-to-4K rule of thumb seems to work fine in
+// most cases.
 
 #ifndef _BITBANGI2C_H_
 #define _BITBANGI2C_H_

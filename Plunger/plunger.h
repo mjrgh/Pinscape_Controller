@@ -21,7 +21,7 @@ struct PlungerReading
     // Raw sensor reading, normalied to 0x0000..0xFFFF range
     int pos;
     
-    // Rimestamp of reading, in microseconds, relative to an arbitrary
+    // Timestamp of reading, in microseconds, relative to an arbitrary
     // zero point.  Note that a 32-bit int can only represent about 71.5
     // minutes worth of microseconds, so this value is only meaningful
     // to compute a delta from other recent readings.  As long as two

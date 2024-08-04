@@ -27,9 +27,9 @@
 // intensity as a proxy for the distance by calculating 1/sqrt(intensity).
 // The main reason to support this type of sensor is that it's used in the
 // VirtuaPin v3 plunger kit, and several people have requested support so
-// that they can move re-flash that kit using the Pinscape software and
-// continue using their existing plunger sensor.  Many people might also
-// consider this sensor for new DIY builds, since it produces pretty good
+// that they can re-flash that kit using the Pinscape software and
+// continue using their existing plunger sensor.  This sensor is also
+// worth considering for new DIY builds, since it produces pretty good
 // results.  It's not as accurate as a potentiometer or quadrature sensor,
 // but it yields low-noise results with good enough precision for smooth
 // on-screen animation (maybe around 1mm precision).  Its main drawback
@@ -42,13 +42,16 @@
 // VL6180X: This is an optical (IR) "time of flight" sensor that measures
 // the distance to the target by sending optical pings and timing the 
 // return signal, converting the result to distance via the known speed 
-// of light.  This sensor has nominal 1mm precision, although its true
-// precision in testing is closer to 5mm.  Sample times are around 16ms.
-// This makes the sensor acceptable but not great by Pinscape standards;
-// we generally consider 2.5ms read times and .25mm precision to be the
-// minimum standards.  However, this sensor is inexpensive and easier to
-// set up than most of the better options, so it might be attractive to
-// some cab builders despite the quality tradeoffs.
+// of light.  This sensor has nominal 1mm resolution, but sampling noise
+// is on the order of +/-3mm, so the effective resolution is around 5mm.
+// Sample times are around 16ms.  The resolution and sampling rate are
+// both good enough to be usable, but just barely; you really need more
+// like 0.25mm resolution and 2.5ms sampling rate for smooth on-screen
+// animation and repeatable ball-launch speed.  So this sensor isn't
+// really a very good option in terms of simulation quality; a potentiometer
+// is a lot better.  On the plus side, the sensor is inexpensive, it's
+// a non-contact sensor, and it's easy to set up (since no mechanical
+// connection to the plunger is needed).
 //
 //
 

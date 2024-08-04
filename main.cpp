@@ -4234,7 +4234,22 @@ public:
         // doesn't see a jump across the reset
         int cx = accel->cx_, cy = accel->cy_;
         
-        // try to reset the I2C bus, in case that's 
+        // Try to reset the I2C bus, in case that's stuck.  The
+        // accelerometer sometimes seems to miss clocks on the
+        // I2C bus, which leaves its internal I2C state machine
+        // holding SDA low and preventing the host from making
+        // a new request.  The KL25Z doesn't give us any way
+        // to assert a hard reset signal on the accelerometer,
+        // which would be a more sure-fire way to force it into
+        // a good state, but we can usually clear a simple I2C
+        // clock glitch by sending more clocks.  Whatever the
+        // device's state machine state is, it will usually
+        // return to the default state after seeing enough
+        // clock pulses, because a clock pulse should always
+        // advance whatever state it's in to the next one, and
+        // all states should eventually lead back to the base
+        // "listening" state.  It usually takes no more than
+        // one byte's worth of clocks, so 9 clocks.
         accel->clear_i2c();
         
         // re-construct the Accel object
@@ -6676,7 +6691,7 @@ int main(void)
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
     
-    // Set the default PWM period to 0.5ms = 2 kHz.  This will be used 
+    // Set the default PWM period to 0.05ms = 20 kHz.  This is used 
     // for PWM channels on PWM units whose periods aren't changed 
     // explicitly, so it'll apply to LW outputs assigned to GPIO pins.
     // The KL25Z only allows the period to be set at the TPM unit
@@ -6701,7 +6716,7 @@ int main(void)
     // frequency-agnostic PWM user is the LW outputs, so we can choose
     // the default to be suitable for those.  This is chosen to minimize
     // flicker on attached LEDs.
-    NewPwmUnit::defaultPeriod = 0.0005f;
+    NewPwmUnit::defaultPeriod = 0.00005f;
         
     // clear the I2C connection
     Accel::clear_i2c();
