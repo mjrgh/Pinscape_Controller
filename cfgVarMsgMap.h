@@ -48,7 +48,7 @@ void v_func
         
         // ********** DESCRIBE CONFIGURATION VARIABLES **********
     case 0:
-        v_byte_ro(22, 2);       // number of SCALAR variables
+        v_byte_ro(23, 2);       // number of SCALAR variables
         v_byte_ro(6, 3);        // number of ARRAY variables
         break;
         
@@ -85,6 +85,7 @@ void v_func
         v_byte(accel.range, 3);
         v_byte(accel.autoCenterTime, 4);
         v_byte(accel.stutter, 5);
+        v_byte(accel.velocityScalingFactor, 6);
         break;
 
     case 5:
@@ -218,6 +219,11 @@ void v_func
         v_ui16(plunger.cal.raw0, 2);
         v_ui16(plunger.cal.raw1, 4);
         v_ui16(plunger.cal.raw2, 6);
+        break;
+
+    case 23:
+        // default GPIO PWM frequency in Hertz
+        v_ui16(gpioPwmFreq, 2);
         break;
         
     // case N: // new scalar variable

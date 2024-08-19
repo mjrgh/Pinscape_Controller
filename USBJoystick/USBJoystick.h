@@ -88,11 +88,12 @@ class USBJoystick: public USBHID
 public:
     // Length of our joystick reports.  Important: This must be kept in sync 
     // with the actual joystick report format sent in update().
-    static const int reportLen = 14;
+    static const int reportLen = 22;
     
     // Joystick axis report format
-    static const int AXIS_FORMAT_XYZ    = 0;    // nudge on X/Y, plunger on Z
-    static const int AXIS_FORMAT_RXRYRZ = 1;    // nudge on Rx/Ry, plunger on Rz
+    static const int AXIS_FORMAT_XYZ        = 0;    // nudge on X/Y, plunger on Z
+    static const int AXIS_FORMAT_RXRYRZ     = 1;    // nudge on Rx/Ry, plunger on Rz
+    static const int AXIS_FORMAT_XYZ_RXRYRZ = 2;    // accelerations on X/Y, plunger pos on Z, velocities on Rx/Ry, plunger speed on Rz, plunger unprocessed on Slider1
 
     /**
      *   Constructor
@@ -150,7 +151,7 @@ public:
      * @param buttons buttons state, as a bit mask (combination with '|' of JOY_Bn values)
      * @returns true if there is no error, false otherwise
      */
-    bool update(int16_t x, int16_t y, int16_t z, uint32_t buttons, uint16_t status);
+    bool update(int16_t x, int16_t y, int16_t z, int16_t z0, int16_t vx, int16_t vy, int16_t vz, uint32_t buttons, uint16_t status);
      
     /**
      * Update just the status
@@ -242,13 +243,16 @@ public:
      * @param reportTimingFeatures true if this firmware version supports configurable
      *        joystick report timing
      * @param chimeLogicFeature true if this firmware version supports Chime Logic
+     * @param velocityFeatures true if this firmware version supports accelerometer velocity
+     *        integration, plunger speed reporting, and X/Y/Z+RX/RY/RZ joystick reporting
      * @param freeHeapBytes number of free bytes in the malloc heap
      */
     bool reportConfig(int numOutputs, int unitNo, 
         int plungerZero, int plungerMax, int plunterRlsTime, 
         bool configured, bool sbxpbx, bool newAccelFeatures, 
         bool flashStatusFeature, bool reportTimingFeatures,
-        bool chimeLogicFeature, size_t freeHeapBytes);
+        bool chimeLogicFeature, bool velocityFeatures,
+         size_t freeHeapBytes);
         
     /**
      * Write a configuration variable query report.
@@ -393,7 +397,7 @@ private:
     bool enableJoystick;
     
     // joystick axis reporting format
-    bool axisFormat;
+    int axisFormat;
     
     // enable the keyboard interface for button inputs
     bool useKB;
@@ -408,6 +412,14 @@ private:
     int16_t _x;                       
     int16_t _y;     
     int16_t _z;
+
+    // Z0 axis (Z reading before firing event detection)
+    int16_t _z0;
+
+    // current velocity axis values
+    int16_t _vx;
+    int16_t _vy;
+    int16_t _vz;
     
     // joystick button status bits
     uint16_t _buttonsLo;

@@ -263,8 +263,15 @@ struct Config
         // use the XYZ axis format
         joystickAxisFormat = USBJoystick::AXIS_FORMAT_XYZ;
         
-        // send reports every 8.33ms by default (120 Hz, 2X the typical video
-        // refresh rate)
+        // Send reports every 8.33ms by default (120 Hz, 2X the typical video
+        // refresh rate).  Note that the ACTUAL rate is up to the PC - a device
+        // can never SEND a report, it can only answer with a report when the
+        // host ASKS for one.  So for best performance, this must be set to
+        // the same rate that the PC uses, which is typically around 8-10ms.
+        // Any shorter setting here will just burn up more time waiting for
+        // the PC to pick up the next report.  Setting this to match the PC
+        // polling interval allows us to do other tasks between polling cycles
+        // instead of just waiting for the next polling cycle.
         jsReportInterval_us = 8333;
         
         // assume standard orientation, with USB ports toward front of cabinet
@@ -409,6 +416,18 @@ struct Config
         // initially configure with no shift key
         shiftButton.idx = 0;
         shiftButton.mode = 0;
+
+        // Default GPIO PWM frequency.  The default is chosen to be high
+        // enough to be out of the human hearing range, to reduce the
+        // chances of audible vibration when a PWM GPIO output is used to
+        // drive an inductive device like a motor or solenoid.  Ultrasonic
+        // frequencies are also high enough to avoid visible flicker when
+        // driving an LED (anything above about 200 Hz is adequate for 
+        // that).  Note that this should as low as possible after those
+        // constraints, since many of the optocouplers commonly used in
+        // external booster/amplifier circuits can't handle switching
+        // speeds much above 20 kHz.
+        gpioPwmFreq = 20000;
             
         // initially configure with no input buttons
         for (int i = 0 ; i < MAX_BUTTONS ; ++i)
@@ -640,6 +659,11 @@ struct Config
         // video refresh rate, while sending joystick reports at a
         // faster rate for lower button input latency.
         uint8_t stutter;
+
+        // Velocity scaling factor.  This sets the scaling between our
+        // internal mm/s units that we use for the integrated velocity
+        // calculation, and joystick axis units.
+        uint8_t velocityScalingFactor;
     
     } accel;
     
@@ -943,7 +967,9 @@ struct Config
         // IR emitter LED GPIO output pin; must be PWM-capable
         uint8_t emitter;
     } IR;
-    
+
+    // --- Default GPIO PWM Frequency ---
+    uint16_t gpioPwmFreq;
     
     // --- Button Input Setup ---
     ButtonCfg button[MAX_BUTTONS + VIRTUAL_BUTTONS] __attribute__((packed));

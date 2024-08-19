@@ -3584,7 +3584,7 @@ void processButtons(Config &cfg)
                 break;
                 
             case 1:
-                // "Shif AND Key" mode.  The shift button acts like any
+                // "Shift AND Key" mode.  The shift button acts like any
                 // other button, so it's logically on when physically on.
                 bs->logState = bs->physState;
                 break;
@@ -4081,7 +4081,7 @@ protected:
 // MMA8451Q.  This class encapsulates an interrupt handler and 
 // automatic calibration.
 //
-// We collect data at the device's maximum rate of 800kHz (one sample 
+// We collect data at the device's maximum rate of 800 Hz (one sample 
 // every 1.25ms).  To keep up with the high data rate, we use the 
 // device's internal FIFO, and drain the FIFO by polling on each 
 // iteration of our main application loop.  In the past, we used an
@@ -4095,28 +4095,19 @@ protected:
 //
 // The MMA8451Q has three range modes, +/- 2G, 4G, and 8G.  The ADC
 // sample is the same bit width (14 bits) in all modes, so the higher
-// dynamic range modes trade physical precision for range.  For our
-// purposes, precision is more important than range, so we use the
-// +/-2G mode.  Further, our joystick range is calibrated for only
-// +/-1G.  This was unintentional on my part; I didn't look at the
-// MMA8451Q library closely enough to realize it was normalizing to
-// actual "G" units, and assumed that it was normalizing to a -1..+1 
-// scale.  In practice, a +/-1G scale seems perfectly adequate for
-// virtual pinball use, so I'm sticking with that range for now.  But
-// there might be some benefit in renormalizing to a +/-2G range, in
-// that it would allow for higher dynamic range for very hard nudges.
-// Everyone would have to tweak their nudge sensitivity in VP if I
-// made that change, though, so I'm keeping it as is for now; it would
-// be best to make it a config option ("accelerometer high dynamic range") 
-// rather than change it across the board.
+// dynamic range modes trade physical precision for range.  The
+// configuration has an option to select the range setting.  The 2G
+// setting seems to have plenty of dynamic range for virtual pin cab
+// use, and yields the best precision, so it's the best choice for
+// most users.
 //
-// We automatically calibrate the accelerometer so that it's not
-// necessary to get it exactly level when installing it, and so
-// that it's also not necessary to calibrate it manually.  There's
+// We automatically calibrate the zero point, so that it's not
+// necessary to get the board exactly level when installing it, and
+// so that it's not necessary to calibrate it manually.  There's
 // lots of experience that tells us that manual calibration is a
 // terrible solution, mostly because cabinets tend to shift slightly
-// during use, requiring frequent recalibration.  Instead, we
-// calibrate automatically.  We continuously monitor the acceleration
+// during use, requiring frequent recalibration.  Automatic zeroing
+// is much more convenient.  We continuously monitor the acceleration
 // data, watching for periods of constant (or nearly constant) values.
 // Any time it appears that the machine has been at rest for a while
 // (about 5 seconds), we'll average the readings during that rest
@@ -4176,19 +4167,40 @@ class Accel
 public:
     Accel(const Config &cfg) : mma_(MMA8451_SDA_PIN, MMA8451_SCL_PIN, MMA8451_I2C_ADDRESS)        
     {
-        // remember the range
-        range_ = cfg.accel.range;
-        
-        // set the auto-centering mode
-        setAutoCenterMode(cfg.accel.autoCenterTime);
-        
         // no manual centering request has been received
         manualCenterRequest_ = false;
 
-        // reset and initialize
-        reset();
+        // initialize the configuration
+        onConfigChange(4, cfg, true);
     }
-    
+
+    // configuration change
+    void onConfigChange(int varNum, const Config &cfg, bool resetNeeded = false)
+    {
+        // config var #4 - accelerometer settings
+        if (varNum == 4)
+        {
+            // if the range is changing, we'll need to do a reset, to
+            // update the hardware sensor configuration
+            if (range_ != cfg.accel.range)
+                resetNeeded = true;
+
+            // remember the range
+            range_ = cfg.accel.range;
+            
+            // set the auto-centering mode
+            setAutoCenterMode(cfg.accel.autoCenterTime);
+
+            // set the velocity scaling factor, defaulting to 20
+            uint8_t s = cfg.accel.velocityScalingFactor;
+            velocityScalingFactor_ = static_cast<float>(s != 0 ? s : 20);
+        }
+
+        // if necessary, perform a reset
+        if (resetNeeded)
+            reset();
+    }
+
     // Do a full reset of the object.  This tries to clear the I2C
     // bus, and then re-creates the Accel object in place, running
     // through all of the constructors again.  This is only a "soft"
@@ -4384,15 +4396,32 @@ public:
         mma_.init();
         
         // set the range
-        mma_.setRange(
-            range_ == AccelRange4G ? 4 :
-            range_ == AccelRange8G ? 8 :
-            2);
+        int rangeInG = range_ == AccelRange4G ? 4 : range_ == AccelRange8G ? 8 : 2;
+        mma_.setRange(rangeInG);
                 
         // set the average accumulators to zero
         xSum_ = ySum_ = 0;
         nSum_ = 0;
-        
+
+        // zero the velocity readings
+        vx_ = vy_ = 0;
+
+        // Figure the DC filter alpha value from the desired response time
+        static float sampleRate = 800.0f;
+        static float dcTime = 0.250f;  // time in seconds
+        dcAlpha_ = 1.0f - 1.0f/(sampleRate * dcTime);
+
+        // Figure the velocity conversion factor.  This converts from
+        // raw acceleration readings to mm/s.  Device units are 14-bit
+        // signed integers, -8192..+8192, representing the +/- G range,
+        // where one G is a standard Earth gravity, 9.80665 m/s^2.
+        velocityConvFactor_ = static_cast<float>(rangeInG) / 8192.0f * 9806.65f / sampleRate;
+
+        // Figure the velocity decay factor, to reduce the accumulated
+        // velocity by 50% over the desired interval.
+        const float velocityDecayTime = 2.0f;  // time in seconds
+        velocityDecayFactor_ = powf(0.5f, velocityDecayTime / sampleRate);
+
         // read the current registers to clear the data ready flag
         mma_.getAccXYZ(ax_, ay_, az_);
         
@@ -4401,6 +4430,10 @@ public:
         fifoTimer.start();
         tLastSample = tLastChangedSample = fifoTimer.read_us();
     }
+
+    // get the current velocity readings
+    int getVX() const { return scaleVelocityOutput(vx_); }
+    int getVY() const { return scaleVelocityOutput(vy_); }
     
     // Poll the accelerometer.  Returns true on success, false if the
     // device appears to be wedged (because we haven't received a unique
@@ -4427,6 +4460,17 @@ public:
             xSum_ += (x - cx_);
             ySum_ += (y - cy_);
             ++nSum_;
+
+            // Update the velocities.  Use the pre-centered accelerations,
+            // applying the DC removal filter and unit conersion factor.
+            // We use the pre-autocentered accelerations values as inputs
+            // because the DC removal filter removes tilt bias as well as
+            // the auto-cenrtering scheme does, but without discontinuities.
+            // Discontinuities from intermittent auto-centering would show
+            // up as jumps in the velocity, so it's better to use the
+            // continuously operating DC removal filter instead.
+            vx_ = (vx_ * velocityDecayFactor_) + (dcFilterX_.Apply(x, dcAlpha_) * velocityConvFactor_);
+            vy_ = (vy_ * velocityDecayFactor_) + (dcFilterY_.Apply(y, dcAlpha_) * velocityConvFactor_);
             
             // store the updates
             ax_ = x;
@@ -4592,13 +4636,23 @@ private:
         return (i > 20 || i < -20 ? i : filter[i+20]);
     }
 
+    // scale a velocity output
+    int scaleVelocityOutput(float v) const
+    {
+        // apply the scaling factor
+        int vi = static_cast<int>(v * velocityScalingFactor_);
+
+        // clip to the joystick axis range
+        return vi < -JOYMAX ? -JOYMAX : vi > JOYMAX ? JOYMAX : vi;
+    }
+
     // underlying accelerometer object
     MMA8451Q mma_;
     
     // last raw acceleration readings, on the device's signed 14-bit 
     // scale -8192..+8191
     int ax_, ay_, az_;
-    
+
     // running sum of readings since last get()
     int xSum_, ySum_;
     
@@ -4609,6 +4663,48 @@ private:
     // average reading on the accelerometer when in the neutral position
     // at rest.
     int cx_, cy_;
+    
+    // integrated velocity calculation
+    float vx_, vy_;
+
+    // DC removal filter alpha, calculated from the response time
+    float dcAlpha_;
+
+    // DC filter state
+    struct DCFilterState
+    {
+        DCFilterState() : inPrv(0), outPrv(0.0f) { }
+        int inPrv;
+        float outPrv;
+
+        inline float Apply(int in, float alpha) 
+        {
+            float out = alpha*outPrv + static_cast<float>(in - inPrv);
+            inPrv = in;
+            outPrv = out;
+            return out;
+        }
+    };
+    DCFilterState dcFilterX_, dcFilterY_;
+
+    // Velocity decay factor.  This is the factor we apply on each sampling
+    // cycle to reduce the current integrated velocity, to prevent measurement
+    // error in the accelerations from diverging over time in the integrated
+    // velocity calculation.  We calculate this at reset according to the
+    // desired 50% attenuation time.
+    float velocityDecayFactor_;
+
+    // Velocity conversion factor - this converts from accelerometer device units
+    // (-8192..+8191, covering the G range set in the configuration) to mm/s.  We
+    // calculate this on reset from the G range setting.
+    float velocityConvFactor_;
+
+    // Velocity output scaling factor.  This scales from our internal mm/s units
+    // to the ad hoc units we use in the INT16 fields in the HID reports.  This
+    // should be chosen so that typical maximum velocities are nearly (but not
+    // quite) full scale in the INT16 output fields, to take good advantage of
+    // the available precision without risk of overflowing.
+    float velocityScalingFactor_;
     
     // range (AccelRangeXxx value, from config.h)
     uint8_t range_;
@@ -5523,6 +5619,12 @@ public:
     {
         // not in a firing event yet
         firing = 0;
+
+        // zero the position and speed
+        z = 0;
+        z0 = 0;
+        prv.pos = 0;
+        prv.t = 0;
     }
     
     // Collect a reading from the plunger sensor.  The main loop calls
@@ -5603,6 +5705,46 @@ public:
                     r.pos = -JOYMAX;
             }
 
+            // Rotate the new sample into the speed calculation.  Only do
+            // this if at least 1ms has elapsed, so that the denominator in
+            // the slope calculation isn't so small that the uncertainty in
+            // the clock reading dominates.
+            static const uint32_t dtMinForSpeed = 1000;
+            if (static_cast<uint32_t>(r.t - speed.nxt.t) < dtMinForSpeed)
+                return;
+
+            // rotate the new sample into the speed calculation
+            speed.Add(r);
+
+            // For the remainder of this step, switch to the "current"
+            // position in the three-point speed history.  That's actually
+            // the prior input sample.
+            r = speed.cur;
+
+            // set the new calibrated reading, before firing event detection
+            z0 = r.pos;
+
+            // Check for a Z0 hold in effect.  If we're earlier than the Z0
+            // hold time, use the Z0 hold position.  Otherwise, check for a
+            // new hold: if we're forward of the zero point, and the plunger
+            // just reversed direction, hold the current position for a few
+            // USB reports.  This helps ensure that the simulator doesn't 
+            // miss the forward peak, which can easily happen in the USB 
+            // report cycle samples it just before and then again just
+            // after the peak.
+            const int z0HoldTime = 75000;
+            if (static_cast<uint32_t>(r.t - z0Hold.t) < z0HoldTime)
+            {
+                // Z0 hold in effect
+                z0 = z0Hold.pos;
+            }
+            else if (speed.prv.pos < 0 && r.pos > speed.prv.pos)
+            {
+                // reversing when forward of the firing line - hold the peak briefly
+                z0Hold.pos = z0 = speed.prv.pos;
+                z0Hold.t = r.t;
+            }
+                
             // Look for a firing event - the user releasing the plunger and
             // allowing it to shoot forward at full speed.  Wait at least 5ms
             // between samples for this, to help distinguish random motion 
@@ -5615,12 +5757,13 @@ public:
             // at intermediate steps along the way, so the sampling has to be
             // considerably faster than the whole travel time, which is about
             // 25-50ms.
-            if (uint32_t(r.t - prv.t) < 5000UL)
+            static const uint32_t dtMinForFiringEvent = 5000UL;
+            if (static_cast<uint32_t>(r.t - prv.t) < dtMinForFiringEvent)
                 return;
-                
-            // assume that we'll report this reading as-is
+
+            // assume that this will also be the fully processed reported value
             z = r.pos;
-                
+
             // Firing event detection.
             //
             // A "firing event" is when the player releases the plunger from
@@ -5857,10 +6000,23 @@ public:
     }
     
     // Get the current value to report through the joystick interface
-    int16_t getPosition()
+    int16_t getPosition() const
     {
-        // return the last reading
+        // return the last processed reading
         return z;
+    }
+
+    // Get the current pre-firing-event value
+    int16_t getPosition0() const
+    {
+        // return the last unprocessed reading
+        return z0;
+    }
+
+    int16_t getSpeed()
+    {
+        // return the recent peak forward (negative) speed reading
+        return speed.peak.pos;
     }
         
     // Set calibration mode on or off
@@ -5956,11 +6112,95 @@ public:
     bool isFiring() { return firing == 3; }
     
 private:
-    // current reported joystick reading
+    // Current reported joystick reading, after caliobration and
+    // firing-event processing.
     int z;
-    
-    // previous reading
+
+    // Current reading, after calibration but before firing-event processing
+    int z0;
+
+    // Z0 hold.  Z0 is nominally the position reading without firing-event
+    // processing, but there is still one element we apply: when the plunger
+    // reaches the forward end of its travel and starts bouncing back, we
+    // we hold the reading in the forward position for an extra couple of
+    // USB cycles.  The reason this is needed is that the bounce-back can
+    // be so quick that the simulator never sees the fully forward position
+    // at all, as the USB reports often align just before and after the
+    // bounce.  This manifests in the simulator as a delayed firing time,
+    // since the simulator doesn't see the plunger hit the ball until some
+    // later bounce cycle that does happen to align with the USB reports.
+    PlungerReading z0Hold;
+
+    // previous reading, for firing event detection
     PlungerReading prv;
+
+    // For the speed, we maintain a three-element history: previous, 
+    // current, and next.  The current speed is the slope across the
+    // previous and next reading.  The previous/current/next designations
+    // are for the *output* side, of course, as we can't know the next
+    // reading until we read it, at which point it's the current one on
+    // the input side.
+    struct SpeedData
+    {
+        SpeedData()
+        {
+            prv.pos = cur.pos = nxt.pos = 0;
+            prv.t = cur.t = nxt.t = 0;
+        }
+
+        // rotate in a sample
+        void Add(PlungerReading &r)
+        {
+            // rotate in the sample
+            prv = cur;
+            cur = nxt;
+            nxt = r;
+
+            // Calculate the speed from prv to nxt, in units of normalized
+            // joystick Z axis units per centisecond.  The timestamps are
+            // in microseconds, and there are 10,000 cs per us, so multiply
+            // by 10000 to convert to Z/cs.  The reason we report in Z/cs
+            // is simply that it's a good fit for the joystick field precision,
+            // based on empirical observation of mecahnical plunger speeds.
+            int v = static_cast<int>(static_cast<float>(nxt.pos - prv.pos) / static_cast<float>(static_cast<uint32_t>(nxt.t - prv.t)) * 10000.0f);
+            v = (v < -JOYMAX ? -JOYMAX : v > JOYMAX ? JOYMAX : v);
+
+            // If we've reached the peak speed hold time, or this is a new
+            // peak speed, record the current speed as the new peak speed.
+            // We only care about forward peak speeds, which are negative.
+            //
+            // The hold time is intended to ensure that the simulator sees
+            // the peak reading, even if misses one or two of our HID reports.
+            // Analog axis values in HID reports are generally meant to be
+            // instantaneous states, not "events", so an application reading
+            // these reports generally misses and ignores readings between
+            // its polling cycles.  In the simulator, it's really the peak
+            // speed that's important to calculating the ball launch impulse,
+            // so we get more consistent results if we hold the peak for a
+            // few HID reporting cycles, to ensure that the simulator sees
+            // the peak speed at the same moment it ses the position collide
+            // with the ball's position.
+            //
+            // Since the speed isn't visible to the user in the simulation,
+            // we can hold it for a relatively extended time, to be sure
+            // that the simulator sees the value we want it to see.
+            const int peakSpeedHoldTime = 100000;
+            if (static_cast<uint32_t>(r.t - peak.t) > peakSpeedHoldTime || v < peak.pos)
+            {
+                peak.pos = v;
+                peak.t = r.t;
+            }
+        }
+
+        // three-point history of recent position readings, for the slope calculation
+        PlungerReading prv;
+        PlungerReading cur;
+        PlungerReading nxt;
+
+        // peak speed reading (peak.pos is a speed, not a position)
+        PlungerReading peak;
+    };
+    SpeedData speed;
 
     // Calibration state.  During calibration mode, we watch for release
     // events, to measure the time it takes to complete the release
@@ -6409,6 +6649,7 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 true,               // we support the "flash write ok" status bit in joystick reports
                 true,               // we support the configurable joystick report timing features
                 true,               // chime logic is supported
+                true,               // velocity features supported
                 mallocBytesFree()); // remaining memory size
             break;
             
@@ -6549,9 +6790,9 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
         // in a variable-dependent format.
         configVarSet(data);
         
-        // notify the plunger, so that it can update relevant variables
-        // dynamically
+        // notify the plunger and accelerometer, so they can update relevant variables
         plungerSensor->onConfigChange(data[1], cfg);
+        accel.onConfigChange(data[1], cfg);
     }
     else if (data[0] == 67)
     {
@@ -6691,33 +6932,6 @@ int main(void)
     // say hello to the debug console, in case it's connected
     printf("\r\nPinscape Controller starting\r\n");
     
-    // Set the default PWM period to 0.05ms = 20 kHz.  This is used 
-    // for PWM channels on PWM units whose periods aren't changed 
-    // explicitly, so it'll apply to LW outputs assigned to GPIO pins.
-    // The KL25Z only allows the period to be set at the TPM unit
-    // level, not per channel, so all channels on a given unit will
-    // necessarily use the same frequency.  We (currently) have two
-    // subsystems that need specific PWM frequencies: TLC5940NT (which
-    // uses PWM to generate the grayscale clock signal) and IR remote
-    // (which uses PWM to generate the IR carrier signal).  Since
-    // those require specific PWM frequencies, it's important to assign
-    // those to separate TPM units if both are in use simultaneously;
-    // the Config Tool includes checks to ensure that will happen when
-    // setting a config interactively.  In addition, for the greatest
-    // flexibility, we take care NOT to assign explicit PWM frequencies
-    // to pins that don't require special frequences.  That way, if a
-    // pin that doesn't need anything special happens to be sharing a
-    // TPM unit with a pin that does require a specific frequency, the
-    // two will co-exist peacefully on the TPM.
-    //
-    // We set this default first, before we create any PWM GPIOs, so
-    // that it will apply to all channels by default but won't override
-    // any channels that need specific frequences.  Currently, the only
-    // frequency-agnostic PWM user is the LW outputs, so we can choose
-    // the default to be suitable for those.  This is chosen to minimize
-    // flicker on attached LEDs.
-    NewPwmUnit::defaultPeriod = 0.00005f;
-        
     // clear the I2C connection
     Accel::clear_i2c();
     
@@ -6759,7 +6973,10 @@ int main(void)
     // details of how the C compiler arranges the struct memory.)
     if (!loadConfigFromFlash())
         loadHostLoadedConfig();
-    
+
+    // set the default GPIO PWM period from the configuration
+    NewPwmUnit::defaultPeriod = 1.0f / static_cast<float>(cfg.gpioPwmFreq == 0 ? 20000 : cfg.gpioPwmFreq);
+            
     // initialize the diagnostic LEDs
     initDiagLEDs(cfg);
 
@@ -6889,7 +7106,7 @@ int main(void)
     // convention.  We can alternatively report in the RX and RY axes; this
     // can be set in the configuration.
     int x = 0, y = 0;
-    
+
     // Time since we successfully sent a USB report.  This is a hacky 
     // workaround to deal with any remaining sporadic problems in the USB 
     // stack.  I've been trying to bulletproof the USB code over time to 
@@ -7180,9 +7397,13 @@ int main(void)
             statusFlags |= 0x20;
 
         // If it's been long enough since our last USB status report, send
-        // the new report.  VP only polls for input in 10ms intervals, so
-        // there's no benefit in sending reports more frequently than this.
-        // More frequent reporting would only add USB I/O overhead.
+        // the new report.  The actual polling rate is controlled by the PC's
+        // HID driver; Windows typically polls at 8-10ms intervals.  There's
+        // no benefit in trying to send reports more frequently, because the
+        // device can't actually SEND anything; it can only answer a QUERY
+        // from the PC side.  So we intentionally pace reports to match the
+        // query rate, so that we don't burn up time between queries just
+        // idling waiting for the next one.
         if (cfg.joystickEnabled && jsReportTimer.read_us() > cfg.jsReportInterval_us)
         {
             // Increment the "stutter" counter.  If it has reached the
@@ -7219,10 +7440,24 @@ int main(void)
             // a traditional plunger, so we don't want to confuse VP with
             // regular plunger inputs.
             int zActual = plungerReader.getPosition();
+            int z0Actual = plungerReader.getPosition0();
+            int zvActual = plungerReader.getSpeed();
             int zReported = (!effectivePlungerEnabled || zbLaunchOn ? 0 : zActual);
+            int z0Reported = (!effectivePlungerEnabled || zbLaunchOn ? 0 : z0Actual);
+            int zvReported = (!effectivePlungerEnabled || zbLaunchOn ? 0 : zvActual);
+
+            // Get the accelerometer integrated velocities, properly rotated.
+            // These aren't included in the "stutter" timing that that the
+            // accelerations are, because these are instantaneous states.
+            // The accelerations are stuttered because they're more like
+            // events, so we want to increase the odds that the host sees
+            // each one.
+            int vx = accel.getVX();
+            int vy = accel.getVY();
+            accelRotate(vx, vy);
             
             // send the joystick report
-            jsOK = js.update(x, y, zReported, jsButtons, statusFlags);
+            jsOK = js.update(x, y, zReported, z0Reported, vx, vy, zvReported, jsButtons, statusFlags);
             
             // we've just started a new report interval, so reset the timer
             jsReportTimer.reset();
