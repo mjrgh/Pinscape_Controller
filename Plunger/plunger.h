@@ -174,7 +174,7 @@ public:
     // sensor like the TSL1410R, sending the full pixel array by USB takes 
     // so long that the frame rate is way below regular video rates.
     //
-    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags)
+    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags, int16_t speed)
     {
         // read the current position
         int pos = 0xFFFF;
@@ -195,7 +195,7 @@ public:
         // as most non-image sensors don't have to do anything CPU-intensive
         // with the raw readings (all they usually have to do is scale the
         // value to the abstract reporting range).
-        js.sendPlungerStatus(0, pos, 0x01, getAvgScanTime(), 0);
+        js.sendPlungerStatus(0, pos, 0x01, getAvgScanTime(), 0, speed);
         js.sendPlungerStatus2(nativeScale, jfLo, jfHi, r.pos, 0);
     }
     
@@ -456,7 +456,7 @@ public:
 
     // Send a status report to the joystick interface.
     // See plunger.h for details on the arguments.
-    virtual void sendStatusReport(USBJoystick &js, uint8_t flags)
+    virtual void sendStatusReport(USBJoystick &js, uint8_t flags, int16_t speed)
     {
         // start a timer to measure the processing time
         Timer pt;
@@ -529,7 +529,7 @@ public:
             jsflags |= 0x02;
             
         // send the sensor status report headers
-        js.sendPlungerStatus(n, pos, jsflags, sensor.getAvgScanTime(), processTime);
+        js.sendPlungerStatus(n, pos, jsflags, sensor.getAvgScanTime(), processTime, speed);
         js.sendPlungerStatus2(nativeScale, jfLo, jfHi, rawPos, axcTime);
         
         // send any extra status headers for subclasses

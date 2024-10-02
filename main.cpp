@@ -5303,7 +5303,7 @@ bool loadConfigFromFlash()
 bool saveConfigToFlash(int tFollowup, bool reboot)
 {
     // get the config block location in the flash memory
-    uint32_t addr = uint32_t(configFlashAddr());
+    uint32_t addr = reinterpret_cast<uint32_t>(configFlashAddr());
 
     // save the data
     bool ok = nvm.save(iap, addr);
@@ -5705,15 +5705,29 @@ public:
                     r.pos = -JOYMAX;
             }
 
-            // Rotate the new sample into the speed calculation.  Only do
-            // this if at least 1ms has elapsed, so that the denominator in
-            // the slope calculation isn't so small that the uncertainty in
-            // the clock reading dominates.
+            // Skip the new sample if less than 1ms has elapsed.  There's
+            // no benefit in sampling more frequently than this, and there's
+            // a cost to sampling too frequently, which is that shorter time
+            // intervals have higher relative uncertainty, which gives our
+            // speed calculation higher relative uncertainty.  The optimal
+            // sampling interval needs to be short enough that we can detect
+            // the direction of motion properly without aliasing after
+            // direction changes, but long enough that we have an accurate
+            // time base for the speed calculation.  1ms is fast enough
+            // because a typical pinball plunger mechanism's top speed is
+            // about 5mm/ms, or about 1/20 of the travel range per ms.  As
+            // long as we sample at a rate where it won't traverse more
+            // than about 1/4 of the travel range per sample, we'll be
+            // able to detect the direction correctly.  So intervals up
+            // to about 4ms still yield good results.
             static const uint32_t dtMinForSpeed = 1000;
             if (static_cast<uint32_t>(r.t - speed.nxt.t) < dtMinForSpeed)
                 return;
 
-            // rotate the new sample into the speed calculation
+            // collect the raw reading in the diagnostic log
+            diagnosticMode.Add(static_cast<int16_t>(r.pos));
+
+            // add the new sample into the speed calculation
             speed.Add(r);
 
             // For the remainder of this step, switch to the "current"
@@ -6110,8 +6124,66 @@ public:
 
     // is a firing event in progress?
     bool isFiring() { return firing == 3; }
+
+    // Diagnostic mode
+    void SetDiagnosticMode(bool enable) { diagnosticMode.enabled = enable; }
+    bool IsDiagnosticMode() const { return diagnosticMode.enabled; }
+    void PopulateDiagnosticReport(uint8_t *buf, size_t buflen) { diagnosticMode.PopulateReport(buf, buflen); }
     
 private:
+    // Diagnostic mode
+    struct DiagnosticMode
+    {
+        DiagnosticMode()
+        {
+            enabled = false;
+            nReadings = 0;
+            writeIdx = 0;
+        }
+
+        // mode enabled
+        bool enabled;
+
+        // recent readings
+        static const int MAX_READINGS = 10;
+        int16_t readings[MAX_READINGS];
+        int nReadings;
+        int writeIdx;
+
+        // add a reading
+        void Add(int16_t r) 
+        { 
+            readings[writeIdx++] = r;
+            if (writeIdx >= MAX_READINGS) writeIdx = 0;
+            if (++nReadings > MAX_READINGS) nReadings = MAX_READINGS;
+        }
+
+        // populate a USB report
+        void PopulateReport(uint8_t *buf, size_t buflen)
+        {
+            int nReported = (buflen - 2)/2;
+            if (nReported > nReadings) nReported = nReadings;
+            buf[0] = static_cast<uint8_t>(nReported);
+            buf[1] = 0;
+            Get(&buf[2], nReported);
+        }
+
+        // Get readings into a USB buffer, most recent first.  Clears the
+        // buffer by resetting the reading count.
+        void Get(uint8_t *buf, int n)
+        {
+            int idx = writeIdx - 1;
+            for (int i = 0 ; i < n && i < nReadings ; ++i, --idx)
+            {
+                if (idx < 0) idx = MAX_READINGS - 1;
+                int r = readings[idx];
+                *buf++ = static_cast<uint8_t>(r & 0xFF);
+                *buf++ = static_cast<uint8_t>((r >> 8) & 0xFF);
+            }
+            nReadings = 0;
+        }
+    } diagnosticMode;
+
     // Current reported joystick reading, after caliobration and
     // firing-event processing.
     int z;
@@ -6140,6 +6212,13 @@ private:
     // are for the *output* side, of course, as we can't know the next
     // reading until we read it, at which point it's the current one on
     // the input side.
+    //
+    // For rapid forward motions that resemble firing events, we also
+    // track the starting point of the forward motion.  This lets us
+    // figure the speed based on an assumption of constant acceleration
+    // from the starting position.  That has a longer time base than
+    // the span between adjacent sensor readings, which makes the speed
+    // calculation more consistent.
     struct SpeedData
     {
         SpeedData()
@@ -6156,13 +6235,12 @@ private:
             cur = nxt;
             nxt = r;
 
-            // Calculate the speed from prv to nxt, in units of normalized
-            // joystick Z axis units per centisecond.  The timestamps are
-            // in microseconds, and there are 10,000 cs per us, so multiply
-            // by 10000 to convert to Z/cs.  The reason we report in Z/cs
-            // is simply that it's a good fit for the joystick field precision,
-            // based on empirical observation of mecahnical plunger speeds.
-            int v = static_cast<int>(static_cast<float>(nxt.pos - prv.pos) / static_cast<float>(static_cast<uint32_t>(nxt.t - prv.t)) * 10000.0f);
+            // calculate the speed as the slope from previous to next
+            float dt = static_cast<float>(static_cast<uint32_t>(nxt.t - prv.t));
+            float ds = static_cast<float>(nxt.pos - prv.pos);
+            int v = static_cast<int>(ds / dt * 10000.0f);
+
+            // limit the velocity to the joystick range
             v = (v < -JOYMAX ? -JOYMAX : v > JOYMAX ? JOYMAX : v);
 
             // If we've reached the peak speed hold time, or this is a new
@@ -6172,14 +6250,26 @@ private:
             // The hold time is intended to ensure that the simulator sees
             // the peak reading, even if misses one or two of our HID reports.
             // Analog axis values in HID reports are generally meant to be
-            // instantaneous states, not "events", so an application reading
-            // these reports generally misses and ignores readings between
-            // its polling cycles.  In the simulator, it's really the peak
-            // speed that's important to calculating the ball launch impulse,
-            // so we get more consistent results if we hold the peak for a
-            // few HID reporting cycles, to ensure that the simulator sees
-            // the peak speed at the same moment it ses the position collide
-            // with the ball's position.
+            // treated as instantaneous states, not "events".  This is
+            // important because it means that applications don't have to
+            // process every report: they can skip as many as they like and
+            // still get the latest state as soon as they read a new report,
+            // since every report contains the full current state of the
+            // sensors and thus supersedes all prior reports.  The problem
+            // this creates for the speed axis is that the simulator might
+            // not happen to sample the speed axis at exactly the time when
+            // the simulated plunger hit the ball.  It will read whatever
+            // speed the device happens to report at that point in the
+            // simulation, which may be quite different from the
+            // collision-point speed.  Holding the peak speed is meant to
+            // make the collision speeds more consistent by assuming that
+            // plungers are normally situated so that they hit the ball at
+            // roughly at the end of their travel, where the speed is at
+            // its highest.  So the peak speed should also be the collision
+            // speed.  Holding this for a few reports helps ensure that the
+            // simulator sees the peak speed even if it doesn't detect the
+            // collision until a few HID cycles after the mecahnical plunger
+            // passed the notional collision point.
             //
             // Since the speed isn't visible to the user in the simulation,
             // we can hold it for a relatively extended time, to be sure
@@ -6778,6 +6868,22 @@ void handleInputMsg(LedWizMsg &lwm, USBJoystick &js, Accel &accel)
                 // routine to send the command as soon as the transmitter
                 // is free
                 IRAdHocCmd.ready = 1;
+            }
+            break;
+
+        case 18:
+            // 18 = special diagnostic codes.
+            switch (data[2])
+            {
+            case 0:
+                // all diagnostics off
+                plungerReader.SetDiagnosticMode(false);
+                break;
+
+            case 1:
+                // enable plunger diagnostics
+                plungerReader.SetDiagnosticMode(true);
+                break;
             }
             break;
         }
@@ -7404,6 +7510,7 @@ int main(void)
         // from the PC side.  So we intentionally pace reports to match the
         // query rate, so that we don't burn up time between queries just
         // idling waiting for the next one.
+        bool sendNormalReports = true;
         if (cfg.joystickEnabled && jsReportTimer.read_us() > cfg.jsReportInterval_us)
         {
             // Increment the "stutter" counter.  If it has reached the
@@ -7456,8 +7563,22 @@ int main(void)
             int vy = accel.getVY();
             accelRotate(vx, vy);
             
-            // send the joystick report
-            jsOK = js.update(x, y, zReported, z0Reported, vx, vy, zvReported, jsButtons, statusFlags);
+            // check for special diagnostic modes
+            if (plungerReader.IsDiagnosticMode())
+            {
+                // construct a plunger diagnostic report
+                uint8_t buf[USBJoystick::reportLen];
+                plungerReader.PopulateDiagnosticReport(buf, sizeof(buf));
+                jsOK = js.reportRawBytes(buf, sizeof(buf));
+
+                // skip normal reports
+                sendNormalReports = false;
+            }
+            else
+            {
+                // send the joystick report
+                jsOK = js.update(x, y, zReported, z0Reported, vx, vy, zvReported, jsButtons, statusFlags);
+            }
             
             // we've just started a new report interval, so reset the timer
             jsReportTimer.reset();
@@ -7467,7 +7588,7 @@ int main(void)
         if (reportPlungerStat && plungerSensor->ready())
         {
             // send the report            
-            plungerSensor->sendStatusReport(js, reportPlungerStatFlags);
+            plungerSensor->sendStatusReport(js, reportPlungerStatFlags, plungerReader.getSpeed());
 
             // we have satisfied this request
             reportPlungerStat = false;
@@ -7498,14 +7619,14 @@ int main(void)
         
         // If joystick reports are turned off, send a generic status report
         // periodically for the sake of the Windows config tool.
-        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 10000UL)
+        if (!cfg.joystickEnabled && jsReportTimer.read_us() > 10000UL && sendNormalReports)
         {
             jsOK = js.updateStatus(statusFlags);
             jsReportTimer.reset();
         }
 
         // if we successfully sent a joystick report, reset the watchdog timer
-        if (jsOK) 
+        if (jsOK)
         {
             jsOKTimer.reset();
             jsOKTimer.start();

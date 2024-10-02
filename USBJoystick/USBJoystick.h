@@ -172,7 +172,7 @@ public:
      * @param processingTime time in microseconds to process the current frame
      */
     bool sendPlungerStatus(int npix, int pos, int flags,
-        uint32_t avgScanTime, uint32_t processingTime);
+        uint32_t avgScanTime, uint32_t processingTime, int16_t speed);
         
     /**
       * Send a secondary plunger status report header.
@@ -272,6 +272,12 @@ public:
      * @param date build date plus time, in __DATE__ " " __TIME__ macro format ("Mon dd, yyyy hh:mm:ss")
      */
     bool reportBuildInfo(const char *date);
+
+    /**
+     * Send a raw byte buffer as a report
+     */
+    bool reportRawBytes(const uint8_t *data, size_t len);
+
      
     /**
       * Write a physical button status report.

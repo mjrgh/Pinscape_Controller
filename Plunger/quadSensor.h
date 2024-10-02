@@ -153,10 +153,10 @@ public:
         return true;
     }
     
-    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags)
+    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags, int16_t speed)
     {
         // send the common status report
-        PlungerSensor::sendStatusReport(js, flags);
+        PlungerSensor::sendStatusReport(js, flags, speed);
 
         // send the extra quadrature sensor status report
         js.sendPlungerStatusQuadrature((st & 0x01) != 0, (st & 0x02) != 0);

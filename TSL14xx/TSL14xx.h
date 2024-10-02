@@ -210,7 +210,7 @@
  *  conversion at a time.  Paradoxically, using the sensor's parallel 
  *  mode is actually *slower* with a KL25Z than using its serial mode,
  *  because we can only maintain the higher throughput of the KL25Z ADC's
- *  continuous sampling mode by reading all samples thorugh a single
+ *  continuous sampling mode by reading all samples through a single
  *  channel.  Switching channels on alternating samples involves a
  *  bunch of setup overhead within the ADC hardware that adds lots of
  *  clocks compared to single-channel continuous mode.

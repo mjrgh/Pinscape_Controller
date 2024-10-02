@@ -261,10 +261,10 @@ public:
     virtual int postJitterFilter(int pos) { return pos; }
     
     // Send a status report for the config tool sensor viewer
-    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags)
+    virtual void sendStatusReport(class USBJoystick &js, uint8_t flags, int16_t speed)
     {
         // send the common status report
-        PlungerSensor::sendStatusReport(js, flags);
+        PlungerSensor::sendStatusReport(js, flags, speed);
 
         // send the extra VCNL4010 sensor status report
         js.sendPlungerStatusVCNL4010(lastFilteredCount, lastRawCount);

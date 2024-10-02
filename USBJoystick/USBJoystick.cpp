@@ -131,8 +131,8 @@ bool USBJoystick::mediaUpdate(uint8_t data)
     return writeTO(EP4IN, report.data, report.length, MAX_PACKET_SIZE_EPINT, 100);
 }
  
-bool USBJoystick::sendPlungerStatus(
-    int npix, int plungerPos, int flags, uint32_t avgScanTime, uint32_t processingTime)
+bool USBJoystick::sendPlungerStatus(int npix, int plungerPos, int flags, 
+    uint32_t avgScanTime, uint32_t processingTime, int16_t speed)
 {
     HID_REPORT report;
     
@@ -147,17 +147,20 @@ bool USBJoystick::sendPlungerStatus(
     report.data[ofs++] = 0;
 
     // write the number of pixels to bytes 3-4
-    put(ofs, uint16_t(npix));
+    put(ofs, static_cast<uint16_t>(npix));
     ofs += 2;
     
     // write the detected plunger position to bytes 5-6
-    put(ofs, uint16_t(plungerPos));
+    put(ofs, static_cast<uint16_t>(plungerPos));
     ofs += 2;
     
     // Add the calibration mode flag if applicable
     extern bool plungerCalMode;
     if (plungerCalMode) flags |= 0x04;
-    
+
+    // add the speed-reported flag
+    flags |= 0x08;
+
     // write the flags to byte 7
     report.data[ofs++] = flags;
     
@@ -172,6 +175,9 @@ bool USBJoystick::sendPlungerStatus(
     report.data[ofs++] = t & 0xff;
     report.data[ofs++] = (t >> 8) & 0xff;
     report.data[ofs++] = (t >> 16) & 0xff;
+
+    // add the speed at bytes 14-15
+    put(ofs, static_cast<uint16_t>(speed));
     
     // send the report
     report.length = reportLen;
@@ -472,7 +478,7 @@ bool USBJoystick::reportConfig(
     //  0x08  -> flash status feature supported
     //  0x10  -> joystick report timing features supported
     //  0x20  -> chime logic feature supported
-    //  0x40  -> accelerometer velocity, plunger speed, X/Y/Z+RX/RY/RZ features supported
+    //  0x40  -> accelerometer velocity, plunger speed, X/Y/Z+RX/RY/RZ features supported, and adjustable PWM
     report.data[11] = 
         (configured ? 0x01 : 0x00)
         | (sbxpbx ? 0x02 : 0x00)
@@ -538,6 +544,14 @@ bool USBJoystick::reportRawIR(int n, const uint16_t *data)
     
     // send the report
     report.length = reportLen;
+    return sendTO(&report, 100);
+}
+
+bool USBJoystick::reportRawBytes(const uint8_t *data, size_t len)
+{
+    HID_REPORT report;
+    report.length = reportLen;
+    memcpy(report.data, data, len < reportLen ? len : reportLen);
     return sendTO(&report, 100);
 }
 

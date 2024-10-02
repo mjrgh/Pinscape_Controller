@@ -140,6 +140,7 @@
 //                   0x02 = reversed orientation detected
 //                   0x04 = calibration mode is active (no pixel packets
 //                          are sent for this reading)
+//                   0x08 = speed is reported in bytes 14:15
 //    bytes 8:9:10 = average time for each sensor read, in 10us units.
 //                This is the average time it takes to complete the I/O
 //                operation to read the sensor, to obtain the raw sensor
@@ -158,6 +159,11 @@
 //                is usually zero or negligible for analog sensor types, 
 //                since the only "analysis" is a multiplication to rescale 
 //                the ADC sample.
+//    bytes 14:15 = speed report; only valid if bit 0x08 is set in the
+//                flags (older versions, before September 2024, didn't
+//                report this field).  Little-endian integer, in joystick
+//                speed axis reporting units (normalize distance units
+//                per 10ms, same as normal joystick reports)
 //
 // An optional second message provides additional information:
 //
@@ -351,7 +357,7 @@
 // the command.
 //
 //   bytes 0:1 = 0xA2.  This has bit pattern 10100 in the high 5 bits (and
-//               10100010 in the high 8 bits to distinguish it from other 
+//               10100010 in the high 8 bits) to distinguish it from other 
 //               report types.
 //   byte 2    = number of raw reports that follow
 //   bytes 3:4 = first raw report, as a little-endian 16-bit int.  The
@@ -396,6 +402,25 @@
 //            that need to be updates in the reconstruction (such as toggle
 //            bits or sequencing codes).
 //
+// 2H. Plunger sensor diagnostics
+// This report type completely replaces the normal plunger sensor reports
+// when the diagnostic mode is engaged.  Since this mode must be explicitly
+// engaged, and thus the host knows when to read them, we skip the usual
+// status flag indicators in order to use all available bytes.  The purpose
+// of this mode is to relay every raw plunger sensor reading back to the PC
+// host, to allow the PC to see in detail what the firmware is reading from
+// the sensor.  The report therefore packs a varying number of sensor readings,
+// so that it can pass back all readings collected since the last report.
+// Up to 10 readings are passed back; if more than 10 readings were collected
+// since the previous report, only the most recent 10 are included.  Readings
+// are ordered newest to oldest.
+//
+// byte 0   = number of plunger reports
+// byte 1   = unused, 0
+// byte 2:3 = first reading (newest)
+// byte 4:5 = second reading
+//  ...
+// byte 20:21 = 10th reading (oldest)
 //
 // WHY WE USE A HACKY APPROACH TO DIFFERENT REPORT TYPES
 //
@@ -657,6 +682,20 @@
 //             IR code stored in a command slot.
 //
 //               byte 3 = command number (1..MAX_IR_CODES)
+//
+//       18 -> Special diagnostic commands.  These are mostly for internal
+//             development/debugging work.  Byte 3 contains a diagnostic code
+//             number, essentially a sub-command.  The remaining bytes are
+//             arguments that vary according to the byte 3 sub-command.
+//
+//             Byte 3 values:
+//
+//               0x00 -> cancel diagnostic modes
+//
+//               0x01 -> enter plunger sensor diagnostic mode.  The device
+//                       replaces the usual joystick reports with special
+//                       plunger sensor reports that pass back all plunger
+//                       sensor readings as long as the mode is engaged.
 //               
 //
 // 66  -> Set configuration variable.  The second byte of the message is the config
