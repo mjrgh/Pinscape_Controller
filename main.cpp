@@ -6235,7 +6235,23 @@ private:
             cur = nxt;
             nxt = r;
 
-            // calculate the speed as the slope from previous to next
+            // Calculate the speed as the slope from previous to next.
+            // The units are normalized joystick Z axis units per centisecond
+            // (1/100ths of a second, or 10ms).  The native timestamps are in
+            // microseconds, and there are 10,000 us per cs, to multiply the
+            // ds/dt value by 10000 to get Z/cs speed units.  The reason we
+            // use centiseconds as the time unit for the speed reports is that
+            // it yields speed values that fit well into the available range
+            // of the joystick reports.  The maximum speed for a mechanical
+            // plunger is about 4.5mm/ms, according to practical measurements,
+            // which is 45mm/cs, or 2764 Z/cs, with the calibrated maximum
+            // retraction point at 4096 and the calibrated rest at zero.
+            // The joystick reports can handle +/- 4095, so a practical max
+            // reading of 2764 uses most of the available range, but leaves
+            // some headroom for mechanisms that are faster than the ones
+            // I've tested.  Using "most of the range" is good because it
+            // takes advantage of the available precision, and headroom is
+            // good because it avoids clipping if we exceed the maximum.
             float dt = static_cast<float>(static_cast<uint32_t>(nxt.t - prv.t));
             float ds = static_cast<float>(nxt.pos - prv.pos);
             int v = static_cast<int>(ds / dt * 10000.0f);
