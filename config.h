@@ -700,6 +700,7 @@ struct Config
         // Miscellaneous parameters; meanings defined per sensor:
         //
         //  Sensor       Param1
+        //  TSL14xx      Edge scan mode
         //  VCNL4010     IRED current
         //
         uint8_t param1;
@@ -753,10 +754,13 @@ struct Config
         //         around.  This can be used to correct for installing the
         //         sensor backwards without having to change the hardware.
         //
+        //  0x40 = READ-ONLY feature flag.  This always reads as set if the
+        //         firmware supports the TSL14xx scan mode settings
+        //
         //  0x80 = READ-ONLY feature flag.  This always reads as set if the
-        //         feature is enabled.  Note that the USB data exchanger always
-        //         sets the bit on read, so it's not necessary to actually
-        //         store it.
+        //         firmware supports the reverse orientation flag.  The USB
+        //         data exchanger always sets the bit on read, so it's not
+        //         necessary to actually store it.
         //
         uint8_t reverseOrientation;
         

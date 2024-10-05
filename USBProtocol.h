@@ -924,6 +924,8 @@
 //        **12 = VCNL4010 Vishay IR proximity sensor
 //
 //        byte 4 -> extra sensor-speicifc parameter data
+//          TSL141xx - scan mode (edge-sensing algorithm) selection; see 
+//                     edgeSensor.h for a list of the available modes
 //          VCNL4010 - IRED current, in units of 10mA, valid range 1..20
 //
 //       * The sensor types marked with asterisks (*) are reserved for types
@@ -1204,9 +1206,12 @@
 //       software without having to mess with the hardware.
 //
 //       byte 3:4 = jitter window size in native sensor units, little-endian
-//       byte 5   = orientation filter bit mask:
+//       byte 5   = bit mask:
 //                  0x01  -> set if reversed orientation, clear if normal
-//                  0x80  -> Read-only: this bit is set if the feature is supported
+//                  0x40  -> Read-only: this bit is set if the TSL14xx Scan
+//                           Mode setting is supported (via config var 5)
+//                  0x80  -> Read-only: this bit is set if the reverse 
+//                           orientation mode setting is supported
 //
 // 20 -> Plunger bar code setup.  Sets parameters applicable only to bar code
 //       sensor types.

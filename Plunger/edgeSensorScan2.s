@@ -1,15 +1,20 @@
-; Edge detector scan mode 2
-; This is an assembly language implementation of "scan mode 2",
-; described more fully in edgeSensor.h.  This scan mode searches
-; for the steepest edge in the pixel array, averaging over a few
-; pixels on each side of the edge.  The assembly version is 
-; necessary because the best C++ implementation I can come up
-; with is too slow (about 12ms run time); this assembly version
-; runs in about 1.5ms.
+; Edge scan by slope
+;
+; This is an assembly language implementation of the "Steepest
+; Slope" edge detection algorithm, described more fully in
+; edgeSensor.h.  This scan mode searches for the position in
+; the pixel array with the largest difference in brightness
+; between adjacent pixels, averaging over a few pixels on each
+; side of the position to smooth out noise.
+;
+; This assembly-code version is necessary because the best C++
+; implementation I could come up with is too slow on the KL25Z,
+; with about 12ms run time.  This assembly version runs in about
+; 1.5ms on KL25Z.
 
-    AREA edgeScanMode2_asm, CODE, READONLY
+    AREA edgeScanBySlope_asm, CODE, READONLY
 
-; void edgeScanMode2(const uint8_t *pix, int npix, const uint8_t **edgep, int dir)
+; void edgeScanBySlope(const uint8_t *pix, int npix, const uint8_t **edgep, int dir)
 ;    R0 = pix     = pointer to first byte of pixel array
 ;    R1 = npix    = number of pixels in the array
 ;    R2 = edgep   = filled in with pixel index of best edge on return, 
@@ -19,8 +24,8 @@
 ;
 ; Note: arguments passed in R0, R1,... per ARM conventions.
 
-    EXPORT edgeScanMode2
-edgeScanMode2
+    EXPORT edgeScanBySlope
+edgeScanBySlope
 
     ; save used registers plus return link
     STMFD   R13!, {R4-R6,LR}

@@ -60,8 +60,8 @@ public:
 class PlungerSensorTSL1410R: public PlungerSensorEdgePos
 {
 public:
-    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao)
-        : PlungerSensorEdgePos(sensor, 1280), sensor(1280, si, clock, ao)
+    PlungerSensorTSL1410R(PinName si, PinName clock, PinName ao, int scanMode)
+        : PlungerSensorEdgePos(sensor, 1280, scanMode), sensor(1280, si, clock, ao)
     {
     }
     
@@ -73,8 +73,8 @@ protected:
 class PlungerSensorTSL1412R: public PlungerSensorEdgePos
 {
 public:
-    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao)
-        : PlungerSensorEdgePos(sensor, 1536), sensor(1536, si, clock, ao)
+    PlungerSensorTSL1412R(PinName si, PinName clock, PinName ao, int scanMode)
+        : PlungerSensorEdgePos(sensor, 1536, scanMode), sensor(1536, si, clock, ao)
     {
     }
     

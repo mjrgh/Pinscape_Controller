@@ -5468,7 +5468,8 @@ void createPlunger()
         plungerSensor = new PlungerSensorTSL1410R(
             wirePinName(cfg.plunger.sensorPin[0]), 
             wirePinName(cfg.plunger.sensorPin[1]),
-            wirePinName(cfg.plunger.sensorPin[2]));
+            wirePinName(cfg.plunger.sensorPin[2]),
+            cfg.plunger.param1);
         break;
         
     case PlungerType_TSL1412S:
@@ -5477,7 +5478,8 @@ void createPlunger()
         plungerSensor = new PlungerSensorTSL1412R(
             wirePinName(cfg.plunger.sensorPin[0]),
             wirePinName(cfg.plunger.sensorPin[1]), 
-            wirePinName(cfg.plunger.sensorPin[2]));
+            wirePinName(cfg.plunger.sensorPin[2]),
+            cfg.plunger.param1);
         break;
     
     case PlungerType_Pot:

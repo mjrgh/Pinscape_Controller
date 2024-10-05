@@ -89,7 +89,12 @@ void v_func
         break;
 
     case 5:
-        // Plunger sensor type
+        // Plunger sensor type, sensor-specific parameter ("param1")
+        // 
+        // param1 usages (see the sensor-specific code for details):
+        //    TSL14xx   - scan mode
+        //    TCNL4010  - IRED current
+        //
         v_byte(plunger.sensorType, 2);
         v_byte(plunger.param1, 3);
         break;
@@ -193,11 +198,17 @@ void v_func
         break;
         
     case 19:
-        // Plunger filters - jitter window size, reversed orientation.
+        // Plunger filters: jitter window size, reversed orientation.
+        //
+        // On READ (device to host), the reverse orientation byte also has
+        // the following capabilities flags:
+        //
+        //    0x80   = reverse orientation is supported
+        //    0x40   = TSL14xx scan mode settings enabled (config var 5)
         // The reversed orientation byte always has bit 0x80 set to indicate
         // that the feature is supported in this version.
         v_ui16(plunger.jitterWindow, 2);
-        v_byte_ro(cfg.plunger.reverseOrientation | 0x80, 4);
+        v_byte_ro(cfg.plunger.reverseOrientation | 0x80 | 0x40, 4);
         v_byte_wo(plunger.reverseOrientation, 4);
         break;
         

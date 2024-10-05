@@ -19,104 +19,9 @@
 
 #include "plunger.h"
 
-// Scan method - select a method listed below
-#define SCAN_METHOD 5
 
-//
-//
-//  0 = One-way scan.  This is the original algorithim from the v1 software, 
-//      with some slight improvements.  We start at the brighter end of the
-//      sensor and scan until we find a pixel darker than a threshold level 
-//      (halfway between the respective brightness levels at the bright and 
-//      dark ends of the sensor).  The original v1 algorithm simply stopped
-//      there.  This version is slightly improved: it scans for a few more 
-//      pixels to make sure that the majority of the adjacent pixels are 
-//      also in shadow, to help reject false edges from sensor noise or 
-//      optical shadows that make one pixel read darker than it should.
-//
-//  1 = Meet in the middle.  We start two scans concurrently, one from 
-//      the dark end of the sensor and one from the bright end.  For
-//      the scan from the dark end, we stop when we reach a pixel that's
-//      brighter than the average dark level by 2/3 of the gap between 
-//      the dark and bright levels.  For the scan from the bright end,
-//      we stop when we reach a pixel that's darker by 2/3 of the gap.
-//      Each time we stop, we look to see if the other scan has reached
-//      the same place.  If so, the two scans converged on a common
-//      point, which we take to be the edge between the dark and bright
-//      sections.  If the two scans haven't converged yet, we switch to
-//      the other scan and continue it.  We repeat this process until
-//      the two converge.  The benefit of this approach vs the older
-//      one-way scan is that it's much more tolerant of noise, and the
-//      degree of noise tolerance is dictated by how noisy the signal
-//      actually is.  The dynamic degree of tolerance is good because
-//      higher noise tolerance tends to result in reduced resolution.
-//
-//  2 = Maximum dL/ds (highest first derivative of luminance change per
-//      distance, or put another way, the steepest brightness slope).
-//      This scans the whole image and looks for the position with the 
-//      highest dL/ds value.  We average over a window of several pixels, 
-//      to smooth out pixel noise; this should avoid treating a single 
-//      spiky pixel as having a steep slope adjacent to it.  The advantage
-//      in this approach is that it looks for the strongest edge after
-//      considering all edges across the whole image, which should make 
-//      it less likely to be fooled by isolated noise that creates a 
-//      single false edge.  Algorithms 1 and 2 have basically fixed 
-//      thresholds for what constitutes an edge, but this approach is 
-//      more dynamic in that it evaluates each edge-like region and picks 
-//      the best one.  The width of the edge is still fixed, since that's 
-//      determined by the pixel window.  But that should be okay since we 
-//      only deal with one type of image.  It should be possible to adjust 
-//      the light source and sensor position to always yield an image with 
-//      a narrow enough edge region.
-//
-//      The max dL/ds method is the most compute-intensive method, because
-//      of the pixel window averaging.  An assembly language implemementation
-//      seems to be needed to make it fast enough on the KL25Z.  This method
-//      has a fixed run time because it always does exactly one pass over
-//      the whole pixel array.
-//
-//  3 = Same as above, but rather than looking for an edge between adjacent
-//      pixels, this version looks at the difference across a gap, which
-//      is meant to represent the fuzziness in the shadow edge, AND the
-//      blurred region created by the plunger motion.  The exposures are
-//      long enough that the plunger can move quite a bit in the course
-//      of a single frame - up to about 175 pixels - and this will show
-//      up in the image as a brightness ramp across the distance it moved.
-//      We can therefore get a better read on the location if we estimate
-//      the width of the blurry region, and only consider the edges of
-//      the gap when calculating the slope.  We can estimate the current
-//      speed (and thus the gap size) from the last couple of position
-//      readings, since the speed doesn't usually change by more than
-//      about a factor of 2 between frames.
-//
-//  4 = Total bright pixel count.  This simply adds up the total number
-//      of pixels above a threshold brightness, without worrying about 
-//      whether they're contiguous with other pixels on the same side
-//      of the edge.  Since we know there's always exactly one edge,
-//      all of the dark pixels should in principle be on one side, and
-//      all of the light pixels should be on the other side.  There
-//      might be some noise that creates isolated pixels that don't
-//      match their neighbors, but these should average out.  The virtue
-//      of this approach (apart from its simplicity) is that it should
-//      be immune to false edges - local spikes due to noise - that
-//      might fool the algorithms that explicitly look for edges.  In
-//      practice, though, it seems to be even more sensitive to noise
-//      than the other algorithms, probably because it treats every pixel
-//      as independent and thus doesn't have any sort of inherent noise
-//      reduction from considering relationships among pixels.
-//
-//  5 = Sustained falling edge search.  This searches for a region where
-//      we have a monotonic slope from bright to dark.  This is similar
-//      to the steepest-slope searches, but in this case it's not the
-//      steepness of the slope that counts, but rather that the slope
-//      is sustained across the bright-to-dark range.  This algorithm
-//      is designed to adapt to focus blur and motion blur more readily
-//      than the other algorithms by not caring about the steepness
-//      across the edge.
-//
-
-// assembler routine to scan for an edge using "mode 2" (maximum slope)
-extern "C" int edgeScanMode2(const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
+// Assembler routine to scan for an edge using the Steepest Slope algorithm
+extern "C" int edgeScanBySlope(const uint8_t *pix, int npix, const uint8_t **edgePtr, int dir);
 
 // PlungerSensor interface implementation for edge detection setups.
 // This is a generic base class for image-based sensors where we detect
@@ -128,10 +33,19 @@ extern "C" int edgeScanMode2(const uint8_t *pix, int npix, const uint8_t **edgeP
 class PlungerSensorEdgePos: public PlungerSensorImage<int>
 {
 public:
-    PlungerSensorEdgePos(PlungerSensorImageInterface &sensor, int npix)
+    PlungerSensorEdgePos(PlungerSensorImageInterface &sensor, int npix, int scanMode)
         : PlungerSensorImage(sensor, npix, npix - 1)
     {
-        InitScanMethodVars();
+        // select the scan mode
+        setScanMode(scanMode);
+
+        // initialize scan method variables
+        prvRawResult0 = 0;
+        prvRawResult1 = 0;
+
+        // initialization for variables used only in old scan methods
+        // midptIdx = 0;
+        // memset(midpt, 0, sizeof(midpt));
     }
     
     // Process an image - scan for the shadow edge to determine the plunger
@@ -143,10 +57,502 @@ public:
     // it reflects the logical plunger position (i.e., distance retracted,
     // where 0 is always the fully forward position and 'n' is fully
     // retracted).
+    //
+    bool process(const uint8_t *pix, int n, int &pos, int &processResult)
+    {
+        // call the selected scan method implementation
+        return (this->*scanMethodFunc)(pix, n, pos, processResult);
+    }
 
-#if SCAN_METHOD == 0
-    // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
+    virtual void onConfigChange(int varno, Config &cfg)
+    {
+        switch (varno)
+        {
+        case 5:
+            // Plunger sensor type and sensor-specific parameter "param1".
+            // We use param1 to select the scan mode.  Update to the new mode.
+            setScanMode(cfg.plunger.param1);
+            break;
+        }
+
+        // inherit the default handling
+        PlungerSensorImage::onConfigChange(varno, cfg);
+    }
+
+    // Set the scan mode
+    void setScanMode(int mode)
+    {
+        switch (mode)
+        {
+        case 0:
+        default:
+            scanMethodFunc = &PlungerSensorEdgePos::scanBySteadySlope;
+            break;
+
+        case 1:
+            scanMethodFunc = &PlungerSensorEdgePos::scanBySteepestSlope;
+            break;
+
+        case 2:
+            scanMethodFunc = &PlungerSensorEdgePos::scanBySlopeAcrossGap;
+            break;
+        }
+    }
+
+protected:
+    
+    // "Steepest Slope" scanning method.  This is the method used for
+    // many years in the v2 firmware.
+    //
+    // This scans the whole image and looks for the position with the 
+    // highest brightness difference across adjacent pixels.  We average
+    // over a window of several pixels on each side of each position,
+    // to smooth out pixel noise.  This should avoid treating a single
+    // noisy pixel as having a steep slope adjacent to it.
+    //
+    // This algorithm proved to be much better than the original v1
+    // firmware method, which simply looked for a single pixel that was
+    // dark enough to count as shadow.  The v1 method was too easily
+    // fooled by noise.  This algorithm takes more context into account,
+    // since it looks for an edge by the difference in brightness at
+    // adjacent pixels.
+    //
+    // This method is compute-intensive method, because it scans the whole
+    // sensor, and computes an average of a few pixels at every position.
+    // An assembly language implemementation is necessary to make it fast
+    // enough on the KL25Z.  The algorithm has a fixed execution time because
+    // it always does one full pass over the whole pixel array.
+    virtual bool scanBySteepestSlope(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
+    {        
+        // Get the levels at each end by averaging across several pixels.
+        // Compute just the sums: don't bother dividing by the count, since 
+        // the sums are equivalent to the averages as long as we know 
+        // everything is multiplied by the number of samples.
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
+        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5]);
+        
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        if (a > b + 50)
+        {
+            // left end is brighter - standard orientation
+            dir = 1;
+        }
+        else if (b > a + 50)
+        {
+            // right end is brighter - reverse orientation
+            dir = -1;
+        }
+        else
+        {
+            // can't determine direction
+            return false;
+        }
+
+        // scan for the steepest edge using the assembly language 
+        // implementation (since the C++ version is too slow)
+        const uint8_t *edgep = 0;
+        if (edgeScanBySlope(pix, n, &edgep, dir))
+        {
+            // edgep has the pixel array pointer; convert it to an offset
+            pos = edgep - pix;
+            
+            // if the sensor orientation is reversed, figure the index from
+            // the other end of the array
+            if (dir < 0)
+                pos = n - pos;
+                
+            // success
+            return true;
+        }
+        else
+        {
+            // no edge found
+            return false;
+        }
+    }
+
+    // "Steepest Slope Across a Gap" scanning method.
+    //
+    // This is a refinement of the "Steepest Slope" scanning method that
+    // scans for the steepest slope (biggest difference in brightness)
+    // across a gap, rather than between immediately adjacent pixels.
+    // The gap represents the expected fuzziness in the edge.  In the
+    // reference hardware configuration for the TSL14xx sensors, there
+    // are no optics involved; the sensor sits close to the plunger,
+    // with a light source on the other side arranged so that the plunger
+    // casts a shadow on the sensor.  Since this is an unfocused shadow,
+    // it has a penumbra.  What's more, the mechanical plunger can move
+    // quickly enough that it can cause significant motion blur by
+    // changing position by as much as 200 pixels in the course of a
+    // single 2.5ms exposure, which makes the sloping region even wider.
+    //
+    // To account for motion blur in addition to a stationary penumbra,
+    // the algorithm uses the last two position readings to estimate the
+    // current speed during the new exposure.  This is imperfect, since
+    // it doesn't take into account acceleration, but the 2.5 ms exposure
+    // time is short enough that the previous speed is still a pretty
+    // fair estimate of the current speed.  When the speed is zero, we
+    // still use a gap of a few pixels to approximate the penumbra of
+    // a stationary shadow.
+    //
+    // This scan algorithm was added when the new plunger speed reporting
+    // in the HID joystick interface was added, because it became apparent
+    // once we started reporting the speed that the basic "Steepest Slope"
+    // algorithm could read images with heavy motion blur.  It tended to
+    // find false edges and thus yield inaccurate position readings when
+    // the plunger is moving at speeds near the peak speeds it tends to
+    // hit when pulled back all the way and released to be driven forward
+    // by the spring.  This algorithm is much better able to read these
+    // motion-blurred images, since it compensates for the expected blur
+    // by increasing the gap size.
+    bool scanBySlopeAcrossGap(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
+    {
+        // Get the levels at each end
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
+        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5]);
+        
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        if (a > b + 50)
+        {
+            // left end is brighter - standard orientation
+            dir = 1;
+        }
+        else if (b > a + 50)
+        {
+           // right end is brighter - reverse orientation
+            dir = -1;
+        }
+        else
+        {
+            // We can't detect the orientation from this image
+            return false;
+        }
+
+        // Calculate the expected gap size based on the previous delta.
+        // Each exposure takes almost the full time between frames, so
+        // there will be motion blur in each frame equal to the distance
+        // the plunger moves over the course of the frame.  At ~2.5ms per
+        // image, the speed doesn't change much from one frame to the
+        // next, so the trailing speed is a pretty good approximation of
+        // the new speed and thus of the expected motion blur.  Sizing
+        // the gap to the expected motion blur improves our chances of
+        // identifying the position in a frame with fast motion.
+        int prvDelta = abs(prvRawResult0 - prvRawResult1);
+        const int gapSize = prvDelta < 3 ? 3 : prvDelta > 175 ? 175 : prvDelta;
+
+        // Initialize a pair of rolling-average windows.  This sensor tends
+        // to have a bit of per-pixel noise, so if we looked at the slope
+        // from one pixel to the next, we'd see a lot of steep edges from
+        // the noise alone.  Averaging a few pixels smooths out that
+        // high-frequency noise.  We use two windows because we're looking
+        // for the edge of the shadow, so we want to know where the average
+        // suddenly changes across a small gap.  The standard physical setup
+        // with this sensor doesn't use focusing optics, so the shadow is a
+        // little fuzzy, crossing a few pixels; the gap is meant to
+        // approximate the fuzzy extent of the shadow.
+        const int windowSize = 8;  // must be power of two
+        uint8_t window1[windowSize], window2[windowSize];
+        unsigned int sum1 = 0, sum2 = 0;
+        int iPix1 = dir < 0 ? n - 1 : 0;
+        for (int i = 0 ; i < windowSize ; ++i, iPix1 += dir)
+            sum1 += (window1[i] = pix[iPix1]);
+
+        int iGap = iPix1 + dir*gapSize/2;
+        int iPix2 = iPix1 + dir*gapSize;
+        for (int i = 0 ; i < windowSize ; ++i, iPix2 += dir)
+            sum2 += (window2[i] = pix[iPix2]);
+
+        // search for the steepest bright-to-dark gradient
+        int steepestSlope = 0;
+        int steepestIdx = 0;
+        for (int i = windowSize*2 + gapSize, wi = 0 ; i < n ; ++i, iPix1 += dir, iPix2 += dir, iGap += dir)
+        {
+            // compute the slope at the current gap
+            int slope = sum1 - sum2;
+
+            // record the steepest slope
+            if (slope > steepestSlope)
+            {
+                steepestSlope = slope;
+                steepestIdx = iGap;
+            }
+
+            // move to the next pixel in each window
+            sum1 -= window1[wi];
+            sum1 += (window1[wi] = pix[iPix1]);
+            sum2 -= window2[wi];
+            sum2 += (window2[wi] = pix[iPix2]);
+
+            // advance and wrap the window index
+            wi += 1;
+            wi &= ~windowSize;
+        }
+
+        // Reject the reading if the steepest slope is too shallow, which
+        // indicates that the contrast is too low to take a reading.
+        if (steepestSlope < 8*windowSize)
+            return false;  
+
+        // return the best slope point
+        pos = steepestIdx;
+
+        // update the previous results
+        prvRawResult1 = prvRawResult0;
+        prvRawResult0 = pos;
+
+        // if the sensor orientation is reversed, figure the index from
+        // the other end of the array
+        if (dir < 0)
+            pos = n - pos;
+
+        // success            
+        return true;
+    }
+
+    // Previous raw results, to estimate the plunger speed expected
+    // during the new frame.  A moving plunger causes motion blur,
+    // which makes the shadow gap wider.  We can compensate for the
+    // blur by looking for a shadow blur of the expected size, if we
+    // know the speed.  The exposure time is quick enough that the
+    // speed doesn't change very much from one frame to the next, so
+    // the trailing speed from the last two frames gives us a decent
+    // estimate for the new frame's speed.
+    int prvRawResult0, prvRawResult1;
+
+    // "Steady slope" edge scan algorithm.  This algorithm searches
+    // for a region where the pixels for a monotonic slope from bright
+    // to dark.
+    //
+    // This algorithm is similar to the "steepest slope" searches, but
+    // instead of measuring the steepness of the slope, it merely looks
+    // for consistency of slope.  This makes it adapt automatically to
+    // the width of the blurring from the stationary penumbra and motion,
+    // so it doesn't need to guess at the current speed (as the "gap"
+    // modification of the steepest-slope search does).
+    //
+    // This method also looks for a flat shadow section after the sloping
+    // region, to confirm that the slope is really the border between the
+    // two regions and not a local dip (due to sensor noise, say).
+    bool scanBySteadySlope(const uint8_t *pix, int nPixels, int &pos, int& /*processResult*/)
+    {
+        // Get the levels at each end
+        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
+        int b = (int(pix[nPixels-1]) + pix[nPixels-2] + pix[nPixels-3] + pix[nPixels-4] + pix[nPixels-5])/5;
+
+        // Figure the sensor orientation based on the relative brightness
+        // levels at the opposite ends of the image.  We're going to scan
+        // across the image from each side - 'bi' is the starting index
+        // scanning from the bright side, 'di' is the starting index on
+        // the dark side.  'binc' and 'dinc' are the pixel increments
+        // for the respective indices.
+        int dir;
+        if (a > b + 10)
+        {
+            // left end is brighter - standard orientation
+            dir = 1;
+        }
+        else if (b > a + 10)
+        {
+            // right end is brighter - reverse orientation
+            dir = -1;
+        }
+        else
+        {
+            // We can't detect the orientation from this image
+            return false;
+        }
+
+        // figure the midpoint brightness
+        int midpt = ((a + b)/2);
+
+        // Figure the bright and dark thresholds at the quarter points
+        int brightThreshold = ((a > b ? a : b) + midpt)/2;
+        int darkThreshold = ((a < b ? a : b) + midpt)/2;
+
+        // rolling-average window size
+        const int windowShift = 3;
+        const int windowSize = (1 << windowShift);  // must be power of two
+        const int windowMask = windowSize - 1;
+
+        // Search for the starting point.  The core algorithm searches for
+        // the shadow from the bright side, so if the plunger is all the way
+        // back, we'd have to scan the entire sensor length if we started at
+        // the bright end.  We can save a lot of time by skipping most of
+        // the bright section, by doing a binary search for a point where
+        // the brightness dips below the bright threshold.
+        int leftIdx = 0;
+        int rightIdx = nPixels - 1;
+        int leftAvg = (pix[leftIdx] + pix[leftIdx+1] + pix[leftIdx+2] + pix[leftIdx+3])/4;
+        int rightAvg = (pix[rightIdx] + pix[rightIdx-1] + pix[rightIdx-2] + pix[rightIdx-3])/4;
+        for (int i = 0 ; i < 8 ; ++i)
+        {
+            // find the halfway point in this division
+            int centerIdx = (leftIdx + rightIdx)/2;
+            int centerAvg = (pix[centerIdx-1] + pix[centerIdx] + pix[centerIdx+1] + pix[centerIdx+2])/4;
+
+            // move the bounds towards the dark region
+            if (dir < 0 ? centerAvg < brightThreshold : centerAvg > brightThreshold)
+            {
+                // center is in same region as left side, so move right
+                leftIdx = centerIdx - windowSize;
+                leftAvg = (pix[leftIdx] + pix[leftIdx+1] + pix[leftIdx+2] + pix[leftIdx+3])/4;
+            }
+            else
+            {
+                // center is in same region as right side, so move left
+                rightIdx = centerIdx + windowSize;
+                rightAvg = (pix[rightIdx] + pix[rightIdx-1] + pix[rightIdx-2] + pix[rightIdx-3])/4;
+            }
+        }
+
+        // We sometimes land with the range exactly starting or ending at
+        // the transition point, so make sure we have enough runway on either
+        // side to detect the steady state and slope we look for in the loop.
+        leftIdx = (leftIdx > windowSize) ? leftIdx - windowSize : 0;
+        rightIdx = (rightIdx < nPixels - windowSize) ? rightIdx + windowSize : nPixels - 1;
+
+        // Adjust the points for the window sum.  The window is an average
+        // over windowSize pixels, but to save work in the loop, we don't
+        // divide by the number of samples, so the value we actually work
+        // with is (average * N) == (average * windowSize).  So all of our
+        // reference points have to be likewise adjusted.
+        midpt <<= windowShift;
+        darkThreshold <<= windowShift;
+
+        // initialize the rolling-average window, starting at the bright end
+        // of the region we narrowed down to with the binary search
+        int iPix = dir < 0 ? rightIdx : leftIdx;
+        int nScan = (dir < 0 ? iPix - windowSize : nPixels - iPix - windowSize);
+        uint8_t window[windowSize];
+        unsigned int sum = 0;
+        for (int i = 0 ; i < windowSize ; ++i, iPix += dir)
+            sum += (window[i] = pix[iPix]);
+
+        // search for a monotonic falling edge
+        int prv = sum;
+        int edgeStart = -1;
+        int edgeMid = -1;
+        int nShadow = 0;
+        int edgeFound = -1;
+        for (int i = windowSize, wi = 0 ; i < nScan ; ++i, iPix += dir)
+        {
+            // advance the rolling window
+            sum -= window[wi];
+            sum += (window[wi] = pix[iPix]);
+
+            // advance and wrap the window index
+            wi += 1;
+            wi &= windowMask;
+
+            // check for a falling edge
+            if (sum < prv)
+            {
+                // dropping - start or continue the falling edge
+                if (edgeStart < 0)
+                    edgeStart = iPix;
+            }
+            else if (sum > prv)
+            {
+                // rising - cancel the falling edge
+                edgeStart = -1;
+            }
+
+            // are we in an edge?
+            if (edgeStart >= 0)
+            {
+                // check for a midpoint crossover, which we'll take as the edge position
+                if (prv > midpt && sum <= midpt)
+                    edgeMid = iPix;
+
+                // if we've reached the dark threshold, count it as a potential match
+                if (sum < darkThreshold)
+                    edgeFound = edgeMid;
+            }
+
+            // If we're above the midpoint, cancel any match position.  We must
+            // have encountered a dark patch where the brightness dipped briefly
+            // but didn't actually cross into the shadow zone.
+            if (sum > midpt)
+            {
+                edgeFound = -1;
+                nShadow = 0;
+            }
+
+            // if we have a potential match, check if we're still in shadow
+            if (edgeFound && sum < darkThreshold)
+            {
+                // count the dark region
+                ++nShadow;
+
+                // if we've seen enough contiguous shadow, declare success
+                if (nShadow > 10)
+                {
+                    pos = edgeFound;
+                    return true;
+                }
+            }
+
+            // remember the previous item
+            prv = sum;
+        }
+
+        // no edge found
+        return false;
+    }
+
+    // Sensor orientation.  +1 means that the "tip" end - which is always
+    // the brighter end in our images - is at the 0th pixel in the array.
+    // -1 means that the tip is at the nth pixel in the array.  0 means
+    // that we haven't figured it out yet.  We automatically infer this
+    // from the relative light levels at each end of the array when we
+    // successfully find a shadow edge.  The reason we save the information
+    // is that we might occasionally get frames that are fully in shadow
+    // or fully in light, and we can't infer the direction from such
+    // frames.  Saving the information from past frames gives us a fallback 
+    // when we can't infer it from the current frame.  Note that we update
+    // this each time we can infer the direction, so the device will adapt
+    // on the fly even if the user repositions the sensor while the software
+    // is running.
+    virtual int getOrientation() const { return dir; }
+    int dir;
+
+    // Scan method function
+    bool (PlungerSensorEdgePos::*scanMethodFunc)(const uint8_t *pix, int n, int &pos, int &processResult);
+
+
+    // --------------------------------------------------------------------
+    //
+    // Experimental scan methods, not included in the build.  These are
+    // mostly experimental methods that didn't pan out (they performed
+    // poorly compared with the other methods).  They're preserved here
+    // mostly as a record of what's been tried, so that if someone comes
+    // up with one of these ideas again, they can quickly test it out to
+    // re-evaluate it and/or try new variations on the same idea, without
+    // having to re-code the whole algorithm.
+    //
+
+#if 0  // NOT INCLUDED IN BUILD
+
+    // One-way scan.  This is the original algorithm from the v1 software,
+    // with some slight improvements.  We start at the brighter end of the
+    // sensor and scan until we find a pixel darker than a threshold level 
+    // (halfway between the respective brightness levels at the bright and 
+    // dark ends of the sensor).  The original v1 algorithm simply stopped
+    // there.  This version is slightly improved: it scans for a few more 
+    // pixels to make sure that the majority of the adjacent pixels are 
+    // also in shadow, to help reject false edges from sensor noise or 
+    // optical shadows that make one pixel read darker than it should.
+    bool scanByOneWayScan(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
@@ -265,12 +671,6 @@ public:
         return false;
     }
 
-    void InitScanMethodVars() 
-    { 
-        midptIdx = 0;
-        memset(midpt, 0, sizeof(midpt));
-    }
-
     // History of midpoint brightness levels for the last few successful
     // scans.  This is a circular buffer that we write on each scan where
     // we successfully detect a shadow edge.  (It's circular, so we
@@ -298,11 +698,33 @@ public:
     uint8_t midpt[10];
     uint8_t midptIdx;
 
-#endif // SCAN_METHOD 0
-    
-#if SCAN_METHOD == 1
-    // Scan method 1: meet in the middle.
-    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
+    // "Meet in the middle" scan method.
+    //
+    // This approach sets up with pointers to both ends of the pixel
+    // array, and scans inward from each end.  For the scan from the 
+    // dark end, we stop when we reach a pixel that's brighter than
+    // the average dark level by 2/3 of the gap between the dark and
+    // bright levels.  For the scan from the bright end, we stop when
+    // we reach a pixel that's darker by 2/3 of the gap.  Each time we
+    // stop, we look to see if the other scan has reached the same 
+    // stopping point.  If so, the two scans converged on a common
+    // point, which we take to be the edge between the dark and bright
+    // sections.  If the two scans haven't converged yet, we switch to
+    // the other scan and continue it.  We repeat this process until
+    // the two converge.  The benefit of this approach vs the original
+    // one-way scan is that it's more tolerant of noise, since both
+    // scans have to converge at the same point; the original one-way
+    // scan stopped as soon as it found a pixel matching the shadow
+    // criteria, which made it easy to fool with a single noisy pixel
+    // reading darker than it should.  The two-ended scan avoids
+    // that by noticing that the other end hasn't reached the same
+    // point yet, implying that the pixel crossing the threshold is
+    // just a noise blip that we should ignore.
+    //
+    // Despite the improvement over the original one-way scan, this
+    // method still doesn't consider enough context, so it's still
+    // easily fooled by noise.
+    bool scanByMeetInTheMiddle(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
@@ -419,220 +841,24 @@ public:
         }
     }
 
-    void InitScanMethodVars() { }
-#endif // SCAN METHOD 1
-
-#if SCAN_METHOD == 2
-    // Scan method 2: scan for steepest brightness slope.
-    virtual bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
-    {        
-        // Get the levels at each end by averaging across several pixels.
-        // Compute just the sums: don't bother dividing by the count, since 
-        // the sums are equivalent to the averages as long as we know 
-        // everything is multiplied by the number of samples.
-        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
-        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5]);
-        
-        // Figure the sensor orientation based on the relative brightness
-        // levels at the opposite ends of the image.  We're going to scan
-        // across the image from each side - 'bi' is the starting index
-        // scanning from the bright side, 'di' is the starting index on
-        // the dark side.  'binc' and 'dinc' are the pixel increments
-        // for the respective indices.
-        if (a > b + 50)
-        {
-            // left end is brighter - standard orientation
-            dir = 1;
-        }
-        else if (b > a + 50)
-        {
-            // right end is brighter - reverse orientation
-            dir = -1;
-        }
-        else
-        {
-            // can't determine direction
-            return false;
-        }
-
-        // scan for the steepest edge using the assembly language 
-        // implementation (since the C++ version is too slow)
-        const uint8_t *edgep = 0;
-        if (edgeScanMode2(pix, n, &edgep, dir))
-        {
-            // edgep has the pixel array pointer; convert it to an offset
-            pos = edgep - pix;
-            
-            // if the sensor orientation is reversed, figure the index from
-            // the other end of the array
-            if (dir < 0)
-                pos = n - pos;
-                
-            // success
-            return true;
-        }
-        else
-        {
-            // no edge found
-            return false;
-        }
-
-    }
-
-    void InitScanMethodVars() { }
-#endif // SCAN_METHOD 2
-
-#if SCAN_METHOD == 3
-    // Scan method 3: Scan for steepest slope across a gap.  The gap is
-    // an estimate of the fuzziness of the shadow edge.  Within the gap,
-    // there's a ramp of brightnesses from the average brightness in the
-    // exposed region to the average in the shadowed region.  The slope
-    // test measures across the gap, so we should find the point where
-    // the gap starts.
+    // "Total bright pixel count" scan method.
     //
-    // The width of the sloping region depends upon the speed of the
-    // plunger edge, because if it's moving during the exposure, it will
-    // spread out the ramping brightness region according to how far it
-    // moves.  The fastest observed motion in a real plunger is about
-    // 4.5mm/ms, which translates to about 175 pixels over a 2.5ms
-    // exposure.
-    //
-    // To estimate the size of the gap, we must estimate the speed.  The
-    // speed is high enough that it can significantly affect the exposure
-    // (by varying the gap size from a few pixels to around 175 pixels).
-    // But the acceleration from the main spring is low enough that the
-    // speed doesn't change faster than about a factor of 2 per frame.
-    // So the speed from the last couple of frames is a decent estimate
-    // of the current speed.
-    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
-    {
-        // Get the levels at each end
-        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
-        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5]);
-        
-        // Figure the sensor orientation based on the relative brightness
-        // levels at the opposite ends of the image.  We're going to scan
-        // across the image from each side - 'bi' is the starting index
-        // scanning from the bright side, 'di' is the starting index on
-        // the dark side.  'binc' and 'dinc' are the pixel increments
-        // for the respective indices.
-        if (a > b + 50)
-        {
-            // left end is brighter - standard orientation
-            dir = 1;
-        }
-        else if (b > a + 50)
-        {
-           // right end is brighter - reverse orientation
-            dir = -1;
-        }
-        else
-        {
-            // We can't detect the orientation from this image
-            return false;
-        }
-
-        // Calculate the expected gap size based on the previous delta.
-        // Each exposure takes almost the full time between frames, so
-        // there will be motion blur in each frame equal to the distance
-        // the plunger moves over the course of the frame.  At ~2.5ms per
-        // image, the speed doesn't change much from one frame to the
-        // next, so the trailing speed is a pretty good approximation of
-        // the new speed and thus of the expected motion blur.  Sizing
-        // the gap to the expected motion blur improves our chances of
-        // identifying the position in a frame with fast motion.
-        int prvDelta = abs(prvRawResult0 - prvRawResult1);
-        const int gapSize = prvDelta < 3 ? 3 : prvDelta > 175 ? 175 : prvDelta;
-
-        // Initialize a pair of rolling-average windows.  This sensor tends
-        // to have a bit of per-pixel noise, so if we looked at the slope
-        // from one pixel to the next, we'd see a lot of steep edges from
-        // the noise alone.  Averaging a few pixels smooths out that
-        // high-frequency noise.  We use two windows because we're looking
-        // for the edge of the shadow, so we want to know where the average
-        // suddenly changes across a small gap.  The standard physical setup
-        // with this sensor doesn't use focusing optics, so the shadow is a
-        // little fuzzy, crossing a few pixels; the gap is meant to
-        // approximate the fuzzy extent of the shadow.
-        const int windowSize = 8;  // must be power of two
-        uint8_t window1[windowSize], window2[windowSize];
-        unsigned int sum1 = 0, sum2 = 0;
-        int iPix1 = dir < 0 ? n - 1 : 0;
-        for (int i = 0 ; i < windowSize ; ++i, iPix1 += dir)
-            sum1 += (window1[i] = pix[iPix1]);
-
-        int iGap = iPix1 + dir*gapSize/2;
-        int iPix2 = iPix1 + dir*gapSize;
-        for (int i = 0 ; i < windowSize ; ++i, iPix2 += dir)
-            sum2 += (window2[i] = pix[iPix2]);
-
-        // search for the steepest bright-to-dark gradient
-        int steepestSlope = 0;
-        int steepestIdx = 0;
-        for (int i = windowSize*2 + gapSize, wi = 0 ; i < n ; ++i, iPix1 += dir, iPix2 += dir, iGap += dir)
-        {
-            // compute the slope at the current gap
-            int slope = sum1 - sum2;
-
-            // record the steepest slope
-            if (slope > steepestSlope)
-            {
-                steepestSlope = slope;
-                steepestIdx = iGap;
-            }
-
-            // move to the next pixel in each window
-            sum1 -= window1[wi];
-            sum1 += (window1[wi] = pix[iPix1]);
-            sum2 -= window2[wi];
-            sum2 += (window2[wi] = pix[iPix2]);
-
-            // advance and wrap the window index
-            wi += 1;
-            wi &= ~windowSize;
-        }
-
-        // Reject the reading if the steepest slope is too shallow, which
-        // indicates that the contrast is too low to take a reading.
-        if (steepestSlope < 8*windowSize)
-            return false;  
-
-        // return the best slope point
-        pos = steepestIdx;
-
-        // update the previous results
-        prvRawResult1 = prvRawResult0;
-        prvRawResult0 = pos;
-
-        // if the sensor orientation is reversed, figure the index from
-        // the other end of the array
-        if (dir < 0)
-            pos = n - pos;
-
-        // success            
-        return true;
-    }
-
-    void InitScanMethodVars()
-    {
-        prvRawResult0 = 0;
-        prvRawResult1 = 0;
-    }
-
-    // Previous raw results, to estimate the plunger speed expected
-    // during the new frame.  A moving plunger causes motion blur,
-    // which makes the shadow gap wider.  We can compensate for the
-    // blur by looking for a shadow blur of the expected size, if we
-    // know the speed.  The exposure time is quick enough that the
-    // speed doesn't change very much from one frame to the next, so
-    // the trailing speed from the last two frames gives us a decent
-    // estimate for the new frame's speed.
-    int prvRawResult0, prvRawResult1;
-#endif // SCAN_METHOD 3
-
-#if SCAN_METHOD == 4
-    // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
+    // This method simply adds up the total number of pixels above a
+    // threshold brightness, without worrying about whether they're
+    // contiguous with other pixels on the same side of the edge.  Since
+    // we know there's always exactly one actual shadow edge from the
+    // physical plunger, all of the dark pixels should in principle be
+    // on one side, and all of the light pixels should be on the other
+    // side.  There might be some noise that creates isolated pixels that
+    // don't match their neighbors, but these should average out.  The
+    // virtue of this approach (apart from its simplicity) is that it
+    // should be immune to false edges - local spikes due to noise - that
+    // might fool the algorithms that explicitly look for edges.  In
+    // practice, though, it seems to be even more sensitive to noise
+    // than the other algorithms, probably because it treats every pixel
+    // as independent and thus doesn't have any sort of inherent noise
+    // reduction from considering relationships among pixels.
+    bool scanByTotalBrightPixelCount(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
     {        
         // Get the levels at each end
         int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4]);
@@ -691,205 +917,7 @@ public:
         return true;
     }
 
-    void InitScanMethodVars() { }
-#endif // SCAN_METHOD 4
-
-#if SCAN_METHOD == 5
-    // Scan method 0: one-way scan; original method used in v1 firmware.
-    bool process(const uint8_t *pix, int n, int &pos, int& /*processResult*/)
-    {
-        // Get the levels at each end
-        int a = (int(pix[0]) + pix[1] + pix[2] + pix[3] + pix[4])/5;
-        int b = (int(pix[n-1]) + pix[n-2] + pix[n-3] + pix[n-4] + pix[n-5])/5;
-
-        // Figure the sensor orientation based on the relative brightness
-        // levels at the opposite ends of the image.  We're going to scan
-        // across the image from each side - 'bi' is the starting index
-        // scanning from the bright side, 'di' is the starting index on
-        // the dark side.  'binc' and 'dinc' are the pixel increments
-        // for the respective indices.
-        int dir;
-        if (a > b + 10)
-        {
-            // left end is brighter - standard orientation
-            dir = 1;
-        }
-        else if (b > a + 10)
-        {
-            // right end is brighter - reverse orientation
-            dir = -1;
-        }
-        else
-        {
-            // We can't detect the orientation from this image
-            return false;
-        }
-
-        // figure the midpoint brightness
-        int midpt = ((a + b)/2);
-
-        // Figure the dark threshold as halfway between shadow and midpoint.
-        // We'll use this to determine if the edge has fallen far enough to
-        // count as the actual edge.
-        int darkThreshold = ((a < b ? a : b) + midpt)/2;
-
-        // rolling-average window size
-        const int windowShift = 3;
-        const int windowSize = (1 << windowShift);  // must be power of two
-        const int windowMask = windowSize - 1;
-
-        // Search for the starting point.  The core algorithm searches for
-        // the shadow from the bright side, so if the plunger is all the way
-        // back, we'd have to scan the entire sensor length if we started at
-        // the bright end.  The KL25Z isn't a speed demon, so this can take
-        // a considerable amount of time, up to about 2 ms measured.  We'd
-        // like to keep the scan to under half the sensor cycle time, or
-        // about 1.25 ms.  To speed things up, we can try to skip a lot of
-        // useless linear scanning over the contiguous bright region by
-        // doing a binary search for the furthest bright area.  We don't
-        // have to find the exact point; it helps hugely just to narrow
-        // it down slightly by doing a few binary-search passes.
-        int leftIdx = 0;
-        int rightIdx = n - 1;
-        int leftAvg = (pix[leftIdx] + pix[leftIdx+1] + pix[leftIdx+2] + pix[leftIdx+3])/4;
-        int rightAvg = (pix[rightIdx] + pix[rightIdx-1] + pix[rightIdx-2] + pix[rightIdx-3])/4;
-        for (int i = 0 ; i < 4 ; ++i)
-        {
-            // find the halfway point in this division
-            int centerIdx = (leftIdx + rightIdx)/2;
-            int centerAvg = (pix[centerIdx-1] + pix[centerIdx] + pix[centerIdx+1] + pix[centerIdx+2])/4;
-
-            // move the bounds towards the dark region
-            if (dir > 0 ? centerAvg > midpt : centerAvg < midpt)
-            {
-                // center is in same region as left side, so move right
-                leftIdx = centerIdx - windowSize;
-                leftAvg = (pix[leftIdx] + pix[leftIdx+1] + pix[leftIdx+2] + pix[leftIdx+3])/4;
-            }
-            else
-            {
-                // center is in same region as right side, so move left
-                rightIdx = centerIdx + windowSize;
-                rightAvg = (pix[rightIdx] + pix[rightIdx-1] + pix[rightIdx-2] + pix[rightIdx-3])/4;
-            }
-        }
-
-        // We sometimes land with the range exactly starting or ending at
-        // the transition point, so make sure we have enough runway on either
-        // side to detect the steady state and slope we look for in the loop.
-        leftIdx = (leftIdx > 16) ? leftIdx - 16 : 0;
-        rightIdx = (rightIdx < n - 16) ? rightIdx + 16 : n - 1;
-
-        // Adjust the points for the window sum.  The window is an average
-        // over windowSize pixels, but to save work in the loop, we don't
-        // divide by the number of samples, so the value we actually work
-        // with is (average * N) == (average * windowSize).  So all of our
-        // reference points have to be likewise adjusted.
-        midpt <<= windowShift;
-        darkThreshold <<= windowShift;
-
-        // initialize the rolling-average window, starting at the bright end
-        // of the region we narrowed down to with the binary search
-        int iPix = dir < 0 ? rightIdx : leftIdx;
-        uint8_t window[windowSize];
-        unsigned int sum = 0;
-        for (int i = 0 ; i < windowSize ; ++i, iPix += dir)
-            sum += (window[i] = pix[iPix]);
-
-        // search for a monotonic falling edge
-        int prv = sum;
-        int edgeStart = -1;
-        int edgeMid = -1;
-        int nShadow = 0;
-        int edgeFound = -1;
-        int nScan = rightIdx - leftIdx;
-        for (int i = windowSize, wi = 0 ; i < nScan ; ++i, iPix += dir)
-        {
-            // advance the rolling window
-            sum -= window[wi];
-            sum += (window[wi] = pix[iPix]);
-
-            // advance and wrap the window index
-            wi += 1;
-            wi &= windowMask;
-
-            // check for a falling edge
-            if (sum < prv)
-            {
-                // dropping - start or continue the falling edge
-                if (edgeStart < 0)
-                    edgeStart = iPix;
-            }
-            else if (sum > prv)
-            {
-                // rising - cancel the falling edge
-                edgeStart = -1;
-            }
-
-            // are we in an edge?
-            if (edgeStart >= 0)
-            {
-                // check for a midpoint crossover, which we'll take as the edge position
-                if (prv > midpt && sum <= midpt)
-                    edgeMid = iPix;
-
-                // if we've reached the dark threshold, count it as a potential match
-                if (sum < darkThreshold)
-                    edgeFound = edgeMid;
-            }
-
-            // If we're above the midpoint, cancel any match position.  We must
-            // have encountered a dark patch where the brightness dipped briefly
-            // but didn't actually cross into the shadow zone.
-            if (sum > midpt)
-            {
-                edgeFound = -1;
-                nShadow = 0;
-            }
-
-            // if we have a potential match, check if we're still in shadow
-            if (edgeFound && sum < darkThreshold)
-            {
-                // count the dark region
-                ++nShadow;
-
-                // if we've seen enough contiguous shadow, declare success
-                if (nShadow > 10)
-                {
-                    pos = edgeFound;
-                    return true;
-                }
-            }
-
-            // remember the previous item
-            prv = sum;
-        }
-
-        // no edge found
-        return false;
-    }
-
-    void InitScanMethodVars() { }
-#endif // SCAN_METHOD 5
-
-protected:
-    // Sensor orientation.  +1 means that the "tip" end - which is always
-    // the brighter end in our images - is at the 0th pixel in the array.
-    // -1 means that the tip is at the nth pixel in the array.  0 means
-    // that we haven't figured it out yet.  We automatically infer this
-    // from the relative light levels at each end of the array when we
-    // successfully find a shadow edge.  The reason we save the information
-    // is that we might occasionally get frames that are fully in shadow
-    // or fully in light, and we can't infer the direction from such
-    // frames.  Saving the information from past frames gives us a fallback 
-    // when we can't infer it from the current frame.  Note that we update
-    // this each time we can infer the direction, so the device will adapt
-    // on the fly even if the user repositions the sensor while the software
-    // is running.
-    virtual int getOrientation() const { return dir; }
-    int dir;
-       
-public:
+#endif // 0 - disabled scan methods
 };
 
 
