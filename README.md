@@ -1,5 +1,21 @@
 # Pinscape Controller for KL25Z
 
+<b>See also:</b> [Pinscape Pico](https://github.com/mjrgh/PinscapePico), the 2025 sequel to Pinscape for KL25Z, designed for the
+Raspberry Pi Pico.
+
+<b>March 2025 update and warning:</b> NXP appears to be shipping a new production run of FRDM-KL25Z boards, after a long period
+where they were out of production.  However, **the new boards aren't compatible with the Pinscape software**, for reasons
+that are still unclear, and **they don't include the accelerometer chip**, which was a key feature of the original FRDM-KL25Z
+that made it such a great platform for virtual pinball.  You can identify the new boards by their **square corners**; the
+original FRDM-KL25Z had rounded corners.  In addition, you can visually confirm that the accelerometer is missing, by looking
+for an empty set of pads labeled **ACCEL**.  So far, we've only seen the new version being sold at Farnell in the UK, but my
+guess is that they'll also show up at US distributors soon.  Farnell is still showing a picture of the original rounded-corner
+model on their site, but they're actually shipping the new version.  If you install the Pinscape software on the new board, it
+will **appear** to install successfully, but the Config Tool and other software on the PC won't be able to connect to it,
+presumably due to some as-yet unknown change they made to the US hardware on the board.
+
+---
+
 This is Version 2 of the Pinscape Controller, an I/O controller for virtual pinball machines.  (You can find the old version 1
 software [here](https://developer.mbed.org/users/mjr/code/Pinscape_Controller/).  Pinscape is software for the KL25Z that turns
 the board into a full-featured I/O controller for virtual pinball, with support for accelerometer-based nudging, a mechanical 
