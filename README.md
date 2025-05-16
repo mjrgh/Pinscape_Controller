@@ -4,7 +4,9 @@
 <b>See also:</b> [Pinscape Pico](https://github.com/mjrgh/PinscapePico), the 2025 sequel to Pinscape for KL25Z, designed for the
 Raspberry Pi Pico.
 
-<b>March 2025 update and warning:</b> NXP appears to be shipping a new production run of FRDM-KL25Z boards, after a long period
+## March 2025 Update and Warning
+
+NXP recently shipped a new production run of FRDM-KL25Z boards, after a long period
 where they were out of production.  However, **the new boards aren't compatible with the Pinscape software**, for reasons
 that are still unclear, and **they don't include the accelerometer chip**, which was a key feature of the original FRDM-KL25Z
 that made it such a great platform for virtual pinball.  You can identify the new boards by their **square corners**; the
@@ -14,6 +16,10 @@ guess is that they'll also show up at US distributors soon.  Farnell is still sh
 model on their site, but they're actually shipping the new version.  If you install the Pinscape software on the new board, it
 will **appear** to install successfully, but the Config Tool and other software on the PC won't be able to connect to it,
 presumably due to some as-yet unknown change they made to the US hardware on the board.
+  
+Please consider the new [Pinscape Pico](https://github.com/mjrgh/PinscapePico/) as an alternative. That's
+a new generation of the Pinscape software designed from the ground up for the Raspberry Pi Pico.
+
 
 ---
 
