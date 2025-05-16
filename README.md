@@ -11,11 +11,10 @@ where they were out of production.  However, **the new boards aren't compatible 
 that are still unclear, and **they don't include the accelerometer chip**, which was a key feature of the original FRDM-KL25Z
 that made it such a great platform for virtual pinball.  You can identify the new boards by their **square corners**; the
 original FRDM-KL25Z had rounded corners.  In addition, you can visually confirm that the accelerometer is missing, by looking
-for an empty set of pads labeled **ACCEL**.  So far, we've only seen the new version being sold at Farnell in the UK, but my
-guess is that they'll also show up at US distributors soon.  Farnell is still showing a picture of the original rounded-corner
-model on their site, but they're actually shipping the new version.  If you install the Pinscape software on the new board, it
-will **appear** to install successfully, but the Config Tool and other software on the PC won't be able to connect to it,
-presumably due to some as-yet unknown change they made to the US hardware on the board.
+for an empty set of pads labeled **ACCEL**.  The distributors haven't updated their product images yet, so you can't trust
+that - in all likelihood, you'll get the new version when you order no matter what the product page says.  If you install
+the Pinscape software on the new board, it will **appear** to install successfully, but the Config Tool and other software
+on the PC won't be able to connect to it.
   
 Please consider the new [Pinscape Pico](https://github.com/mjrgh/PinscapePico/) as an alternative. That's
 a new generation of the Pinscape software designed from the ground up for the Raspberry Pi Pico.
